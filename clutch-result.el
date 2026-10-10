@@ -96,6 +96,24 @@ Explicit SQL row limits are preserved."
   :type '(choice (const :tag "CSV" csv) (const :tag "TSV" tsv))
   :group 'clutch)
 
+(defcustom clutch-export-null-value-text ""
+  "Text written for SQL NULL in CSV/TSV copy and export.
+This text is never quoted.  Choose a marker without delimiters, double
+quotes or line breaks, and configure the importer to recognize it."
+  :type 'string
+  :group 'clutch)
+
+(defcustom clutch-export-quote-values 'when-needed
+  "Double-quote policy for CSV/TSV copy and export, including headers.
+`when-needed' quotes text containing delimiters, quotes or line breaks,
+or matching `clutch-export-null-value-text'.  `always' quotes every
+non-NULL value.  `never' writes values without quoting or escaping and
+can lose field boundaries and the distinction between NULL and text."
+  :type '(choice (const :tag "When needed" when-needed)
+                 (const :tag "Always" always)
+                 (const :tag "Never" never))
+  :group 'clutch)
+
 (defcustom clutch-export-default-directory nil
   "Default directory offered for file exports.
 When nil, use the current buffer's `default-directory'."
@@ -3113,13 +3131,15 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
 
 (defun clutch--delimited-escape (val delimiter)
   "Return VAL escaped for text separated by DELIMITER.
-SQL NULL is an unquoted empty field; empty text is quoted."
+Use `clutch-export-null-value-text' and `clutch-export-quote-values'."
   (let ((s (clutch--format-value (clutch-db-require-complete-value val))))
     (cond
-     ((null val) "")
-     ((or (string-empty-p s)
-          (string-match-p "[\"\r\n]" s)
-          (string-match-p (regexp-quote (char-to-string delimiter)) s))
+     ((null val) clutch-export-null-value-text)
+     ((or (eq clutch-export-quote-values 'always)
+          (and (eq clutch-export-quote-values 'when-needed)
+               (or (equal s clutch-export-null-value-text)
+                   (string-match-p "[\"\r\n]" s)
+                   (string-match-p (regexp-quote (char-to-string delimiter)) s))))
       (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s)))
      (t s))))
 

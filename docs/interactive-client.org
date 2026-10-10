@@ -85,7 +85,16 @@ Without an explicit SQL row limit, query export and all-row result export retrie
 
 The =e= exporter uses the same Transient interaction model as =c=. Copy identifies the current-cell or selected-cell scope; Export identifies all result rows and explicitly notes when a local filter is ignored. Export does not adopt the selection or the =/= filter. Header defaults to Yes for CSV and TSV, while Destination defaults to Clipboard and can be switched to File before choosing a format. For pageable queries the exporter retrieves every page rather than stopping at the displayed row limit; SQL =WHERE= and explicit =LIMIT=, =OFFSET=, =TOP= and =FETCH= clauses remain part of the query. Ordinary column, table and alias names such as =top= or =fetch= do not disable pagination. CSV and TSV files prompt for an encoding and default to UTF-8 with BOM for spreadsheet compatibility.
 
-CSV/TSV copy and export write SQL NULL as an unquoted empty field, an empty string as =""=, and literal =NULL= text as =NULL=. This keeps the three values distinct in the output; importers must recognize this convention rather than treating every empty field as empty text. It is independent of encoding and applies to both query and result export. Oracle already treats empty character strings as SQL NULL, so they export as empty fields there.
+By default, CSV/TSV copy and export write SQL NULL as an unquoted empty field, an empty string as =""=, and literal =NULL= text as =NULL=. This keeps the three values distinct in the output; importers must recognize this convention rather than treating every empty field as empty text. It is independent of encoding and applies to both query and result export. Oracle already treats empty character strings as SQL NULL, so they use the NULL representation there.
+
+=clutch-export-null-value-text= changes the unquoted NULL marker, and =clutch-export-quote-values= chooses =when-needed= (the default), =always= or =never=. Double quotes are doubled inside quoted fields. With =when-needed=, ordinary text matching the NULL marker is quoted too; with =always=, every non-NULL value, including column headers, is quoted. =never= disables quoting and escaping, so separators or line breaks can split values, and text matching the marker becomes indistinguishable from SQL NULL. Choose a NULL marker without separators, double quotes or line breaks, and configure the importer to match. These settings affect CSV/TSV copying as well as both file exporters; they do not change result display or insert-form import. For example:
+
+#+begin_src emacs-lisp
+(setq clutch-export-null-value-text "NULL"
+      clutch-export-quote-values 'when-needed)
+#+end_src
+
+This writes SQL NULL as =NULL=, empty text as an unquoted empty field, and literal =NULL= text as ="NULL"=.
 
 The =/= filter searches only the loaded page. The footer preserves the unfiltered page range and total, and separately reports how many page rows match. A zero-match page explains how to change or clear the filter. Transaction state and staged counts precede row statistics and sorting so long secondary labels do not hide them first; long sort/filter expressions are shortened with full hover text.
 
@@ -535,6 +544,8 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-export-default-format= sets the format offered by query export (=csv= or =tsv=).
 - =clutch-export-default-directory= sets the offered file export directory; =nil= uses the current buffer's directory.
 - =clutch-export-default-file-name= sets the offered file name; =nil= uses the format's default.
+- =clutch-export-null-value-text= sets the unquoted CSV/TSV NULL marker (an empty field by default).
+- =clutch-export-quote-values= chooses =when-needed=, =always= or =never= for CSV/TSV values and headers.
 - =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through 10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
 - =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.
