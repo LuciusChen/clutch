@@ -6681,6 +6681,32 @@ a word that ends a whole rollback, such as CHAIN."
        (when-let* ((buffer (get-buffer " *transient*")))
          (kill-buffer buffer))))))
 
+(ert-deftest clutch-test-menu-text-stays-ascii ()
+  "Transient menu text stays ASCII so each column lines up.
+Transient pads a column by `string-width', which counts an arrow or an
+ellipsis as one column even where the font draws it wider, as
+PragmataPro does, shifting the rest of that row."
+  (let ((dir (file-name-directory (locate-library "clutch.el")))
+        texts wide)
+    (dolist (file (directory-files dir t "\\`clutch.*\\.el\\'"))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (while (re-search-forward "^(transient-define-prefix " nil t)
+          (goto-char (match-beginning 0))
+          (cl-labels ((walk (x)
+                        (cond ((stringp x)
+                               (push x texts)
+                               (when (string-match-p "[^[:ascii:]]" x)
+                                 (push x wide)))
+                              ((consp x) (walk (car x)) (walk (cdr x)))
+                              ((vectorp x) (mapc #'walk x)))))
+            ;; The menu's groups are vectors, unlike its docstring.
+            (dolist (part (read (current-buffer)))
+              (when (vectorp part)
+                (walk part)))))))
+    (should texts)
+    (should-not wide)))
+
 (ert-deftest clutch-test-document-copy-uses-backend-mutation-snippet-generic ()
   "Document helper copy should use backend-owned mutation snippet generation."
   (clutch-test--with-native-document-result-buffer
