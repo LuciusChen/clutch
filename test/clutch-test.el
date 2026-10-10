@@ -10403,8 +10403,7 @@ and a namespace a new connection cannot return to is not retried."
                     ((symbol-function 'clutch--try-reconnect)
                      (lambda ()
                        (cl-incf reconnects)
-                       (setq clutch-connection 'new-conn)
-                       t)))
+                       (setq clutch-connection 'new-conn))))
             (let ((outcome
                    (clutch-test--await-outcome
                     (lambda (k)
@@ -10452,8 +10451,7 @@ and a namespace a new connection cannot return to is not retried."
                      (make-clutch-db-result :affected-rows 1))))
                 ((symbol-function 'clutch--try-reconnect)
                  (lambda ()
-                   (setq clutch-connection 'new-conn)
-                   t)))
+                   (setq clutch-connection 'new-conn))))
         (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
         (should (equal (nreverse executions)
                        '(("UPDATE a SET n = 1" old-conn)
@@ -10524,7 +10522,8 @@ them can move the buffer to another connection before the reply arrives."
   "A batch statement that fails after its buffer moved should only be reported.
 The disconnect that moved the buffer closed the connection, so the statement
 in flight failed with an unknown outcome; drawing that put an error page in
-a result buffer of another connection, or of none."
+a result buffer of another connection, or of none.  A statement that
+succeeds after its buffer moved leaves the marker of one the buffer runs."
   (with-temp-buffer
     (setq-local clutch-connection 'conn-a)
     (clutch-test--with-async-statements finishes
@@ -10556,10 +10555,33 @@ a result buffer of another connection, or of none."
                       "\\`1 statement executed, then stopped: the connection changed; statement 2: .*outcome is unknown"
                       text))
                    messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+  (with-temp-buffer
+    (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\nSELECT 3;")
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (if conn (symbol-name conn) "none")))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements
+         (clutch--split-statement-specs (buffer-substring 1 41) 1))
+        (setq-local clutch-connection 'conn-b)
+        (clutch--execute-and-mark "SELECT 3;" 41 (point-max))
+        ;; conn-a's first statement succeeds while SELECT 3 runs on conn-b.
+        (funcall (cdr (car (last finishes)))
+                 (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (string-prefix-p
+                 "Running"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
 
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
-  "A physical reconnect should not reuse the old connection's identity plan."
+  "A physical reconnect should not reuse the old connection's identity plan.
+After a reply that came once the statement started, a reconnect or a
+retry that fails before it runs ends the statement with its error.  The
+retry runs only on the connection its reconnect built: a buffer that the
+reconnect's wait moved elsewhere is not retried on, and a statement it
+started there keeps its marker."
   (with-temp-buffer
     (let ((clutch-connection 'old-conn)
           (old-live t)
@@ -10587,8 +10609,7 @@ a result buffer of another connection, or of none."
                      (make-clutch-db-result :columns ["id"] :rows '((1))))))
                 ((symbol-function 'clutch--try-reconnect)
                  (lambda ()
-                   (setq clutch-connection 'new-conn)
-                   t)))
+                   (setq clutch-connection 'new-conn))))
         (let ((outcome
                (clutch-test--await-outcome
                 (lambda (k)
@@ -10600,7 +10621,109 @@ a result buffer of another connection, or of none."
           (should (equal (nreverse executions)
                          '((old-conn "stale-plan")
                            (new-conn "fresh-plan"))))
-          (should (equal prepared-connections '(new-conn))))))))
+          (should (equal prepared-connections '(new-conn)))))))
+  (dolist (failing '(reconnect retry))
+    (with-temp-buffer
+      (insert "SELECT 1")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (let ((alive t) shown)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or alive (not (eq conn 'async-conn)))))
+                    ((symbol-function 'clutch--try-reconnect)
+                     (lambda ()
+                       (when (eq failing 'reconnect)
+                         (signal 'clutch-db-error '("Connection refused")))
+                       (setq-local clutch-connection 'new-conn)))
+                    ((symbol-function 'clutch-db-query-async)
+                     (lambda (conn sql callback)
+                       (when (eq conn 'new-conn)
+                         (error "Dispatch failed"))
+                       (push (cons sql callback) finishes)
+                       t))
+                    ((symbol-function 'clutch-result--display-error)
+                     (lambda (&rest args) (setq shown args) nil)))
+            (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+            (setq alive nil)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-execution-not-started "connection invalidated"))
+            ;; The reply is handled in a timer, outside any command.
+            (let ((debug-on-error nil))
+              (ert-run-idle-timers))
+            (should-not (clutch-db--foreground-busy-p 'async-conn))
+            (should-not (clutch-db--foreground-busy-p 'new-conn))
+            (should-not clutch--execution-start-time)
+            (should (string-prefix-p
+                     "Last failed"
+                     (overlay-get clutch--executed-sql-overlay 'help-echo)))
+            (should (string-match-p (if (eq failing 'reconnect)
+                                        "Connection refused"
+                                      "Dispatch failed")
+                                    (format "%S" shown))))))))
+  (pcase-dolist (`(,reconnects ,starts) '((nil t) (t t) (t nil)))
+    (with-temp-buffer
+      (insert "SELECT 1;\nSELECT 2;")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (let ((source (current-buffer)) (alive t) shown)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or alive (not (eq conn 'async-conn)))))
+                    ((symbol-function 'clutch--connection-key) #'symbol-name)
+                    ((symbol-function 'clutch--try-reconnect)
+                     ;; The reconnect's wait runs a timer that moves the
+                     ;; buffer to conn-b, and maybe starts SELECT 2 there.
+                     (lambda ()
+                       (let (moved)
+                         (run-with-timer
+                          0 nil (lambda ()
+                                  (with-current-buffer source
+                                    (setq-local clutch-connection 'conn-b)
+                                    (when starts
+                                      (clutch--execute-and-mark "SELECT 2;" 11 20)))
+                                  (setq moved t)))
+                         (while (not moved)
+                           (accept-process-output nil 0.01)))
+                       (if reconnects
+                           'new-conn
+                         (signal 'clutch-db-error '("Reconnect failed")))))
+                    ((symbol-function 'clutch-result--display-error)
+                     (lambda (&rest args) (setq shown args) nil)))
+            (clutch--execute-and-mark "SELECT 1;" 1 10)
+            (setq alive nil)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-execution-not-started "connection invalidated"))
+            (let ((debug-on-error nil))
+              (ert-run-idle-timers))
+            (should-not shown)
+            (should (= (length finishes) (if starts 2 1)))
+            (should-not (clutch-db--foreground-busy-p 'async-conn))
+            (should (string-prefix-p
+                     (if starts "Running" "Last failed")
+                     (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
+  (let ((source (generate-new-buffer " *clutch-retry-killed*")))
+    (with-current-buffer source
+      (insert "SELECT 1;")
+      (setq-local clutch-connection 'async-conn))
+    (clutch-test--with-async-statements finishes
+      (let ((alive t))
+        (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                   (lambda (conn) (or alive (not (eq conn 'async-conn)))))
+                  ((symbol-function 'clutch--try-reconnect)
+                   ;; The reconnect's wait runs a timer that kills the buffer.
+                   (lambda ()
+                     (run-with-timer 0 nil #'kill-buffer source)
+                     (while (buffer-live-p source)
+                       (accept-process-output nil 0.01))
+                     t)))
+          (with-current-buffer source
+            (clutch--execute-and-mark "SELECT 1;" 1 10))
+          (setq alive nil)
+          (funcall (cdar finishes) nil
+                   '(clutch-db-execution-not-started "connection invalidated"))
+          (let ((debug-on-error nil))
+            (ert-run-idle-timers))
+          (should (= (length finishes) 1))
+          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
 
 (defmacro clutch-test--with-async-statements (finishes-var &rest body)
   "Run BODY with statements finishing only when callbacks in FINISHES-VAR run.
@@ -10828,7 +10951,8 @@ reconnecting from it failed with \"Connection params require :backend\"."
 (ert-deftest clutch-test-statement-reply-after-its-buffer-moved-is-only-reported ()
   "A statement's reply after its buffer left its connection should only be reported.
 Drawing it put the old connection's error page in the result buffer that the
-buffer's new connection names, and bound that buffer to the old connection."
+buffer's new connection names, and bound that buffer to the old connection.
+Nor does it mark its statement over one the buffer now runs."
   (with-temp-buffer
     (setq-local clutch-connection 'conn-a)
     (clutch-test--with-async-statements finishes
@@ -10854,7 +10978,28 @@ buffer's new connection names, and bound that buffer to the old connection."
           (should-not rendered)
           (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
                            messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;")
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (if conn (symbol-name conn) "none")))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-and-mark "SELECT 1;" 1 10)
+        (setq-local clutch-connection 'conn-b)
+        (clutch--execute-and-mark "SELECT 2;" 11 20)
+        ;; conn-a answers while the buffer runs SELECT 2 on conn-b.
+        (funcall (cdr (car (last finishes)))
+                 (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (string-prefix-p
+                 "Running"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))
+        (should (equal (buffer-substring-no-properties
+                        (overlay-start clutch--executed-sql-overlay)
+                        (overlay-end clutch--executed-sql-overlay))
+                       "SELECT 2;"))))))
 
 (ert-deftest clutch-test-redis-select-moves-the-session-to-its-database ()
   "A Redis SELECT should move the session to the database it selects.
