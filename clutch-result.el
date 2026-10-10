@@ -4211,7 +4211,7 @@ Selects JSON, XML, or binary string view based on column type and content."
      :if (lambda () (clutch-result--action-supported-p 'sql-mutation))
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("i" "Stage insert"      clutch-result-insert-row)
-    ("I" "Clone row → insert" clutch-clone-row-to-insert)
+    ("I" "Clone row to insert" clutch-clone-row-to-insert)
     ("d" "Stage delete"      clutch-result-delete-rows)
     ("C-c C-c" "Submit staged" clutch-result-submit
      :if clutch-result--pending-changes-p)
@@ -4226,8 +4226,8 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("v" "Full value" clutch-result-view-value)
     ("?" "Column info" clutch-result-column-info)]
    ["Copy / Export"
-    ("c" "Copy…" clutch-result-copy-dispatch)
-    ("e" "Export…" clutch-result-export)
+    ("c" "Copy..." clutch-result-copy-dispatch)
+    ("e" "Export..." clutch-result-export)
     ("k" "Copy agent context" clutch-copy-context-for-agent)]
     ["Layout"
      ("=" "Widen column"      clutch-result-widen-column)
@@ -4252,7 +4252,7 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
     ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
      :inapt-if-not clutch-record--pending-changes-p)
-    ("I" "Clone row → insert" clutch-clone-row-to-insert)]
+    ("I" "Clone row to insert" clutch-clone-row-to-insert)]
    ["Other"
     ("g" "Refresh" clutch-record-refresh)
     ("q" "Quit"    quit-window)]])
