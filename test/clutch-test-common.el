@@ -404,6 +404,75 @@ them does.  Without TO, only move point to FROM's cell."
     (apply #'clutch--goto-cell to)
     (forward-char 1)))
 
+;;;; Helpers shared by the result, edit and query tests
+
+(defun clutch-test--transient-suffix-for-key (prefix key)
+  "Return the suffix under PREFIX bound to KEY."
+  (cl-find-if
+   (lambda (suffix)
+     (and (slot-boundp suffix 'key)
+          (equal (oref suffix key) key)))
+   (transient-suffixes prefix)))
+
+(defmacro clutch-test--with-sqlite-result (bindings setup sql &rest body)
+  "Run SQL over SETUP in a fresh SQLite console, then evaluate BODY.
+BINDINGS is (CONN RESULT).  SETUP is a list of SQL statements.
+BODY runs in RESULT with its window selected.  Close the connection and
+both buffers, and stop the refresh timer, even when BODY fails."
+  (declare (indent 3) (debug ((symbolp symbolp) form form body)))
+  (cl-destructuring-bind (conn result) bindings
+    (let ((source (make-symbol "source")))
+      `(progn
+         (skip-unless (sqlite-available-p))
+         (let* ((,conn (clutch-db-sqlite-connect '(:database ":memory:")))
+                (,source (generate-new-buffer " *clutch-sqlite-source*"))
+                (clutch--execution-refresh-timer nil)
+                ,result)
+           (unwind-protect
+               (save-window-excursion
+                 (dolist (statement ,setup)
+                   (clutch-db-query ,conn statement))
+                 (set-window-buffer (selected-window) ,source)
+                 (with-current-buffer ,source
+                   (clutch-mode)
+                   (setq-local clutch-connection ,conn
+                               clutch--connection-params
+                               '(:backend sqlite :database ":memory:"))
+                   (insert ,sql)
+                   (clutch-execute-buffer)
+                   (setq ,result clutch--last-result-buffer))
+                 (set-window-buffer (selected-window) ,result)
+                 (with-current-buffer ,result ,@body))
+             (clutch--execution-refresh-stop)
+             (when (buffer-live-p ,result) (kill-buffer ,result))
+             (when (buffer-live-p ,source) (kill-buffer ,source))
+             (when (clutch-db-live-p ,conn) (clutch-db-disconnect ,conn)))
+           (should-not clutch--execution-refresh-timer))))))
+
+(defmacro clutch-test--with-pop-to-buffer-capture (var &rest body)
+  "Bind VAR to the buffer passed to `pop-to-buffer' while running BODY."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let (,var)
+     (unwind-protect
+         (cl-letf (((symbol-function 'pop-to-buffer)
+                    (lambda (buf &rest _args)
+                      (setq ,var buf)
+                      buf)))
+           ,@body)
+       (when (and ,var (buffer-live-p ,var))
+         (kill-buffer ,var)))))
+
+(defmacro clutch-test--with-insert-result-buffer (var spec &rest body)
+  "Bind VAR to a result buffer initialized for insert tests by SPEC."
+  (declare (indent 2))
+  (let ((normalized-spec spec))
+    (unless (memq :connection normalized-spec)
+      (setq normalized-spec (append normalized-spec '(:connection nil))))
+    (unless (memq :rows normalized-spec)
+      (setq normalized-spec (append normalized-spec '(:rows nil))))
+    `(clutch-test--with-result-state-buffer ,var ,normalized-spec
+       ,@body)))
+
 (provide 'clutch-test-common)
 
 ;;; clutch-test-common.el ends here
