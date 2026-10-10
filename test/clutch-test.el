@@ -5547,6 +5547,9 @@ statement, so the refusal has to come before the prompt and the batch."
           (advice-remove 'clutch-db-call-with-atomic-batch 'test-batch)))
       (should-not prompted)
       (should-not batched)
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT id, name FROM t ORDER BY id"))
+                     '((1 "a") (2 "b"))))
       (should (equal clutch--pending-edits pending)))))
 
 (ert-deftest clutch-test-result-refuses-writes-after-its-source-moved ()
