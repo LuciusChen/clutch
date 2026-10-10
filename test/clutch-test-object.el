@@ -95,20 +95,13 @@
   "Return rendered object action menu text for ENTRY.
 CONN is bound as the current connection.  SUPPORTED-ACTIONS, when non-nil,
 controls backend-specific object action availability."
-  (when-let* ((buf (get-buffer " *transient*")))
-    (kill-buffer buf))
-  (unwind-protect
-      (with-temp-buffer
-        (setq-local clutch-connection conn)
-        (cl-letf (((symbol-function 'clutch-db-object-action-supported-p)
-                   (lambda (_conn _entry action-id)
-                     (memq action-id supported-actions))))
-          (let ((clutch--object-action-entry entry))
-            (transient-setup 'clutch-object-actions-menu)
-            (with-current-buffer " *transient*"
-              (buffer-string)))))
-    (when-let* ((buf (get-buffer " *transient*")))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (setq-local clutch-connection conn)
+    (cl-letf (((symbol-function 'clutch-db-object-action-supported-p)
+               (lambda (_conn _entry action-id)
+                 (memq action-id supported-actions))))
+      (let ((clutch--object-action-entry entry))
+        (clutch-test--transient-menu-text 'clutch-object-actions-menu)))))
 
 (defun clutch-test-object--capture-collection-action
     (command action-id payload &optional conn backend)

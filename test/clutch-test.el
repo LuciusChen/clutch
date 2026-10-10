@@ -6560,68 +6560,57 @@ a word that ends a whole rollback, such as CHAIN."
   "Export choices should match SQL, document, and key/value result surfaces."
   (cl-labels
       ((render-menu ()
-         (when-let* ((buffer (get-buffer " *transient*")))
-           (kill-buffer buffer))
-         (transient-setup 'clutch-result-export)
-         (with-current-buffer " *transient*"
-           (should (string-match-p "Export all result rows" (buffer-string)))
-           (buffer-string)))
+         (let ((menu (clutch-test--transient-menu-text 'clutch-result-export)))
+           (should (string-match-p "Export all result rows" menu))
+           menu))
        (check-menu (menu present absent)
          (dolist (label present)
            (should (string-match-p (regexp-quote label) menu)))
          (dolist (label absent)
            (should-not (string-match-p (regexp-quote label) menu)))))
-    (unwind-protect
-        (progn
-          (clutch-test--with-native-document-result-buffer
-            (cl-letf (((symbol-function
-                        'clutch-db-document-mutation-supported-p)
-                       (lambda (_conn action) (eq action 'insert-many))))
-              (check-menu (render-menu)
-                          '("CSV" "TSV" "Insert many")
-                          '("INSERT SQL" "UPDATE SQL"))))
-          (with-temp-buffer
-            (setq-local clutch-connection 'sql-conn
-                        clutch--connection-params nil)
-            (clutch-test--with-connection-data-model
-                ('sql-conn 'mysql 'relational)
-              (check-menu (render-menu)
-                          '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
-                          '("Insert many"))))
-          (with-temp-buffer
-            (setq-local clutch-connection 'redis-conn
-                        clutch--connection-params nil)
-            (clutch-test--with-connection-data-model
-                ('redis-conn 'redis 'key-value)
-              (check-menu (render-menu)
-                          '("CSV" "TSV")
-                          '("INSERT SQL" "UPDATE SQL"
-                            "Insert many")))))
-      (when-let* ((buffer (get-buffer " *transient*")))
-        (kill-buffer buffer)))))
+    (clutch-test--with-native-document-result-buffer
+      (cl-letf (((symbol-function
+                  'clutch-db-document-mutation-supported-p)
+                 (lambda (_conn action) (eq action 'insert-many))))
+        (check-menu (render-menu)
+                    '("CSV" "TSV" "Insert many")
+                    '("INSERT SQL" "UPDATE SQL"))))
+    (with-temp-buffer
+      (setq-local clutch-connection 'sql-conn
+                  clutch--connection-params nil)
+      (clutch-test--with-connection-data-model
+          ('sql-conn 'mysql 'relational)
+        (check-menu (render-menu)
+                    '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
+                    '("Insert many"))))
+    (with-temp-buffer
+      (setq-local clutch-connection 'redis-conn
+                  clutch--connection-params nil)
+      (clutch-test--with-connection-data-model
+          ('redis-conn 'redis 'key-value)
+        (check-menu (render-menu)
+                    '("CSV" "TSV")
+                    '("INSERT SQL" "UPDATE SQL"
+                      "Insert many"))))))
 
 (ert-deftest clutch-test-copy-export-menus-show-data-scope ()
   "Menus distinguish current cell, selection and locally filtered export."
   (clutch-test--with-result-state
    (:connection nil :connection-params '(:backend sqlite) :render t)
    (let ((transient-mark-mode t))
-     (unwind-protect
-         (progn
-           (goto-char (point-min))
-           (transient-setup 'clutch-result-copy-dispatch)
-           (with-current-buffer " *transient*"
-             (should (string-match-p "Copy current cell" (buffer-string))))
-           (push-mark (point-max) nil t)
-           (transient-setup 'clutch-result-copy-dispatch)
-           (with-current-buffer " *transient*"
-             (should (string-match-p "Copy selected cells" (buffer-string))))
-           (deactivate-mark)
-           (setq-local clutch--filter-pattern "alice")
-           (transient-setup 'clutch-result-export)
-           (with-current-buffer " *transient*"
-             (should (string-match-p "ignores local filter" (buffer-string)))))
-       (when-let* ((buffer (get-buffer " *transient*")))
-         (kill-buffer buffer))))))
+     (goto-char (point-min))
+     (should (string-match-p "Copy current cell"
+                             (clutch-test--transient-menu-text
+                              'clutch-result-copy-dispatch)))
+     (push-mark (point-max) nil t)
+     (should (string-match-p "Copy selected cells"
+                             (clutch-test--transient-menu-text
+                              'clutch-result-copy-dispatch)))
+     (deactivate-mark)
+     (setq-local clutch--filter-pattern "alice")
+     (should (string-match-p "ignores local filter"
+                             (clutch-test--transient-menu-text
+                              'clutch-result-export))))))
 
 (ert-deftest clutch-test-menu-text-stays-ascii ()
   "Transient menu text stays ASCII so each column lines up.
@@ -7832,26 +7821,17 @@ result's current rows."
   (with-temp-buffer
     (cl-letf (((symbol-function 'clutch-result--action-supported-p)
                (lambda (action) (eq action 'sql-mutation))))
-        (cl-labels ((render-menu ()
-                      (when-let* ((buffer (get-buffer " *transient*")))
-                        (kill-buffer buffer))
-                      (transient-setup 'clutch-result-dispatch)
-                      (with-current-buffer " *transient*"
-                        (buffer-string))))
-          (unwind-protect
-              (let ((labels '("Submit staged"
-                              "Discard staged at point"
-                              "Copy staged SQL"
-                              "Save staged SQL"))
-                    (menu (render-menu)))
-                (dolist (label labels)
-                  (should-not (string-match-p (regexp-quote label) menu)))
-                (setq-local clutch--pending-edits '(pending))
-                (setq menu (render-menu))
-                (dolist (label labels)
-                  (should (string-match-p (regexp-quote label) menu))))
-            (when-let* ((buffer (get-buffer " *transient*")))
-              (kill-buffer buffer)))))))
+      (let ((labels '("Submit staged"
+                      "Discard staged at point"
+                      "Copy staged SQL"
+                      "Save staged SQL"))
+            (menu (clutch-test--transient-menu-text 'clutch-result-dispatch)))
+        (dolist (label labels)
+          (should-not (string-match-p (regexp-quote label) menu)))
+        (setq-local clutch--pending-edits '(pending))
+        (setq menu (clutch-test--transient-menu-text 'clutch-result-dispatch))
+        (dolist (label labels)
+          (should (string-match-p (regexp-quote label) menu)))))))
 
 (ert-deftest clutch-test-filter-transient-descriptions-show-current-values ()
   "Result filter labels should expose inactive and active values."

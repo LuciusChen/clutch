@@ -104,6 +104,20 @@ the default, which is what a user who just presses RET gets."
        ,@body
        (should-not clutch-test--minibuffer-answers))))
 
+(defun clutch-test--transient-menu-text (prefix)
+  "Return the text of PREFIX's menu, opened from the current buffer.
+Open the menu and quit it with keys, as a user would: its descriptions
+then see this buffer, and Transient's command and quit handling does not
+outlast the caller."
+  (save-window-excursion
+    (switch-to-buffer (current-buffer))
+    (let ((suggest-key-bindings nil))
+      (execute-kbd-macro (vconcat [?\M-x] (symbol-name prefix) [return])))
+    (unwind-protect
+        (with-current-buffer " *transient*"
+          (buffer-string))
+      (execute-kbd-macro (kbd "C-g")))))
+
 (defun clutch-test--await-outcome (start)
   "Call START with a continuation and return the value passed to it."
   (let (outcome done)
