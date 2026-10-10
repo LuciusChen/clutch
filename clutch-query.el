@@ -1339,23 +1339,44 @@ already confirmed SQL."
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
-       (if (and (not no-idle-retry-p)
-                (not unresolved)
-                (eq (car-safe (plist-get outcome :error))
-                    'clutch-db-execution-not-started)
-                (buffer-live-p source-buffer)
-                (with-current-buffer source-buffer
-                  (and (eq connection clutch-connection)
-                       (not (clutch--connection-alive-p connection))
-                       (not (clutch-db-unreachable-namespace connection))
-                       (clutch--try-reconnect))))
-           (with-current-buffer source-buffer
-             (let ((retry-context (copy-sequence result-context)))
-               (when retry-context
-                 (cl-remf retry-context :row-identity-prep))
-               (clutch--execute-statement-attempt
-                sql clutch-connection present-result-p retry-context region k)))
-         (funcall k outcome))))))
+       (let (answered retry-conn (failed connection))
+         (cl-flet ((answer (outcome)
+                     (setq answered t)
+                     (funcall k outcome)))
+           ;; A reply runs this outside any command, so the reconnect or
+           ;; the retry failing before it answers ends the statement on
+           ;; the connection that failed.
+           (condition-case err
+               (if (and (not no-idle-retry-p)
+                        (not unresolved)
+                        (eq (car-safe (plist-get outcome :error))
+                            'clutch-db-execution-not-started)
+                        (buffer-live-p source-buffer)
+                        (with-current-buffer source-buffer
+                          (and (eq connection clutch-connection)
+                               (not (clutch--connection-alive-p connection))
+                               (not (clutch-db-unreachable-namespace connection))
+                               (setq retry-conn (clutch--try-reconnect))))
+                        ;; The reconnect's wait can kill the buffer or move
+                        ;; it to another connection, which the SQL is not for.
+                        (buffer-live-p source-buffer)
+                        (eq (buffer-local-value 'clutch-connection source-buffer)
+                            retry-conn))
+                   (with-current-buffer source-buffer
+                     (setq failed retry-conn)
+                     (let ((retry-context (copy-sequence result-context)))
+                       (when retry-context
+                         (cl-remf retry-context :row-identity-prep))
+                       (clutch--execute-statement-attempt
+                        sql retry-conn present-result-p retry-context region
+                        #'answer)))
+                 (answer outcome))
+             (error
+              (if answered
+                  (signal (car err) (cdr err))
+                (answer (plist-put
+                         (plist-put (copy-sequence outcome) :error err)
+                         :connection failed)))))))))))
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
@@ -1537,14 +1558,23 @@ executed or failed."
            :source-buffer source-buffer)
         (clutch-result--display result sql elapsed)))))
 
+(defun clutch--statement-running-here-p ()
+  "Return non-nil while a statement of this buffer is running on its connection.
+The buffer's status marker then belongs to that statement."
+  (when-let* ((entry (and clutch-connection
+                          (gethash clutch-connection clutch--running-queries))))
+    (eq (plist-get entry :buffer) (current-buffer))))
+
 (defun clutch--report-moved-outcome (sql outcome &optional region)
   "Report OUTCOME of SQL, whose buffer has left the statement's connection.
 REGION, when non-nil, is marked with the outcome, which the echo area also
-gives, and a failure is recorded for diagnostics.  No result or error page
+gives, unless the buffer now runs a statement whose marker that would
+replace, and a failure is recorded for diagnostics.  No result or error page
 is drawn: the buffer's result buffer now belongs to another connection, or
 to none.  Return the text the echo area gives."
   (with-current-buffer (plist-get outcome :source-buffer)
     (let* ((connection (plist-get outcome :connection))
+           (region (and (not (clutch--statement-running-here-p)) region))
            (text
             (if-let* ((err (plist-get outcome :error)))
                 (let ((summary (cdr (clutch--remember-execute-error
@@ -1834,7 +1864,9 @@ Stops and reports on the first error."
                (cl-incf done)
                (when region
                  (with-current-buffer source-buffer
-                   (clutch--mark-executed-sql-region (car region) (cdr region)))))
+                   (unless (clutch--statement-running-here-p)
+                     (clutch--mark-executed-sql-region
+                      (car region) (cdr region))))))
              (report-complete
               (concat ", then stopped: the connection changed"
                       (and failure
