@@ -1552,14 +1552,23 @@ executed or failed."
            :source-buffer source-buffer)
         (clutch-result--display result sql elapsed)))))
 
+(defun clutch--statement-running-here-p ()
+  "Return non-nil while a statement of this buffer is running on its connection.
+The buffer's status marker then belongs to that statement."
+  (when-let* ((entry (and clutch-connection
+                          (gethash clutch-connection clutch--running-queries))))
+    (eq (plist-get entry :buffer) (current-buffer))))
+
 (defun clutch--report-moved-outcome (sql outcome &optional region)
   "Report OUTCOME of SQL, whose buffer has left the statement's connection.
 REGION, when non-nil, is marked with the outcome, which the echo area also
-gives, and a failure is recorded for diagnostics.  No result or error page
+gives, unless the buffer now runs a statement whose marker that would
+replace, and a failure is recorded for diagnostics.  No result or error page
 is drawn: the buffer's result buffer now belongs to another connection, or
 to none.  Return the text the echo area gives."
   (with-current-buffer (plist-get outcome :source-buffer)
     (let* ((connection (plist-get outcome :connection))
+           (region (and (not (clutch--statement-running-here-p)) region))
            (text
             (if-let* ((err (plist-get outcome :error)))
                 (let ((summary (cdr (clutch--remember-execute-error
@@ -1849,7 +1858,9 @@ Stops and reports on the first error."
                (cl-incf done)
                (when region
                  (with-current-buffer source-buffer
-                   (clutch--mark-executed-sql-region (car region) (cdr region)))))
+                   (unless (clutch--statement-running-here-p)
+                     (clutch--mark-executed-sql-region
+                      (car region) (cdr region))))))
              (report-complete
               (concat ", then stopped: the connection changed"
                       (and failure

@@ -10524,7 +10524,8 @@ them can move the buffer to another connection before the reply arrives."
   "A batch statement that fails after its buffer moved should only be reported.
 The disconnect that moved the buffer closed the connection, so the statement
 in flight failed with an unknown outcome; drawing that put an error page in
-a result buffer of another connection, or of none."
+a result buffer of another connection, or of none.  A statement that
+succeeds after its buffer moved leaves the marker of one the buffer runs."
   (with-temp-buffer
     (setq-local clutch-connection 'conn-a)
     (clutch-test--with-async-statements finishes
@@ -10556,7 +10557,25 @@ a result buffer of another connection, or of none."
                       "\\`1 statement executed, then stopped: the connection changed; statement 2: .*outcome is unknown"
                       text))
                    messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+  (with-temp-buffer
+    (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\nSELECT 3;")
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (if conn (symbol-name conn) "none")))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements
+         (clutch--split-statement-specs (buffer-substring 1 41) 1))
+        (setq-local clutch-connection 'conn-b)
+        (clutch--execute-and-mark "SELECT 3;" 41 (point-max))
+        ;; conn-a's first statement succeeds while SELECT 3 runs on conn-b.
+        (funcall (cdr (car (last finishes)))
+                 (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (string-prefix-p
+                 "Running"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
 
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan.
@@ -10869,7 +10888,8 @@ reconnecting from it failed with \"Connection params require :backend\"."
 (ert-deftest clutch-test-statement-reply-after-its-buffer-moved-is-only-reported ()
   "A statement's reply after its buffer left its connection should only be reported.
 Drawing it put the old connection's error page in the result buffer that the
-buffer's new connection names, and bound that buffer to the old connection."
+buffer's new connection names, and bound that buffer to the old connection.
+Nor does it mark its statement over one the buffer now runs."
   (with-temp-buffer
     (setq-local clutch-connection 'conn-a)
     (clutch-test--with-async-statements finishes
@@ -10895,7 +10915,28 @@ buffer's new connection names, and bound that buffer to the old connection."
           (should-not rendered)
           (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
                            messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;")
+    (setq-local clutch-connection 'conn-a)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch--connection-key)
+                 (lambda (conn) (if conn (symbol-name conn) "none")))
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-and-mark "SELECT 1;" 1 10)
+        (setq-local clutch-connection 'conn-b)
+        (clutch--execute-and-mark "SELECT 2;" 11 20)
+        ;; conn-a answers while the buffer runs SELECT 2 on conn-b.
+        (funcall (cdr (car (last finishes)))
+                 (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (string-prefix-p
+                 "Running"
+                 (overlay-get clutch--executed-sql-overlay 'help-echo)))
+        (should (equal (buffer-substring-no-properties
+                        (overlay-start clutch--executed-sql-overlay)
+                        (overlay-end clutch--executed-sql-overlay))
+                       "SELECT 2;"))))))
 
 (ert-deftest clutch-test-redis-select-moves-the-session-to-its-database ()
   "A Redis SELECT should move the session to the database it selects.
