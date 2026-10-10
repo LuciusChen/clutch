@@ -10559,7 +10559,9 @@ a result buffer of another connection, or of none."
           (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
 
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
-  "A physical reconnect should not reuse the old connection's identity plan."
+  "A physical reconnect should not reuse the old connection's identity plan.
+After a reply that came once the statement started, a reconnect or a
+retry that fails before it runs ends the statement with its error."
   (with-temp-buffer
     (let ((clutch-connection 'old-conn)
           (old-live t)
@@ -10600,7 +10602,46 @@ a result buffer of another connection, or of none."
           (should (equal (nreverse executions)
                          '((old-conn "stale-plan")
                            (new-conn "fresh-plan"))))
-          (should (equal prepared-connections '(new-conn))))))))
+          (should (equal prepared-connections '(new-conn)))))))
+  (dolist (failing '(reconnect retry))
+    (with-temp-buffer
+      (insert "SELECT 1")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (let ((alive t) shown)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or alive (not (eq conn 'async-conn)))))
+                    ((symbol-function 'clutch--try-reconnect)
+                     (lambda ()
+                       (when (eq failing 'reconnect)
+                         (signal 'clutch-db-error '("Connection refused")))
+                       (setq-local clutch-connection 'new-conn)
+                       t))
+                    ((symbol-function 'clutch-db-query-async)
+                     (lambda (conn sql callback)
+                       (when (eq conn 'new-conn)
+                         (error "Dispatch failed"))
+                       (push (cons sql callback) finishes)
+                       t))
+                    ((symbol-function 'clutch-result--display-error)
+                     (lambda (&rest args) (setq shown args) nil)))
+            (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+            (setq alive nil)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-execution-not-started "connection invalidated"))
+            ;; The reply is handled in a timer, outside any command.
+            (let ((debug-on-error nil))
+              (ert-run-idle-timers))
+            (should-not (clutch-db--foreground-busy-p 'async-conn))
+            (should-not (clutch-db--foreground-busy-p 'new-conn))
+            (should-not clutch--execution-start-time)
+            (should (string-prefix-p
+                     "Last failed"
+                     (overlay-get clutch--executed-sql-overlay 'help-echo)))
+            (should (string-match-p (if (eq failing 'reconnect)
+                                        "Connection refused"
+                                      "Dispatch failed")
+                                    (format "%S" shown)))))))))
 
 (defmacro clutch-test--with-async-statements (finishes-var &rest body)
   "Run BODY with statements finishing only when callbacks in FINISHES-VAR run.
