@@ -616,6 +616,7 @@ PragmataPro does, shifting the rest of that row."
 (ert-deftest clutch-test-document-copy-reports-an-ended-session ()
   "Document copy should explain an ended session and work on a lost one."
   (require 'mongodb)
+  (require 'clutch-mongodb)
   (let ((lost (make-clutch-mongodb-conn
                :client (make-mongodb-conn :closed t) :database "test"))
         kill-ring kill-ring-yank-pointer)
@@ -1663,6 +1664,7 @@ result's current rows."
 
 (ert-deftest clutch-test-query-dispatches-route-x-to-dwim ()
   "SQL and MongoDB dispatch menus should share the DWIM execute route."
+  (require 'clutch-document)
   (should (eq (lookup-key clutch-mode-map (kbd "C-c ?"))
               #'clutch-dispatch))
   (should (eq (lookup-key clutch-mongodb-mode-map (kbd "C-c ?"))
