@@ -10689,62 +10689,44 @@ and foreground reservation behind instead of presenting the result."
             (should (zerop (hash-table-count clutch--running-queries)))))))))
 
 (ert-deftest clutch-test-quit-in-the-command-loop-cancels-the-running-query ()
-  "A quit that reaches the command loop cancels the buffer's running query.
+  "A quit that reaches the command loop comes back as \\`C-g'.
 On MS-Windows a \\`C-g' typed while Emacs is busy quits whatever runs
-next, such as redisplay, instead of running `clutch-cancel-query-or-quit'.
-The query is cancelled once; another error, a second quit or a buffer
-without a running query changes nothing."
+next, such as redisplay, instead of being read as a key.  While the
+buffer's query runs, the quit is delivered as the key again, whose
+command cancels the query once.  Another error, a buffer without a
+running query, a buffer where \\`C-g' runs another command and a query
+already being cancelled get no key."
+  (should (advice-function-member-p #'clutch--cancel-running-query-on-quit
+                                    (default-value 'command-error-function)))
   (with-temp-buffer
+    (clutch-mode)
     (setq-local clutch-connection 'async-conn)
     (clutch-test--with-async-statements _finishes
-      (let (interrupts)
+      ;; Only this handler runs, not others on the global value, such as
+      ;; Transient's while a menu is open.
+      (let ((command-error-function #'ignore)
+            unread-command-events interrupts)
+        (add-function :after command-error-function
+                      #'clutch--cancel-running-query-on-quit)
         (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                   (lambda (conn) (push conn interrupts) t))
-                  ;; In batch mode the default handler kills Emacs.
-                  ((symbol-function 'command-error-default-function) #'ignore))
+                   (lambda (conn) (push conn interrupts) t)))
           (clutch--run-db-query-async 'async-conn "SELECT 1" nil #'ignore)
           (funcall command-error-function '(error "Other") "" nil)
           (with-temp-buffer
             (funcall command-error-function '(quit) "" nil))
-          (should-not interrupts)
-          (funcall command-error-function '(quit) "" nil)
-          (should (equal interrupts '(async-conn)))
-          (should (plist-get (gethash 'async-conn clutch--running-queries)
-                             :cancelling))
-          ;; Neither cancel again nor quit inside the error handler.
-          (funcall command-error-function '(quit) "" nil)
-          (should (equal interrupts '(async-conn))))))))
-
-(ert-deftest clutch-test-quit-cancel-request-gives-up-in-time ()
-  "A quit's cancel request that does not finish in time counts as refused.
-The error handler runs with quitting inhibited, and a backend may wait
-for the request without a deadline, as pgsql.el does for a zero connect
-timeout.  The query stays marked as cancelled, so its workflow stops."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements _finishes
-      (let ((clutch--quit-cancel-seconds 0.2)
-            messages start)
-        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                   (lambda (_conn)
-                     ;; Wait as a stalled connection does, running timers.
-                     (let ((end (+ (float-time) 5)))
-                       (while (< (float-time) end)
-                         (accept-process-output nil 0.05)))
-                     t))
-                  ((symbol-function 'command-error-default-function) #'ignore)
-                  ((symbol-function 'message)
-                   (lambda (format &rest args)
-                     (push (apply #'format-message format args) messages))))
-          (clutch--run-db-query-async 'async-conn "SELECT 1" nil #'ignore)
-          (setq start (float-time))
-          (let ((inhibit-quit t))
+          (with-temp-buffer
+            (setq-local clutch-connection 'other-conn)
+            (clutch--run-db-query-async 'other-conn "SELECT 2" nil #'ignore)
             (funcall command-error-function '(quit) "" nil))
-          (should (< (- (float-time) start) 2))
-          (should (plist-get (gethash 'async-conn clutch--running-queries)
-                             :cancelling))
-          (should (member "The query could not be cancelled; waiting for its result, then stopping"
-                          messages)))))))
+          (should-not unread-command-events)
+          (funcall command-error-function '(quit) "" nil)
+          (should (equal unread-command-events '(?\C-g)))
+          ;; The command loop reads it as the key.
+          (call-interactively
+           (key-binding (vector (pop unread-command-events))))
+          (should (equal interrupts '(async-conn)))
+          (funcall command-error-function '(quit) "" nil)
+          (should-not unread-command-events))))))
 
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
