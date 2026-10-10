@@ -8764,7 +8764,9 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
       (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-export-rejects-unsupported-statements ()
-  "Invalid exports and declined overwrites start no query or file writes."
+  "Invalid exports and declined overwrites start no query or file writes.
+An export is also refused before its prompts while a query runs on the
+connection."
   (dolist (sql '("SELECT 1; SELECT 2" "DELETE FROM t" "SELECT * INTO copy FROM t"
                  "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d" "-- comment"))
     (with-temp-buffer
@@ -8772,6 +8774,16 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
       (cl-letf (((symbol-function 'clutch--ensure-connection)
                  (lambda () (ert-fail "Invalid SQL reached the connection"))))
         (should-error (clutch-export-query (point-min) (point-max)) :type 'user-error))))
+  (with-temp-buffer
+    (insert "SELECT 1")
+    (setq-local clutch-connection 'fake-conn)
+    (let ((clutch--running-queries (make-hash-table :test 'eq)))
+      (puthash 'fake-conn (list :buffer (current-buffer)) clutch--running-queries)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "A running query reached the prompts"))))
+        (should (equal (cadr (should-error (clutch-export-query (point-min) (point-max))
+                                           :type 'user-error))
+                       "A query is running on this connection; C-g cancels it")))))
   (let ((path (make-temp-file "clutch-export-declined-")))
     (unwind-protect
         (with-temp-buffer
