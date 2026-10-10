@@ -2920,11 +2920,13 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 ;;;; SQL and document copy builders
 
-(defun clutch-result--build-insert-statements-for-rows (rows col-indices table)
-  "Return INSERT statements for ROWS using COL-INDICES into TABLE.
-A column that reads a source column under another name, such as an alias,
-is named after that source column."
+(defun clutch-result--build-insert-statements-for-rows (rows col-indices)
+  "Return INSERT statements for ROWS using COL-INDICES.
+They name the table as `clutch--insert-target-table' does.  A column
+that reads a source column under another name, such as an alias, is named
+after that source column."
   (let* ((conn      clutch-connection)
+         (table     (clutch--result-source-key))
          (col-names (cl-loop for cidx in col-indices
                              for name in (clutch--column-names-for-indices
                                           col-indices)
@@ -2933,8 +2935,7 @@ is named after that source column."
                                          name)))
          (cols      (mapconcat (lambda (c) (clutch-db-escape-identifier conn c))
                                col-names ", "))
-         (target    (and rows (clutch-db-sql-target-table
-                              conn table clutch--last-query))))
+         (target    (and rows (clutch--insert-target-table))))
     (cl-loop for row in rows
              for vals = (cl-mapcar
                          (lambda (cidx col-name)
@@ -2954,14 +2955,15 @@ is named after that source column."
   "Placeholder target table used for ambiguous INSERT copy/export output.")
 
 (defun clutch--insert-target-table ()
-  "Return a safe target table name for INSERT copy/export.
-Simple single-table result sets use the detected table name, including one
-read through CTEs.  Ambiguous results use `clutch--insert-placeholder-table'
-instead."
-  (or (when-let* ((sql clutch--last-query)
-                  (token (clutch-db-sql-simple-source-token sql)))
-        (clutch-db-sql-table-name token))
-      clutch--insert-placeholder-table))
+  "Return the table INSERT copy/export names, as a staged INSERT does.
+A result of one table, read directly or through CTEs, has a source
+table, named from the query before any server-side filter.  Ambiguous
+results use `clutch--insert-placeholder-table' instead."
+  (if-let* ((key (clutch--result-source-key)))
+      (clutch-result--insert-target clutch-connection key
+                                    (or clutch--base-query clutch--last-query))
+    (clutch-db-escape-identifier clutch-connection
+                                 clutch--insert-placeholder-table)))
 
 (defun clutch-result--selected-update-col-indices (row-identity col-indices op)
   "Return writable update column indices from ROW-IDENTITY, COL-INDICES, and OP.
@@ -3055,8 +3057,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
            ('csv (clutch--delimited-lines-for-rows rows col-indices ?,))
            ('org-table (clutch--org-table-lines-for-rows rows col-indices))
            ('insert
-            (clutch-result--build-insert-statements-for-rows
-             rows col-indices (clutch--insert-target-table)))
+            (clutch-result--build-insert-statements-for-rows rows col-indices))
            ('update
             (clutch-result--build-update-statements-for-rows
              rows col-indices "copy UPDATE SQL"))
@@ -3485,10 +3486,9 @@ returns, and it does not run when the export fails."
 
 (defun clutch--export-insert-content (rows)
   "Return INSERT statement export text for ROWS using current result metadata."
-  (let* ((table (clutch--insert-target-table))
-         (col-indices (clutch--visible-columns))
+  (let* ((col-indices (clutch--visible-columns))
          (stmts (clutch-result--build-insert-statements-for-rows
-                 rows col-indices table)))
+                 rows col-indices)))
     (if stmts
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
