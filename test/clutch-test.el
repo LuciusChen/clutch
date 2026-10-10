@@ -10575,13 +10575,13 @@ succeeds after its buffer moved leaves the marker of one the buffer runs."
                  "Running"
                  (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
 
-(ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
-  "A physical reconnect should not reuse the old connection's identity plan.
-After a reply that came once the statement started, a reconnect or a
-retry that fails before it runs ends the statement with its error.  The
-retry runs only on the connection its reconnect built: a buffer that the
-reconnect's wait moved elsewhere is not retried on, and a statement it
-started there keeps its marker."
+(ert-deftest clutch-test-idle-retry-runs-only-on-its-reconnected-connection ()
+  "An idle retry should run only on the connection its reconnect built.
+There it plans row identity anew rather than reuse the old connection's
+plan.  After a reply that came once the statement started, a reconnect or
+a retry that fails before it runs ends the statement with its error.  A
+buffer that the reconnect's wait killed or moved elsewhere is not retried
+on, and a statement it started elsewhere keeps its marker."
   (with-temp-buffer
     (let ((clutch-connection 'old-conn)
           (old-live t)

@@ -1339,13 +1339,14 @@ already confirmed SQL."
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
-       (let (answered retry-conn (failed connection))
+       (let (answered retry-conn)
          (cl-flet ((answer (outcome)
                      (setq answered t)
                      (funcall k outcome)))
            ;; A reply runs this outside any command, so the reconnect or
            ;; the retry failing before it answers ends the statement on
-           ;; the connection that failed.
+           ;; the connection that failed: the retry's, or else the one
+           ;; that could not reconnect.
            (condition-case err
                (if (and (not no-idle-retry-p)
                         (not unresolved)
@@ -1363,7 +1364,6 @@ already confirmed SQL."
                         (eq (buffer-local-value 'clutch-connection source-buffer)
                             retry-conn))
                    (with-current-buffer source-buffer
-                     (setq failed retry-conn)
                      (let ((retry-context (copy-sequence result-context)))
                        (when retry-context
                          (cl-remf retry-context :row-identity-prep))
@@ -1376,7 +1376,7 @@ already confirmed SQL."
                   (signal (car err) (cdr err))
                 (answer (plist-put
                          (plist-put (copy-sequence outcome) :error err)
-                         :connection failed)))))))))))
+                         :connection (or retry-conn connection))))))))))))
 
 (defconst clutch--transaction-outcome-unknown-message
   "Connection was lost with uncommitted changes; the transaction outcome is unknown."
