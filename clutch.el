@@ -193,6 +193,16 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the gutter marker of SQL that is being cancelled."
   :group 'clutch)
 
+(defface clutch-running-sql-face
+  '((t :inherit secondary-selection :extend t))
+  "Face for the background of SQL that is still running."
+  :group 'clutch)
+
+(defface clutch-cancelling-sql-face
+  '((t :inherit isearch-fail :extend t))
+  "Face for the background of SQL that is being cancelled."
+  :group 'clutch)
+
 (define-fringe-bitmap 'clutch-executed-sql-dot
   [24 60 126 255 255 126 60 24]
   nil nil 'center)
