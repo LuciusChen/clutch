@@ -6,6 +6,10 @@
 
 - The flash marks the range Clutch picks, so only the statement `C-c C-c` picks at point, with no active region, and the Redis command at point flash; `clutch-pulse-statement-at-point` set to nil turns this off. The flash now comes before any confirmation, so a declined statement still flashes. A region or the whole buffer, including each statement of a batch, no longer flashes, since its text was chosen; a batch thus skips the face change and extra redisplay that each statement's flash cost.
 
+### Fixed
+
+- The Result Browser and Record view menus line up in fonts that draw an arrow or an ellipsis wider than one column, such as PragmataPro. Their labels now use ASCII, `Clone row to insert`, `Copy...` and `Export...`; Transient counted `→` and `…` as one column each, shifting the rest of their rows.
+
 ## 0.6.0 - 2026-10-09
 
 ### Added
