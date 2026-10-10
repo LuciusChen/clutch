@@ -617,7 +617,7 @@ enclosing atomic-batch workflow."
       (clutch--record-tx-state-after-query conn sql))
     result))
 
-(defun clutch--run-db-query-async (conn sql region callback)
+(defun clutch--run-db-query-async (conn sql region callback &optional start)
   "Run SQL on CONN like `clutch--run-db-query' and call CALLBACK once.
 CALLBACK receives RESULT and ERROR: a `clutch-db-result' and nil, or nil
 and a `clutch-db-error' condition.  When CONN's backend can run SQL
@@ -630,7 +630,11 @@ A third argument to CALLBACK is non-nil when \\[clutch-cancel-query-or-quit]
 asked to cancel SQL.  SQL may still have succeeded, its result arriving
 first, so a caller with more SQL to run stops instead.  SQL that fails
 once CONN is closed under it has an unknown outcome instead, since the
-server may still finish it."
+server may still finish it.
+START, when non-nil, starts SQL in place of `clutch-db-query-async': it
+is called with the function that takes the outcome and returns non-nil
+once SQL runs.  When START declines, return nil and run nothing; otherwise
+return non-nil."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
@@ -641,8 +645,9 @@ server may still finish it."
     (puthash conn entry clutch--running-queries)
     (unwind-protect
         (setq started
-              (clutch-db-query-async
-               conn sql
+              (funcall
+               (or start
+                   (lambda (outcome) (clutch-db-query-async conn sql outcome)))
                (lambda (result error)
                  ;; The server may still finish a statement whose
                  ;; connection was closed under it; an error that came
@@ -655,13 +660,18 @@ server may still finish it."
                                       conn sql callback result error))))
       (unless started
         (remhash conn clutch--running-queries)))
-    (if started
-        (clutch--show-statement-status conn 'running)
+    (cond
+     (started
+      (clutch--show-statement-status conn 'running)
+      t)
+     (start nil)
+     (t
       (pcase-let ((`(,result . ,error)
                    (condition-case err
                        (cons (clutch--run-db-query conn sql) nil)
                      (clutch-db-error (cons nil err)))))
-        (funcall callback result error)))))
+        (funcall callback result error))
+      t))))
 
 (defun clutch--finish-db-query (conn sql callback result error)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
