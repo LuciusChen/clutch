@@ -695,16 +695,14 @@ CALLBACK also gets whether cancelling SQL was asked for."
           (clutch--mark-sql-status-region (car region) (cdr region) status))
         (clutch--update-mode-line t)))))
 
-(defun clutch-cancel-query-or-quit ()
-  "Cancel the query running on this buffer's connection, or quit.
-With no query to cancel, or one already being cancelled, run
-`keyboard-quit'.  The query then finishes with the server's verdict.
-Even if the backend cannot cancel it, stop subsequent workflow steps."
-  (interactive)
+(defun clutch--cancel-running-query ()
+  "Cancel the query running on this buffer's connection.
+Return nil when there is none, or it is already being cancelled.  The
+query then finishes with the server's verdict.  Even if the backend
+cannot cancel it, stop subsequent workflow steps."
   (let ((entry (and clutch-connection
                     (gethash clutch-connection clutch--running-queries))))
-    (if (or (null entry) (plist-get entry :cancelling))
-        (keyboard-quit)
+    (when (and entry (not (plist-get entry :cancelling)))
       (plist-put entry :cancelling t)
       (clutch--show-statement-status clutch-connection 'cancelling)
       (unless (condition-case err
@@ -714,7 +712,29 @@ Even if the backend cannot cancel it, stop subsequent workflow steps."
                  nil))
         ;; This flag records the user's request, not the backend's success.
         ;; Keep it so the reply stops a batch or export from running more SQL.
-        (message "The query could not be cancelled; waiting for its result, then stopping")))))
+        (message "The query could not be cancelled; waiting for its result, then stopping"))
+      t)))
+
+(defun clutch-cancel-query-or-quit ()
+  "Cancel the query running on this buffer's connection, or quit.
+With no query to cancel, or one already being cancelled, run
+`keyboard-quit'.  The query then finishes with the server's verdict.
+Even if the backend cannot cancel it, stop subsequent workflow steps."
+  (interactive)
+  (unless (clutch--cancel-running-query)
+    (keyboard-quit)))
+
+(defun clutch--cancel-running-query-on-quit (data _context _caller)
+  "Cancel this buffer's running query when DATA is a quit.
+A quit that reaches the command loop cancels the query as
+`clutch-cancel-query-or-quit' does.  On MS-Windows, a \\`C-g' typed while
+Emacs is busy is not read as a key but quits whatever runs next, such as
+redisplay."
+  (when (eq (car-safe data) 'quit)
+    (clutch--cancel-running-query)))
+
+(add-function :after command-error-function
+              #'clutch--cancel-running-query-on-quit)
 
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."
