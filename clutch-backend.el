@@ -1217,16 +1217,6 @@ A query with a WITH clause can read the table through its CTEs."
       (plist-get (clutch-db-sql-source-chain (clutch-db-sql-normalize sql))
                  :token)))
 
-(defun clutch-db-sql-target-table (conn table sql)
-  "Return a SQL reference to TABLE on CONN, retaining its source from SQL.
-Only reuse SQL's relation when it is a simple query of that same TABLE,
-directly or through the CTEs of its WITH clause."
-  (or (when-let* ((token (and sql (clutch-db-sql-simple-source-token sql)))
-                  ((equal table (clutch-db-sql-table-name token)))
-                  ((clutch-db-sql-table-schema token)))
-        token)
-      (clutch-db-escape-identifier conn table)))
-
 (defun clutch-db-sql-destructive-p (sql)
   "Return non-nil if SQL is a destructive operation.
 A DELETE counts after a WITH clause, and embedded in a CTE or in a data
