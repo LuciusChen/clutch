@@ -10403,8 +10403,7 @@ and a namespace a new connection cannot return to is not retried."
                     ((symbol-function 'clutch--try-reconnect)
                      (lambda ()
                        (cl-incf reconnects)
-                       (setq clutch-connection 'new-conn)
-                       t)))
+                       (setq clutch-connection 'new-conn))))
             (let ((outcome
                    (clutch-test--await-outcome
                     (lambda (k)
@@ -10452,8 +10451,7 @@ and a namespace a new connection cannot return to is not retried."
                      (make-clutch-db-result :affected-rows 1))))
                 ((symbol-function 'clutch--try-reconnect)
                  (lambda ()
-                   (setq clutch-connection 'new-conn)
-                   t)))
+                   (setq clutch-connection 'new-conn))))
         (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
         (should (equal (nreverse executions)
                        '(("UPDATE a SET n = 1" old-conn)
@@ -10580,9 +10578,10 @@ succeeds after its buffer moved leaves the marker of one the buffer runs."
 (ert-deftest clutch-test-idle-retry-recomputes-row-identity-on-new-connection ()
   "A physical reconnect should not reuse the old connection's identity plan.
 After a reply that came once the statement started, a reconnect or a
-retry that fails before it runs ends the statement with its error.  A
-statement the buffer started elsewhere while the reconnect waited keeps
-the buffer: it is neither marked over nor retried on."
+retry that fails before it runs ends the statement with its error.  The
+retry runs only on the connection its reconnect built: a buffer that the
+reconnect's wait moved elsewhere is not retried on, and a statement it
+started there keeps its marker."
   (with-temp-buffer
     (let ((clutch-connection 'old-conn)
           (old-live t)
@@ -10610,8 +10609,7 @@ the buffer: it is neither marked over nor retried on."
                      (make-clutch-db-result :columns ["id"] :rows '((1))))))
                 ((symbol-function 'clutch--try-reconnect)
                  (lambda ()
-                   (setq clutch-connection 'new-conn)
-                   t)))
+                   (setq clutch-connection 'new-conn))))
         (let ((outcome
                (clutch-test--await-outcome
                 (lambda (k)
@@ -10636,8 +10634,7 @@ the buffer: it is neither marked over nor retried on."
                      (lambda ()
                        (when (eq failing 'reconnect)
                          (signal 'clutch-db-error '("Connection refused")))
-                       (setq-local clutch-connection 'new-conn)
-                       t))
+                       (setq-local clutch-connection 'new-conn)))
                     ((symbol-function 'clutch-db-query-async)
                      (lambda (conn sql callback)
                        (when (eq conn 'new-conn)
@@ -10663,7 +10660,7 @@ the buffer: it is neither marked over nor retried on."
                                         "Connection refused"
                                       "Dispatch failed")
                                     (format "%S" shown))))))))
-  (dolist (reconnects '(nil t))
+  (pcase-dolist (`(,reconnects ,starts) '((nil t) (t t) (t nil)))
     (with-temp-buffer
       (insert "SELECT 1;\nSELECT 2;")
       (setq-local clutch-connection 'async-conn)
@@ -10674,19 +10671,21 @@ the buffer: it is neither marked over nor retried on."
                     ((symbol-function 'clutch--connection-key) #'symbol-name)
                     ((symbol-function 'clutch--try-reconnect)
                      ;; The reconnect's wait runs a timer that moves the
-                     ;; buffer to conn-b and starts SELECT 2 there.
+                     ;; buffer to conn-b, and maybe starts SELECT 2 there.
                      (lambda ()
                        (let (moved)
                          (run-with-timer
                           0 nil (lambda ()
                                   (with-current-buffer source
                                     (setq-local clutch-connection 'conn-b)
-                                    (clutch--execute-and-mark "SELECT 2;" 11 20))
+                                    (when starts
+                                      (clutch--execute-and-mark "SELECT 2;" 11 20)))
                                   (setq moved t)))
                          (while (not moved)
                            (accept-process-output nil 0.01)))
-                       (or reconnects
-                           (signal 'clutch-db-error '("Reconnect failed")))))
+                       (if reconnects
+                           'new-conn
+                         (signal 'clutch-db-error '("Reconnect failed")))))
                     ((symbol-function 'clutch-result--display-error)
                      (lambda (&rest args) (setq shown args) nil)))
             (clutch--execute-and-mark "SELECT 1;" 1 10)
@@ -10696,10 +10695,10 @@ the buffer: it is neither marked over nor retried on."
             (let ((debug-on-error nil))
               (ert-run-idle-timers))
             (should-not shown)
-            (should (= (length finishes) 2))
+            (should (= (length finishes) (if starts 2 1)))
             (should-not (clutch-db--foreground-busy-p 'async-conn))
             (should (string-prefix-p
-                     "Running"
+                     (if starts "Running" "Last failed")
                      (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
   (let ((source (generate-new-buffer " *clutch-retry-killed*")))
     (with-current-buffer source

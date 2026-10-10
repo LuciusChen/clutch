@@ -1339,7 +1339,7 @@ already confirmed SQL."
     (clutch--execute-statement-attempt
      sql connection present-result-p result-context region
      (lambda (outcome)
-       (let (answered (failed connection))
+       (let (answered retry-conn (failed connection))
          (cl-flet ((answer (outcome)
                      (setq answered t)
                      (funcall k outcome)))
@@ -1356,19 +1356,19 @@ already confirmed SQL."
                           (and (eq connection clutch-connection)
                                (not (clutch--connection-alive-p connection))
                                (not (clutch-db-unreachable-namespace connection))
-                               (clutch--try-reconnect)))
-                        ;; The reconnect's wait can kill the buffer, or
-                        ;; start a statement of it that then keeps it.
+                               (setq retry-conn (clutch--try-reconnect))))
+                        ;; The reconnect's wait can kill the buffer or move
+                        ;; it to another connection, which the SQL is not for.
                         (buffer-live-p source-buffer)
-                        (not (with-current-buffer source-buffer
-                               (clutch--statement-running-here-p))))
+                        (eq (buffer-local-value 'clutch-connection source-buffer)
+                            retry-conn))
                    (with-current-buffer source-buffer
-                     (setq failed clutch-connection)
+                     (setq failed retry-conn)
                      (let ((retry-context (copy-sequence result-context)))
                        (when retry-context
                          (cl-remf retry-context :row-identity-prep))
                        (clutch--execute-statement-attempt
-                        sql clutch-connection present-result-p retry-context region
+                        sql retry-conn present-result-p retry-context region
                         #'answer)))
                  (answer outcome))
              (error

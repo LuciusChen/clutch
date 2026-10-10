@@ -891,7 +891,7 @@ still references the same dead connection, then rebind all attached buffers
 to the new connection on success.
 Staged result-buffer changes are preserved across reconnects because
 they are client-side DML.  Only query re-execution should discard them.
-Returns non-nil on success and nil when no reconnect context exists.
+Return the new connection, or nil when no reconnect context exists.
 Connection failures propagate to the calling command, and so does a
 refusal when the session was in a namespace that a new connection cannot
 return to, as an attached DuckDB database."
@@ -902,17 +902,18 @@ return to, as an attached DuckDB database."
       (user-error
        "The session was in %s, which a new connection cannot return to; C-c C-e in the SQL buffer or REPL connects anew"
        namespace))
-    (clutch--report-replaced-session
-     "Reconnected to" (clutch--replace-connection old-conn params (cadr context)))
-    t))
+    (let* ((prior-tx-state (clutch--tx-state old-conn))
+           (new-conn (clutch--replace-connection old-conn params (cadr context))))
+      (clutch--report-replaced-session "Reconnected to" prior-tx-state)
+      new-conn)))
 
 (defun clutch--replace-connection (old-conn params &optional product)
   "Replace OLD-CONN with a new connection built from PARAMS.
 PRODUCT is the effective SQL product for the new logical session.  The
 new connection is in the commit mode OLD-CONN had, and every buffer
-attached to OLD-CONN moves to it.  Return OLD-CONN's transaction state:
-`dirty' when its uncommitted work is lost, which marks its DML results
-rolled back, `uncertain' when a prior outcome is unknown, or nil."
+attached to OLD-CONN once it is built moves to it.  Uncommitted work of
+OLD-CONN is lost, which marks its DML results rolled back.  Return the
+new connection."
   (let* ((product (or product (clutch--effective-sql-product params)))
          (new-conn (clutch--build-replacement-conn old-conn params))
          (prior-tx-state (clutch--tx-state old-conn))
@@ -936,12 +937,13 @@ rolled back, `uncertain' when a prior outcome is unknown, or nil."
           (clutch--finalize-rebound-connection new-conn))
       (unless bound
         (clutch--discard-unbound-connection new-conn)))
-    prior-tx-state))
+    new-conn))
 
 (defun clutch--report-replaced-session (verb prior-tx-state)
   "Report the current buffer's new connection with VERB.
-PRIOR-TX-STATE is what `clutch--replace-connection' returned for the
-connection it replaced."
+PRIOR-TX-STATE is the transaction state of the connection it replaced:
+`dirty' when its uncommitted work was lost, `uncertain' when a prior
+outcome is unknown, or nil."
   (let ((key (clutch--connection-key clutch-connection)))
     (pcase prior-tx-state
       ('dirty
@@ -2644,9 +2646,9 @@ as it was, and the session it connects is its own."
     (let* ((effective-params (clutch--materialize-connection-params params))
            (product (clutch--effective-sql-product effective-params)))
       (if same-target
-          (clutch--report-replaced-session
-           "Connected to"
-           (clutch--replace-connection old-conn effective-params product))
+          (let ((prior-tx-state (clutch--tx-state old-conn)))
+            (clutch--replace-connection old-conn effective-params product)
+            (clutch--report-replaced-session "Connected to" prior-tx-state))
         (let ((conn (clutch--build-conn effective-params)))
           ;; Tearing down the old connection can signal or be quit; until this
           ;; buffer holds CONN, this function still owns it.
