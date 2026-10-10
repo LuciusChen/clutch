@@ -2385,10 +2385,27 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
   (dolist (field fields)
     (clutch-result-insert--validate-field (car field) (cdr field))))
 
+(defun clutch-result--insert-target (conn key sql)
+  "Return how an INSERT names the table of metadata KEY on CONN.
+That is the source token of the current result's row identity, which
+UPDATE and DELETE use and which a server-side filter keeps.  Without
+one, it is the relation of SQL, the result's query, when that is a
+simple query of the table, compared as CONN reads names; else the
+table, quoted and qualified as KEY records it."
+  (or (plist-get clutch--row-identity :source-token)
+      (when-let* ((token (and sql (clutch-db-sql-simple-source-token sql)))
+                  ((equal (clutch--table-key-name key)
+                          (clutch-db--source-table-name conn token))))
+        token)
+      (mapconcat (lambda (part) (clutch-db-escape-identifier conn part))
+                 (nreverse (delq nil (clutch--table-key-arguments key)))
+                 ".")))
+
 (defun clutch-result-insert--build-sql (conn table fields)
   "Build an INSERT statement spec for TABLE with FIELDS using CONN.
 TABLE is a metadata key from `clutch--table-key'.  FIELDS is an alist of
-\(column-name . value), with nil for SQL NULL."
+\(column-name . value), with nil for SQL NULL.  The statement names the
+table as `clutch-result--insert-target' does."
   (let ((cols (mapconcat (lambda (field)
                            (clutch-db-escape-identifier conn (car field)))
                          fields ", "))
@@ -2398,8 +2415,7 @@ TABLE is a metadata key from `clutch--table-key'.  FIELDS is an alist of
                            table (car field) (cdr field)))
                         fields)))
     (cons (format "INSERT INTO %s (%s) VALUES (%s)"
-                  (clutch-db-sql-target-table
-                   conn (clutch--table-key-name table) clutch--last-query)
+                  (clutch-result--insert-target conn table clutch--last-query)
                   cols
                   placeholders)
           params)))

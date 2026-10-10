@@ -115,7 +115,7 @@ Tip: a result remembers where its query resolved table names, as the server repo
 
 An untouched blank insert field is omitted, allowing the database to supply its default. =C-c C-n= explicitly selects SQL NULL, =C-c C-e= selects an empty string, and =C-c C-d= returns the field to omission/default. Typing =NULL= inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
 
-INSERT submission and copy/export retain a simple query's source schema. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
+INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
 JDBC binary values that contain only BLOB length metadata appear as =<BLOB>= in the table and =<BLOB preview; N total>= in the viewer. They are unavailable as complete data and are refused by copy/export and mutation paths. Select an explicit hex or text conversion in SQL to export those bytes, for example =RAWTOHEX(col)= on Oracle or =CONVERT(VARCHAR(MAX), col, 2)= on SQL Server. Decoded complete JSON/XML text BLOBs remain usable.
 
