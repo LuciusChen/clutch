@@ -1127,11 +1127,14 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--mark-sql-status-region (beg end status &optional message)
   "Mark SQL region BEG..END with execution STATUS.
-MESSAGE, when non-nil, is used as hover text for failed SQL."
+MESSAGE, when non-nil, is used as hover text for failed SQL.  While the
+SQL runs or is being cancelled, the mark also gives its text a
+background.  A region left with no SQL, as when its text was deleted,
+keeps no mark."
+  (clutch--clear-executed-sql-overlay)
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
-    (clutch--clear-executed-sql-overlay)
     (unless (display-graphic-p)
       (let ((width (string-width "●")))
         ;; Reserve space for future windows and update existing ones.
@@ -1141,14 +1144,16 @@ MESSAGE, when non-nil, is used as hover text for failed SQL."
             (set-window-margins window
                                 (max width (or (car margins) 0))
                                 (cdr margins))))))
-    (setq clutch--executed-sql-overlay
-          (make-overlay (save-excursion
-                          (goto-char tbeg)
-                          (line-beginning-position))
-                        (save-excursion
-                          (goto-char tbeg)
-                          (line-beginning-position))
-                        nil nil nil))
+    (let ((face (pcase status
+                  ('running 'clutch-running-sql-face)
+                  ('cancelling 'clutch-cancelling-sql-face))))
+      (if face
+          ;; Text typed at either end stays outside the statement.
+          (progn
+            (setq clutch--executed-sql-overlay (make-overlay tbeg tend nil t nil))
+            (overlay-put clutch--executed-sql-overlay 'face face))
+        (let ((bol (save-excursion (goto-char tbeg) (line-beginning-position))))
+          (setq clutch--executed-sql-overlay (make-overlay bol bol nil nil nil)))))
     (overlay-put clutch--executed-sql-overlay 'before-string
                  (clutch--sql-status-marker-before-string status))
     (overlay-put clutch--executed-sql-overlay 'help-echo

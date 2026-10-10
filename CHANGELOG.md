@@ -6,6 +6,7 @@
 
 - Query export offers `clutch-export-default-format` (CSV or TSV). File exports use `clutch-export-default-directory`, and CSV/TSV file exports `clutch-export-default-file-name`, when set; encoding keeps the existing `clutch-csv-export-default-coding-system` option. Prompts remain editable, and unset destination options keep the current buffer directory and format-specific file name.
 - CSV/TSV copy and export share `clutch-export-null-value-text` (empty by default). NULL markers stay unquoted, and ordinary text matching the marker is quoted to preserve the distinction.
+- A statement that runs without blocking Emacs keeps a background, `clutch-running-sql-face` (from `secondary-selection`), until it finishes, and `clutch-cancelling-sql-face` (from `isearch-fail`) while it is being cancelled. Text typed inside the statement while it runs takes the background too. A backend that runs SQL synchronously, such as SQLite, shows none, since Emacs waits for it.
 
 ### Changed
 
@@ -19,6 +20,7 @@
 - The Result Browser and Record view menus line up in fonts that draw an arrow or an ellipsis wider than one column, such as PragmataPro. Their labels now use ASCII, `Clone row to insert`, `Copy...` and `Export...`; Transient counted `→` and `…` as one column each, shifting the rest of their rows.
 - A quit that reaches the command loop while the buffer's connection runs a statement cancels it, as `C-g` on `clutch-cancel-query-or-quit` does. On MS-Windows, a `C-g` typed while Emacs is busy is not read as a key but quits whatever runs next, such as redisplay, so a query export with line numbers and dape breakpoints in the SQL buffer only showed `Quit` and kept running.
 - Staged, copied and exported INSERTs name the result's table as its query did, as UPDATE and DELETE do. A staged INSERT dropped the schema after a server-side filter (`W`), or when the query wrote a qualified table in another case than the database stores it, such as `other.Users` on PostgreSQL or `app.reports` on Oracle, and could then go to a table of that name in another schema while the UPDATEs and DELETEs submitted with it went to the right one. An INSERT copy or export quoted an unqualified name as the query wrote it, so on PostgreSQL `SELECT * FROM Users` gave `INSERT INTO "Users"`, a table that does not exist. After a server-side filter, an INSERT staged on a result without row identity, such as a view or a table without a key, names the table as the database stores it, with its schema.
+- A statement's running marker no longer stays behind when the statement's text is deleted while it runs, or when its result fails to show.
 
 ## 0.6.0 - 2026-10-09
 

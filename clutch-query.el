@@ -1522,6 +1522,11 @@ executed or failed."
     (let ((result (plist-get outcome :result))
           (elapsed (plist-get outcome :elapsed))
           (source-buffer (plist-get outcome :source-buffer)))
+      ;; Mark first, as for an error, so a result that fails to show
+      ;; does not leave the statement marked as running.
+      (when region
+        (with-current-buffer source-buffer
+          (clutch--mark-executed-sql-region (car region) (cdr region))))
       (if (plist-get outcome :result-query-p)
           (clutch-result--display-select
            connection sql result elapsed
@@ -1530,10 +1535,7 @@ executed or failed."
            :result-context (plist-get outcome :result-context)
            :resolution-context (plist-get outcome :resolution-context)
            :source-buffer source-buffer)
-        (clutch-result--display result sql elapsed))
-      (when region
-        (with-current-buffer source-buffer
-          (clutch--mark-executed-sql-region (car region) (cdr region)))))))
+        (clutch-result--display result sql elapsed)))))
 
 (defun clutch--report-moved-outcome (sql outcome &optional region)
   "Report OUTCOME of SQL, whose buffer has left the statement's connection.
