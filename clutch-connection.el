@@ -716,6 +716,24 @@ Even if the backend cannot cancel it, stop subsequent workflow steps."
         ;; Keep it so the reply stops a batch or export from running more SQL.
         (message "The query could not be cancelled; waiting for its result, then stopping")))))
 
+(defun clutch--cancel-running-query-on-quit (data _context _caller)
+  "Deliver DATA, a quit, as \\`C-g' while this buffer's query is running.
+The key then runs `clutch-cancel-query-or-quit' as a command.  On
+MS-Windows, a \\`C-g' typed while Emacs is busy is not read as a key but
+quits whatever runs next, such as redisplay.  Only a query not already
+being cancelled, in a buffer where \\`C-g' runs that command, gets the
+key, so a quit the command itself raises does not come back."
+  (let ((entry (and clutch-connection
+                    (gethash clutch-connection clutch--running-queries))))
+    (when (and (eq (car-safe data) 'quit)
+               entry
+               (not (plist-get entry :cancelling))
+               (eq (key-binding [?\C-g]) #'clutch-cancel-query-or-quit))
+      (push ?\C-g unread-command-events))))
+
+(add-function :after command-error-function
+              #'clutch--cancel-running-query-on-quit)
+
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."
   (clutch--mark-dml-results-rolled-back conn)
