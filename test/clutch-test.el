@@ -5445,109 +5445,109 @@ The page that statement brings would replace the staged rows."
                           :type 'user-error)))
       (kill-buffer buf))))
 
+(defconst clutch-test--each-kind-sql
+  (concat "INSERT INTO \"t\" (\"id\", \"name\") VALUES ('3', 'c');\n"
+          "UPDATE t SET \"name\" = 'a2' WHERE \"id\" = 1;\n"
+          "DELETE FROM t WHERE \"id\" = 2;\n")
+  "The SQL that `clutch-test--with-each-kind-staged' stages, as copied.")
+
+(defmacro clutch-test--with-each-kind-staged (bindings &rest body)
+  "Run BODY in a SQLite result with one change of each kind staged.
+BINDINGS is (CONN).  Rows 1 and 2 of table t are shown; row 3 is
+staged for insertion, row 1's name is staged as a2 and row 2 is staged
+for deletion."
+  (declare (indent 1) (debug ((symbolp) body)))
+  `(clutch-test--with-sqlite-result (,(car bindings) _result)
+       '("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"
+         "INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+       "SELECT id, name FROM t ORDER BY id"
+     (setq-local clutch--pending-inserts '((("id" . "3") ("name" . "c"))))
+     (let ((row (car clutch--result-rows)))
+       (clutch-result--apply-edit
+        0 1 "a2"
+        (list :identity (clutch-db-row-identity-values row clutch--row-identity)
+              :original (nth 1 row)
+              :original-state (cons nil (nth 1 row)))))
+     (goto-char (aref clutch--row-start-positions 1))
+     (clutch-result-delete-rows)
+     ,@body))
+
 (ert-deftest clutch-test-submit-orders-insert-update-delete ()
-  "Submit executes INSERT before UPDATE before DELETE."
-  (clutch-test--with-result-state
-      (:columns '("id" "name")
-       :rows '((1 "a") (2 "b"))
-       :pending-inserts '((("id" . "3") ("name" . "c")))
-       :pending-edits (list (cons (cons (vector 1) 1) "a2"))
-       :pending-deletes (list (vector 2)))
-    (let (atomic executed reverts)
-      (setq-local revert-buffer-function
-                  (lambda (ignore-auto noconfirm)
-                    (push (list ignore-auto noconfirm
-                                clutch--pending-edits clutch--pending-deletes
-                                clutch--pending-inserts)
-                          reverts)))
-      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                ((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT INTO users (id, name) VALUES (?, ?)" . ("3" "c")))))
-                ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '(("UPDATE users SET name = ? WHERE id = ?" . ("a2" 1)))))
-                ((symbol-function 'clutch-result--build-pending-delete-statements)
-                 (lambda () '(("DELETE FROM users WHERE id = ?" . (2)))))
-                ((symbol-function 'clutch-db-escape-literal)
-                 (lambda (_conn value) (format "'%s'" value)))
-                ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
-                ((symbol-function 'clutch-db-call-with-atomic-batch)
-                 (lambda (_conn function)
-                   (setq atomic t)
-                   (funcall function)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (_conn sql &optional params _defer-transaction-state)
-                   (setq executed (append executed (list (cons sql params))))
-                   (make-clutch-db-result :affected-rows 1))))
-        (clutch-result-submit)
-        (should atomic)
-        (should (= (length executed) 3))
-        (should (string-prefix-p "INSERT" (car (nth 0 executed))))
-        (should (equal (cdr (nth 0 executed)) '("3" "c")))
-        (should (string-prefix-p "UPDATE" (car (nth 1 executed))))
-        (should (equal (cdr (nth 1 executed)) '("a2" 1)))
-        (should (string-prefix-p "DELETE" (car (nth 2 executed))))
-        (should (equal (cdr (nth 2 executed)) '(2)))
-        (should (equal reverts '((nil t nil nil nil))))))))
+  "Submit executes INSERT before UPDATE before DELETE in one atomic batch."
+  (clutch-test--with-each-kind-staged (conn)
+    (let (atomic executed)
+      (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+        (advice-add 'clutch-db-call-with-atomic-batch :before
+                    (lambda (&rest _) (setq atomic t)) '((name . test-atomic)))
+        (advice-add 'clutch--run-db-query :before
+                    (lambda (_conn sql &rest _) (push sql executed))
+                    '((name . test-order)))
+        (unwind-protect
+            (clutch-result-submit)
+          (advice-remove 'clutch-db-call-with-atomic-batch 'test-atomic)
+          (advice-remove 'clutch--run-db-query 'test-order)))
+      (should atomic)
+      (should (equal (seq-keep (lambda (sql)
+                                 (car (member (car (split-string sql))
+                                              '("INSERT" "UPDATE" "DELETE"))))
+                               (reverse executed))
+                     '("INSERT" "UPDATE" "DELETE")))
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT id, name FROM t ORDER BY id"))
+                     '((1 "a2") (3 "c"))))
+      ;; The result shows the submitted rows, with nothing left staged.
+      (should (equal (mapcar (lambda (row) (seq-take row 2)) clutch--result-rows)
+                     '((1 "a2") (3 "c"))))
+      (should-not (or clutch--pending-inserts clutch--pending-edits
+                      clutch--pending-deletes)))))
 
 (ert-deftest clutch-test-submit-validates-before-auto-commit ()
   "Auto submit should roll back when row-count validation fails."
-  (clutch-test--with-result-state
-      (:pending-edits '(edit))
-    (let (committed rolled-back reverted)
-      (setq-local revert-buffer-function
-                  (lambda (&rest _args) (setq reverted t)))
-      (cl-letf (((symbol-function 'clutch--connection-alive-p) #'always)
-                ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda ()
-                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
-                ((symbol-function 'clutch-db-escape-literal)
-                 (lambda (_conn value) (format "'%s'" value)))
-                ((symbol-function 'yes-or-no-p) (lambda (_) t))
-                ((symbol-function 'clutch-db-manual-commit-p) (lambda (_) nil))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (&rest _)
-                   (make-clutch-db-result :affected-rows 2)))
-                ((symbol-function 'clutch-db-call-with-atomic-batch)
-                 (lambda (_conn function)
-                   (condition-case err
-                       (prog1 (funcall function)
-                         (setq committed t))
-                     ((error quit)
-                      (setq rolled-back t)
-                      (signal (car err) (cdr err)))))))
-        (let ((err (should-error (clutch-result-submit) :type 'user-error)))
-          (should (string-match-p "Mutation matched 2 rows"
-                                  (error-message-string err))))
-        (should rolled-back)
-        (should-not committed)
-        (should-not reverted)
-        (should (equal clutch--pending-edits '(edit)))))))
+  (clutch-test--with-each-kind-staged (conn)
+    (setq-local clutch--pending-inserts nil
+                clutch--pending-deletes nil)
+    (let ((pending clutch--pending-edits))
+      (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+        ;; The UPDATE runs, but reports two rows, as an identity that is
+        ;; not unique after all would.
+        (advice-add 'clutch--run-db-query :filter-return
+                    (lambda (result)
+                      (setf (clutch-db-result-affected-rows result) 2)
+                      result)
+                    '((name . test-two-rows)))
+        (unwind-protect
+            (let ((err (should-error (clutch-result-submit) :type 'user-error)))
+              (should (string-match-p "Mutation matched 2 rows"
+                                      (error-message-string err))))
+          (advice-remove 'clutch--run-db-query 'test-two-rows)))
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT id, name FROM t ORDER BY id"))
+                     '((1 "a") (2 "b"))))
+      (should (equal (mapcar (lambda (row) (seq-take row 2)) clutch--result-rows)
+                     '((1 "a") (2 "b"))))
+      (should (equal clutch--pending-edits pending)))))
 
 (ert-deftest clutch-test-submit-refuses-while-a-query-runs ()
   "Submitting staged changes should be refused while a statement runs.
 JDBC opens the batch with a synchronous call that waits for the running
 statement, so the refusal has to come before the prompt and the batch."
-  (clutch-test--with-result-state
-      (:pending-edits '(edit))
+  (clutch-test--with-each-kind-staged (conn)
     (let ((clutch--running-queries (make-hash-table :test 'eq))
+          (pending clutch--pending-edits)
           prompted batched)
-      (puthash clutch-connection (list :buffer (current-buffer)) clutch--running-queries)
-      (cl-letf (((symbol-function 'clutch-result--build-update-statements)
-                 (lambda ()
-                   '(("UPDATE users SET name = ? WHERE id = ?" . ("x" 1)))))
-                ((symbol-function 'clutch-db-escape-literal)
-                 (lambda (_conn value) (format "'%s'" value)))
-                ((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t)))
-                ((symbol-function 'clutch-db-call-with-atomic-batch)
-                 (lambda (&rest _) (setq batched t))))
-        (should (string-match-p
-                 "A query is running"
-                 (error-message-string
-                  (should-error (clutch-result-submit) :type 'user-error))))
-        (should-not prompted)
-        (should-not batched)
-        (should (equal clutch--pending-edits '(edit)))))))
+      (puthash conn (list :buffer (current-buffer)) clutch--running-queries)
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t))))
+        (advice-add 'clutch-db-call-with-atomic-batch :before
+                    (lambda (&rest _) (setq batched t)) '((name . test-batch)))
+        (unwind-protect
+            (should (string-match-p
+                     "A query is running"
+                     (error-message-string
+                      (should-error (clutch-result-submit) :type 'user-error))))
+          (advice-remove 'clutch-db-call-with-atomic-batch 'test-batch)))
+      (should-not prompted)
+      (should-not batched)
+      (should (equal clutch--pending-edits pending)))))
 
 (ert-deftest clutch-test-result-refuses-writes-after-its-source-moved ()
   "A result should refuse staging and submitting once its connection moved.
@@ -6929,40 +6929,21 @@ after the edit is staged."
                                       :type 'user-error))
                        "Cannot build UPDATE: selected columns are not writable source columns: name"))))))
 
-(ert-deftest clutch-test-copy-pending-sql-copies-current-batch ()
-  "Staged SQL copy should mirror the staged submit batch."
-  (with-temp-buffer
-    (let (copied)
-      (setq-local clutch--pending-inserts '(a)
-                  clutch--pending-edits '(b)
-                  clutch--pending-deletes '(c))
-      (cl-letf (((symbol-function 'clutch-result--build-pending-insert-statements)
-                 (lambda () '(("INSERT INTO t VALUES (1)" . nil))))
-                ((symbol-function 'clutch-result--build-update-statements)
-                 (lambda () '(("UPDATE t SET name='' WHERE id=1" . nil))))
-                ((symbol-function 'clutch-result--build-pending-delete-statements)
-                 (lambda () '(("DELETE FROM t WHERE id=1" . nil))))
-                ((symbol-function 'kill-new)
-                 (lambda (text) (setq copied text))))
-        (clutch-result-copy-pending-sql)
-        (should (equal copied
-                       "INSERT INTO t VALUES (1);\nUPDATE t SET name='' WHERE id=1;\nDELETE FROM t WHERE id=1;\n"))))))
-
-(ert-deftest clutch-test-save-pending-sql-writes-current-batch ()
-  "Staged SQL save should write the staged submit batch to disk."
+(ert-deftest clutch-test-copy-and-save-pending-sql-write-the-batch ()
+  "Copying and saving staged SQL should produce the batch submit runs."
   (let ((path (make-temp-file "clutch-pending-" nil ".sql")))
     (unwind-protect
-        (with-temp-buffer
-          (setq-local clutch--pending-edits '(b))
-          (cl-letf (((symbol-function 'clutch-result--build-update-statements)
-                     (lambda () '(("UPDATE t SET name='' WHERE id=1" . nil))))
-                    ((symbol-function 'read-file-name)
+        (clutch-test--with-each-kind-staged (_conn)
+          (let (kill-ring kill-ring-yank-pointer)
+            (clutch-result-copy-pending-sql)
+            (should (equal (current-kill 0) clutch-test--each-kind-sql)))
+          (cl-letf (((symbol-function 'read-file-name)
                      (lambda (&rest _args) path)))
-            (clutch-result-save-pending-sql)
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
-                           "UPDATE t SET name='' WHERE id=1;\n"))))
+            (clutch-result-save-pending-sql))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         clutch-test--each-kind-sql)))
       (delete-file path))))
 
 ;;;; Agent context copy
