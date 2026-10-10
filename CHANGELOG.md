@@ -16,6 +16,7 @@
 
 - CSV/TSV copy and export distinguish SQL NULL (an unquoted empty field), empty text (`""`) and literal `NULL` text under the default settings. SQL NULL previously became the text `NULL`, indistinguishable from that literal string. This changes the exported NULL representation; importers must use the same convention.
 - PostgreSQL query export runs the query once as `COPY … TO STDOUT` when the installed pgsql.el provides `pgsql-copy-out-async`, instead of fetching LIMIT/OFFSET pages. Without an `ORDER BY` on a unique key, pages of a table larger than a quarter of `shared_buffers` could repeat or skip rows, since synchronized sequential scans start each page's scan at a different block: a 150,000-row export held 81,344 distinct rows. The stream also exported that 200-column table in 4.1 s instead of 32–39 s. XTDB, older pgsql.el, other backends and all-row result export still page.
+- The Result Browser and Record view menus line up in fonts that draw an arrow or an ellipsis wider than one column, such as PragmataPro. Their labels now use ASCII, `Clone row to insert`, `Copy...` and `Export...`; Transient counted `→` and `…` as one column each, shifting the rest of their rows.
 
 ## 0.6.0 - 2026-10-09
 
