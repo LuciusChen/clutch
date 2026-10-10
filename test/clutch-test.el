@@ -11296,7 +11296,8 @@ there, and the result keeps its rows and its unknown total."
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
 (ert-deftest clutch-test-async-markers-follow-edits-while-running ()
-  "Status markers should stay on their statement while the buffer is edited."
+  "Status markers should stay on their statement while the buffer is edited.
+A statement deleted while it runs leaves no marker behind."
   (cl-flet ((marker-line ()
               (save-excursion
                 (goto-char (overlay-start clutch--executed-sql-overlay))
@@ -11344,7 +11345,17 @@ there, and the result keeps its rows and its unknown total."
           (ert-run-idle-timers)
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
-          (should (equal (marker-line) "UPDATE b SET n = 2;")))))))
+          (should (equal (marker-line) "UPDATE b SET n = 2;")))))
+    (with-temp-buffer
+      (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
+      (setq-local clutch-connection 'async-conn)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
+          (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
+          (delete-region 11 (point-max))
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should-not clutch--executed-sql-overlay))))))
 
 (ert-deftest clutch-test-execute-at-point-flashes-the-statement ()
   "The statement picked at point should flash first.

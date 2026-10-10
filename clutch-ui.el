@@ -1127,11 +1127,12 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
 
 (defun clutch--mark-sql-status-region (beg end status &optional message)
   "Mark SQL region BEG..END with execution STATUS.
-MESSAGE, when non-nil, is used as hover text for failed SQL."
+MESSAGE, when non-nil, is used as hover text for failed SQL.  A region
+left with no SQL, as when its text was deleted, keeps no mark."
+  (clutch--clear-executed-sql-overlay)
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
               (tend (cdr trimmed)))
-    (clutch--clear-executed-sql-overlay)
     (unless (display-graphic-p)
       (let ((width (string-width "●")))
         ;; Reserve space for future windows and update existing ones.
