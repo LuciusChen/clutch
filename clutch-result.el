@@ -103,17 +103,6 @@ quotes or line breaks, and configure the importer to recognize it."
   :type 'string
   :group 'clutch)
 
-(defcustom clutch-export-quote-values 'when-needed
-  "Double-quote policy for CSV/TSV copy and export, including headers.
-`when-needed' quotes text containing delimiters, quotes or line breaks,
-or matching `clutch-export-null-value-text'.  `always' quotes every
-non-NULL value.  `never' writes values without quoting or escaping and
-can lose field boundaries and the distinction between NULL and text."
-  :type '(choice (const :tag "When needed" when-needed)
-                 (const :tag "Always" always)
-                 (const :tag "Never" never))
-  :group 'clutch)
-
 (defcustom clutch-export-default-directory nil
   "Default directory offered for file exports.
 When nil, use the current buffer's `default-directory'."
@@ -121,8 +110,8 @@ When nil, use the current buffer's `default-directory'."
   :group 'clutch)
 
 (defcustom clutch-export-default-file-name nil
-  "Default file name offered for file exports.
-When nil, use the selected format's name, such as export.csv or export.tsv.
+  "Default file name offered for CSV and TSV file exports.
+When nil, use the selected format's name, export.csv or export.tsv.
 The name is relative to `clutch-export-default-directory' unless absolute."
   :type '(choice (const :tag "Format default" nil) string)
   :group 'clutch)
@@ -3131,15 +3120,14 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
 
 (defun clutch--delimited-escape (val delimiter)
   "Return VAL escaped for text separated by DELIMITER.
-Use `clutch-export-null-value-text' and `clutch-export-quote-values'."
+SQL NULL becomes `clutch-export-null-value-text', and text matching it
+is quoted."
   (let ((s (clutch--format-value (clutch-db-require-complete-value val))))
     (cond
      ((null val) clutch-export-null-value-text)
-     ((or (eq clutch-export-quote-values 'always)
-          (and (eq clutch-export-quote-values 'when-needed)
-               (or (equal s clutch-export-null-value-text)
-                   (string-match-p "[\"\r\n]" s)
-                   (string-match-p (regexp-quote (char-to-string delimiter)) s))))
+     ((or (equal s clutch-export-null-value-text)
+          (string-match-p "[\"\r\n]" s)
+          (string-match-p (regexp-quote (char-to-string delimiter)) s))
       (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s)))
      (t s))))
 
@@ -3628,8 +3616,8 @@ stops it.  Replace the destination only after the whole export succeeds."
       (user-error "Query export requires a SQL connection"))
     (clutch--refuse-while-running clutch-connection)
     (let* ((kind (intern (completing-read
-                         (format "Export format (default %s): "
-                                 clutch-export-default-format)
+                         (format-prompt "Export format"
+                                        clutch-export-default-format)
                          '("csv" "tsv") nil t nil nil
                          (symbol-name clutch-export-default-format))))
            (spec (cdr (assq kind clutch--result-export-kinds)))
@@ -3682,11 +3670,12 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
           (message (plist-get spec :copy-message)
                    (length rows) (if (= (length rows) 1) "" "s")))))
       ('file
-       (let* ((coding (when (eq (plist-get spec :file-coding) 'delimited)
+       (let* ((delimited (eq (plist-get spec :file-coding) 'delimited))
+              (coding (when delimited
                         (clutch--read-delimited-export-coding-system kind)))
               (path (read-file-name
                      (plist-get spec :file-prompt) clutch-export-default-directory
-                     nil nil (or clutch-export-default-file-name
+                     nil nil (or (and delimited clutch-export-default-file-name)
                                  (plist-get spec :default-file)))))
          (message "Exporting to %s..." path)
          (clutch-result--write-export-file

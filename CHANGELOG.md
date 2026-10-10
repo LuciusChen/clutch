@@ -4,8 +4,8 @@
 
 ### Added
 
-- Query export offers `clutch-export-default-format` (CSV or TSV). File exports use `clutch-export-default-directory` and `clutch-export-default-file-name` when set; encoding keeps the existing `clutch-csv-export-default-coding-system` option. Prompts remain editable, and unset destination options keep the current buffer directory and format-specific file name.
-- CSV/TSV copy and export share `clutch-export-null-value-text` (empty by default) and `clutch-export-quote-values` (`when-needed`, `always` or `never`). NULL markers stay unquoted; when needed, ordinary text matching the marker is quoted to preserve the distinction.
+- Query export offers `clutch-export-default-format` (CSV or TSV). File exports use `clutch-export-default-directory`, and CSV/TSV file exports `clutch-export-default-file-name`, when set; encoding keeps the existing `clutch-csv-export-default-coding-system` option. Prompts remain editable, and unset destination options keep the current buffer directory and format-specific file name.
+- CSV/TSV copy and export share `clutch-export-null-value-text` (empty by default). NULL markers stay unquoted, and ordinary text matching the marker is quoted to preserve the distinction.
 
 ### Changed
 
