@@ -1973,9 +1973,11 @@ Manual mode is left as it is."
                               (progn
                                 (setq old-live nil)
                                 (list :error '(clutch-db-error "socket lost")
+                                      :connection connection
                                       :source-buffer source))
                             (list :result (make-clutch-db-result :affected-rows 1)
                                   :result-query-p nil
+                                  :connection connection
                                   :source-buffer source)))))
                       ((symbol-function 'clutch--show-execution-error)
                        (lambda (&rest _args) "socket lost"))
