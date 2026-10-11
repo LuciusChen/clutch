@@ -37,6 +37,7 @@
 (declare-function pgsql-cancel "pgsql" (connection))
 (declare-function pgsql-connect "pgsql" (&rest parameters))
 (declare-function pgsql-disconnect "pgsql" (connection))
+(declare-function pgsql-error-fields "pgsql" (error-value))
 (declare-function pgsql-database "pgsql" (connection))
 (declare-function pgsql-escape-identifier "pgsql" (identifier))
 (declare-function pgsql-escape-literal "pgsql" (value))
@@ -78,6 +79,21 @@ transaction, which a lost connection rolls back."
   (unless (require 'pgsql nil t)
     (signal 'clutch-db-error
             (list "PostgreSQL backend requires pgsql.el. Install pgsql from MELPA or ensure a source checkout is on load-path."))))
+
+(cl-defmethod clutch-db--error-data ((err (head pgsql-server-error)))
+  "Return ERR's message with the server's detail and hint, as psql prints them.
+The server's fields, the SQLSTATE among them, go to the diagnostics."
+  (let ((fields (pgsql-error-fields err)))
+    (list (string-join
+           (cons (clutch-db--error-message err)
+                 (delq nil
+                       (list (when-let* ((detail (plist-get fields :detail)))
+                               (concat "DETAIL: " detail))
+                             (when-let* ((hint (plist-get fields :hint)))
+                               (concat "HINT: " hint)))))
+           "\n")
+          (list :diag (list :sql-state (plist-get fields :sqlstate))
+                :debug fields))))
 
 (defun clutch-db-pg--apply-timeout-defaults (params)
   "Return PARAMS with PostgreSQL timeout defaults filled in."
@@ -378,8 +394,7 @@ transaction included, so a COMMIT tag committed the path."
         (clutch-db-pg--ensure-foreground-transaction conn sql)
         (funcall thunk))
     (pgsql-error
-     (signal 'clutch-db-error
-             (list (error-message-string err))))))
+     (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 ;;;; Connect function
 
@@ -433,8 +448,7 @@ backend such as XTDB that speaks the PostgreSQL protocol."
       (pgsql-error
        (when client
          (pgsql-disconnect client))
-       (signal 'clutch-db-error
-               (list (error-message-string err)))))))
+       (signal 'clutch-db-error (clutch-db--error-data err))))))
 
 (defun clutch-db-pg--rewrite-param-sql (sql &optional param-count)
   "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form.
@@ -794,8 +808,8 @@ Decline when the installed pgsql.el cannot execute asynchronously."
           (funcall callback
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error
-                        (list 'clutch-db-error
-                              (error-message-string error))))))))
+                        (cons 'clutch-db-error
+                              (clutch-db--error-data error))))))))
     t))
 
 (cl-defmethod clutch-db-delimited-export-async
@@ -829,8 +843,8 @@ COPY."
             (funcall callback
                      (and result (clutch-db-pg--wrap-result conn result))
                      (and error
-                          (list 'clutch-db-error
-                                (error-message-string error))))))))
+                          (cons 'clutch-db-error
+                                (clutch-db--error-data error))))))))
       t)))
 
 (cl-defmethod clutch-db-execute-params

@@ -97,7 +97,7 @@ ERR is the original condition object.  Optional CONTEXT is attached to the
 debug event when `clutch-debug-mode' is enabled."
   (when clutch-debug-mode
     (let ((buffer (current-buffer))
-          (summary (clutch--humanize-db-error (error-message-string err)))
+          (summary (clutch--humanize-db-error (clutch-db--error-message err)))
           (backend (and connection (clutch-db-backend-key connection))))
       (clutch--remember-debug-event
        :buffer buffer
@@ -470,7 +470,7 @@ SQL is the generated statement and ERR is the original condition.
 Optional CONTEXT is merged into the stored problem and debug event.
 Optional DIAG is merged into the stored problem diagnostic plist.
 Return `(MESSAGE . SUMMARY)' for the failure."
-  (let* ((formatted (error-message-string err))
+  (let* ((formatted (clutch-db--error-message err))
          (message (if (stringp (cadr err)) (cadr err) formatted))
          (summary (clutch--humanize-db-error formatted)))
     (clutch--remember-buffer-query-error-details
