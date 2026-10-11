@@ -6494,6 +6494,9 @@ a word that ends a whole rollback, such as CHAIN."
       (should (string-suffix-p "4,\n5,\"\"\n6,NULL\n" csv)))
     (should (equal (clutch--export-csv-content '((1 "a,b")) t)
                    "1,\"a,b\"\n"))
+    (let ((clutch-csv-delimiter ?\;))
+      (should (equal (clutch--export-csv-content '((1 "a;b") (2 "c,d")))
+                     "id;display,name\n1;\"a;b\"\n2;c,d\n")))
     (setq-local clutch--result-columns '("null" "empty" "marker" "comma" "quote"))
     (let ((clutch-export-null-value-text "NULL"))
       (should (equal (clutch--export-csv-content
@@ -7281,6 +7284,21 @@ Only the family is remapped, so text scaling still applies once."
                        (lambda (_flag _args) nil)))
               (funcall command)
               (should (equal (current-kill 0) expected-text)))))))))
+
+(ert-deftest clutch-test-copy-csv-separates-fields-with-the-delimiter ()
+  "CSV copy separates fields with `clutch-csv-delimiter' and quotes it."
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows '((1 "a;b") (2 "c,d"))
+       :render t)
+    (let ((clutch-csv-delimiter ?\;)
+          kill-ring kill-ring-yank-pointer)
+      (clutch-test--select-cells '(0 0) '(1 1))
+      (cl-letf (((symbol-function 'transient-args) (lambda (_prefix) nil))
+                ((symbol-function 'transient-arg-value)
+                 (lambda (_flag _args) nil)))
+        (clutch-result-copy-csv)
+        (should (equal (current-kill 0) "id;name\n1;\"a;b\"\n2;c,d"))))))
 
 (ert-deftest clutch-test-copy-header-switch-omits-tabular-headers ()
   "Copy commands should honor the installed no-header switch."
@@ -8839,14 +8857,18 @@ connection."
 
 (ert-deftest clutch-test-query-export-streams-when-the-backend-can ()
   "Direct export streams formatted text when the backend offers it.
-It sends no paged query, writes each part in the chosen encoding and
-reports the rows the backend counted, and a failed or cancelled stream
-leaves the destination and no temporary file behind."
-  (dolist (outcome '(success error cancelled))
-    (ert-info ((symbol-name outcome))
+It sends no paged query, asks for the format's delimiter, writes each part
+in the chosen encoding and reports the rows the backend counted, and a
+failed or cancelled stream leaves the destination and no temporary file
+behind."
+  (pcase-dolist (`(,outcome ,kind)
+                 '((success "tsv") (error "tsv") (cancelled "tsv")
+                   (success "csv")))
+    (ert-info ((format "%s %s" outcome kind))
       (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
              (path (expand-file-name "out.tsv" dir))
              (source (generate-new-buffer " *clutch-query-export*"))
+             (clutch-csv-delimiter ?\;)
              stream interrupted messages)
         (unwind-protect
             (clutch-test--with-async-statements finishes
@@ -8866,13 +8888,14 @@ leaves the destination and no temporary file behind."
                           ((symbol-function 'message)
                            (lambda (format &rest arguments)
                              (push (apply #'format format arguments) messages))))
-                  (clutch-test--with-minibuffer-answers '("tsv" "utf-8-bom")
+                  (clutch-test--with-minibuffer-answers (list kind "utf-8-bom")
                     (clutch-export-query (point-min) (point-max)))
                   (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
                                        ,function ,callback)
                                stream))
                     (should (equal (list conn sql delimiter header null-text)
-                                   (list 'async-conn "SELECT id, name FROM t" ?\t t
+                                   (list 'async-conn "SELECT id, name FROM t"
+                                         (if (equal kind "tsv") ?\t ?\;) t
                                          clutch-export-null-value-text)))
                     (funcall function "id\tname\n1\ta\n" 1)
                     (funcall function "2\t中文\n" 1)
