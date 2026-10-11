@@ -910,7 +910,7 @@ key would change the current row instead of the one shown."
          table
          (if identity-error
              (format "Row identity failed: %s"
-                     (error-message-string identity-error))
+                     (clutch-db--error-message identity-error))
            (format "Resolved %s"
                    (or (plist-get (car candidates) :name) "no candidate")))
          (- (float-time) start)))))

@@ -710,7 +710,7 @@ Even if the backend cannot cancel it, stop subsequent workflow steps."
       (unless (condition-case err
                   (clutch-db-interrupt-query clutch-connection)
                 (clutch-db-error
-                 (message "Cancel failed: %s" (error-message-string err))
+                 (message "Cancel failed: %s" (clutch-db--error-message err))
                  nil))
         ;; This flag records the user's request, not the backend's success.
         ;; Keep it so the reply stops a batch or export from running more SQL.
@@ -2534,7 +2534,7 @@ outcome must still arrive."
           (clutch--prime-schema-cache connection)))
     (clutch-db-error
      (message "Could not read the current schema or database back: %s"
-              (error-message-string err)))))
+              (clutch-db--error-message err)))))
 
 (defun clutch--follow-transaction-end (conn sql before)
   "Follow CONN's namespace after it ended a transaction as SQL does.
@@ -2878,7 +2878,7 @@ signal that nothing was committed."
              (clutch--set-tx-uncertain clutch-connection)
              (user-error
               "%s; commit outcome is uncertain, roll back or reconnect"
-              (clutch--humanize-db-error (error-message-string err)))))))
+              (clutch--humanize-db-error (clutch-db--error-message err)))))))
     (clutch--follow-transaction-end
      clutch-connection (if (eq outcome 'rolled-back) "ROLLBACK" "COMMIT")
      before)
