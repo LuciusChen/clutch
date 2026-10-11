@@ -1353,8 +1353,11 @@ rendering large result pages."
              (plist-get render-state :edits))))
 
 (defun clutch--pending-insert-render-rows (render-state)
-  "Return staged insert rows expanded with placeholders from RENDER-STATE."
-  (let ((placeholders (plist-get render-state :insert-placeholders)))
+  "Return staged insert rows expanded with placeholders from RENDER-STATE.
+A result without placeholders, as after its connection closed, leaves the
+columns an insert does not set empty."
+  (let ((placeholders (or (plist-get render-state :insert-placeholders)
+                          (make-list (length clutch--result-columns) nil))))
     (mapcar
      (lambda (fields)
        (cl-mapcar (lambda (column placeholder)
