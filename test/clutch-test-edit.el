@@ -1119,22 +1119,31 @@ mix another table's rows into the result."
 (ert-deftest clutch-test-result-records-the-context-its-query-ran-in ()
   "A result should record the context its query ran in, once it has run.
 A context that cannot be read is recorded as `unknown'."
-  (clutch-test--with-sqlite-result (conn result)
-      '("CREATE TABLE t (id INTEGER PRIMARY KEY)" "INSERT INTO t VALUES (1)")
-      "SELECT id FROM t"
-    (should clutch--result-resolution-context)
-    (should (equal clutch--result-resolution-context
-                   (clutch-db-resolution-context conn)))
-    (advice-add 'clutch-db-resolution-context :override
-                (lambda (_conn) (signal 'clutch-db-error '("connection lost")))
-                '((name . test-lost)))
-    (unwind-protect
-        (progn
-          (clutch-result-rerun)
-          (clutch-test--await-queries))
-      (advice-remove 'clutch-db-resolution-context 'test-lost))
-    (should (equal (mapcar #'car clutch--result-rows) '(1)))
-    (should (eq clutch--result-resolution-context 'unknown))))
+  (let ((clutch--source-window (selected-window))
+        (clutch--row-identity-cache (make-hash-table :test 'eq))
+        (result-name "*clutch-test-result*")
+        ran context-error)
+    (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+               (lambda (_conn sql &rest _) sql))
+              ((symbol-function 'clutch-db-row-identity-candidates)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql)
+                 (setq ran t)
+                 (make-clutch-db-result :columns '((:name "id")) :rows '((1)))))
+              ((symbol-function 'clutch-db-resolution-context)
+               (lambda (_conn)
+                 (when context-error
+                   (signal 'clutch-db-error '("connection lost")))
+                 (if ran 'after 'before))))
+      (clutch-test--with-result-buffer (result-name)
+        (clutch-test--execute-and-present "SELECT id FROM users" 'fake-conn)
+        (with-current-buffer result-name
+          (should (eq clutch--result-resolution-context 'after)))
+        (setq context-error t)
+        (clutch-test--execute-and-present "SELECT id FROM users" 'fake-conn)
+        (with-current-buffer result-name
+          (should (eq clutch--result-resolution-context 'unknown)))))))
 
 (ert-deftest clutch-test-submit-manual-batch-uses-atomic-backend-boundary ()
   "Manual staged submit should be atomic without committing the user transaction."
