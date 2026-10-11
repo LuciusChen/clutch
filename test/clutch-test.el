@@ -8455,9 +8455,7 @@ stream that wrote each small part, one per network read, was slow."
          (path (expand-file-name "out.csv" dir))
          (clutch-result--export-write-size 8)
          (writes 0)
-         (count-write (lambda (start &rest _)
-                        ;; `make-temp-file' first writes an empty string.
-                        (unless (equal start "") (cl-incf writes)))))
+         (count-write (lambda (&rest _) (cl-incf writes))))
     (advice-add 'write-region :before count-write)
     (unwind-protect
         (progn
