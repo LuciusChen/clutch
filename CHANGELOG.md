@@ -23,6 +23,7 @@
 - A statement's running marker no longer stays behind when the statement's text is deleted while it runs, or when its result fails to show.
 - A statement that an idle connection never started is retried only on the connection its reconnect built, and fails with the error when the reconnect or the retry fails. A buffer moved to another connection while the reconnect waited ran the statement there, which could change another database, and a failed reconnect or retry left it marked as running, with its connection held and the mode line counting.
 - A statement that finishes on a connection its buffer has left no longer marks its text over a statement the buffer now runs, which took that statement's running marker and background.
+- A staged INSERT keeps its values in the result grid after its connection closes. A disconnect left the result without the column placeholders the grid draws staged rows with, and the next redraw showed every column of such a row as `<null>`; the staged values themselves were kept.
 
 ## 0.6.0 - 2026-10-09
 
