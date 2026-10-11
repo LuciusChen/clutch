@@ -1106,20 +1106,27 @@ loop turns into a stack as deep as the pages are many."
         (should clutch--result-server-pageable)
         (should clutch--result-server-rewritable)))))
 
-(ert-deftest clutch-test-execute-select-fetches-one-row-lookahead ()
-  "Initial SELECT execution should trim lookahead rows before rendering.
-A full first page has a next page only when a row follows it."
+(ert-deftest clutch-test-result-pages-fetch-one-row-lookahead ()
+  "Result pages should fetch one extra row to distinguish exact last pages.
+The first page and the next page both trim that row before rendering, and
+a full page has a next page only when a row follows it."
   (let ((clutch-result-max-rows 2))
-    (dolist (case '(("(1), (2)" nil) ("(1), (2), (3)" t)))
-      (pcase-let ((`(,values ,has-more) case))
+    (dolist (case '(("(1), (2)" nil) ("(1), (2), (3), (4), (5)" t)))
+      (pcase-let ((`(,values ,more) case))
         (ert-info ((format "rows: %s" values))
           (clutch-test--with-sqlite-result (conn result)
-              (list "CREATE TABLE users (id INTEGER PRIMARY KEY)"
-                    (concat "INSERT INTO users VALUES " values))
-              "SELECT id FROM users ORDER BY id"
+              (list "CREATE TABLE t (id INTEGER PRIMARY KEY)"
+                    (concat "INSERT INTO t VALUES " values))
+              "SELECT id FROM t ORDER BY id"
             (should (equal (mapcar #'car clutch--result-rows) '(1 2)))
-            (should (eq (and clutch--page-has-more t) has-more))
-            (should (= clutch--page-offset 0))))))))
+            (should (eq (and clutch--page-has-more t) more))
+            (should (= clutch--page-offset 0))
+            (when more
+              (clutch-result-next-page)
+              (should (equal (mapcar #'car clutch--result-rows) '(3 4)))
+              (should clutch--page-has-more)
+              (should (= clutch--page-offset 2))
+              (should (= clutch--page-current 1)))))))))
 
 (ert-deftest clutch-test-execute-select-page-tailed-queries-stay-flat ()
   "Page-tailed SELECT shapes should execute directly without wrapper paging."
@@ -1220,67 +1227,40 @@ A full first page has a next page only when a row follows it."
         (should (string-match-p "`id` AS `clutch__rid_0`"
                                 captured-base-sql))))))
 
-(ert-deftest clutch-test-high-risk-query-typed-confirmation-contract ()
-  "Typed high-risk confirmation should proceed only for the exact token YES."
-  (dolist (case '(("NO" cancel)
-                  ("YES" accept)))
-    (pcase-let ((`(,answer ,expected) case))
-      (ert-info ((format "answer: %s" answer))
-        (let ((clutch-high-risk-query-confirmation 'typed))
-          (clutch-test--with-minibuffer-answers (list answer)
-            (if (eq expected 'accept)
-                (should (clutch--confirm-high-risk-query
-                         "UPDATE users SET x=1"))
-              (should-error (clutch--confirm-high-risk-query
-                             "UPDATE users SET x=1")
-                            :type 'user-error))))))))
-
-(ert-deftest clutch-test-truncate-requires-typed-confirmation-by-default ()
-  "TRUNCATE should require one typed confirmation by default."
+(ert-deftest clutch-test-query-confirmation-policy ()
+  "Confirmation should follow the high-risk policy and the statement's risk.
+High-risk SQL, TRUNCATE included, requires one typed confirmation by
+default, which proceeds only for the exact token YES; the policy can ask a
+simple question instead, or nothing.  A DELETE in or after a WITH clause
+asks as a plain DELETE does."
   (should (eq (default-value 'clutch-high-risk-query-confirmation) 'typed))
-  (cl-letf (((symbol-function 'yes-or-no-p)
-             (lambda (&rest _args)
-               (ert-fail "TRUNCATE used a simple confirmation"))))
-    (clutch-test--with-minibuffer-answers '("YES")
-      (should-not (clutch--confirm-query-execution
-                   "TRUNCATE TABLE users")))))
-
-(ert-deftest clutch-test-high-risk-query-confirmation-is-customizable ()
-  "High-risk confirmation should support simple and disabled policies."
-  (dolist (policy '(yes-or-no nil))
-    (let ((clutch-high-risk-query-confirmation policy)
-          (simple-prompts 0))
-      (cl-letf (((symbol-function 'read-string)
-                 (lambda (&rest _args)
-                   (ert-fail "Non-typed policy requested typed confirmation")))
-                ((symbol-function 'yes-or-no-p)
-                 (lambda (&rest _args)
-                   (cl-incf simple-prompts)
-                   t)))
-        (should-not (clutch--confirm-query-execution
-                     "TRUNCATE TABLE users"))
-        (should (= simple-prompts (if policy 1 0)))))))
-
-(ert-deftest clutch-test-confirmation-covers-statements-in-with-clause ()
-  "A DELETE in or after a WITH clause should ask as a plain DELETE does."
-  (dolist (case '(("WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
-                   typed)
-                  ("WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
-                   simple)
-                  ("WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
-                   simple)
-                  ("WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
-                   nil)))
-    (pcase-let ((`(,sql ,expected) case))
-      (ert-info ((format "sql: %s" sql))
-        (let ((clutch-high-risk-query-confirmation 'typed)
-              prompts)
-          (cl-letf (((symbol-function 'read-string)
-                     (lambda (&rest _args) (push 'typed prompts) "YES"))
-                    ((symbol-function 'yes-or-no-p)
-                     (lambda (&rest _args) (push 'simple prompts) t)))
-            (clutch--confirm-query-execution sql)
-            (should (equal prompts (and expected (list expected))))))))))
+  ;; Each typed answer is one typed prompt; SIMPLE counts the others.
+  (dolist (case
+           '((typed "UPDATE users SET x=1" ("NO") 0 cancelled)
+             (typed "UPDATE users SET x=1" ("YES") 0 nil)
+             (typed "TRUNCATE TABLE users" ("YES") 0 nil)
+             (yes-or-no "TRUNCATE TABLE users" () 1 nil)
+             (nil "TRUNCATE TABLE users" () 0 nil)
+             (typed "WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d"
+                    ("YES") 0 nil)
+             (typed "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
+                    () 1 nil)
+             (typed "WITH old AS (SELECT 1) DELETE FROM users WHERE id = 1"
+                    () 1 nil)
+             (typed "WITH i AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM i"
+                    () 0 nil)))
+    (pcase-let ((`(,policy ,sql ,typed ,simple ,cancelled) case))
+      (ert-info ((format "%s policy, answers %S: %s" policy typed sql))
+        (let ((clutch-high-risk-query-confirmation policy)
+              (asked 0))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _args) (cl-incf asked) t)))
+            (clutch-test--with-minibuffer-answers typed
+              (if cancelled
+                  (should-error (clutch--confirm-query-execution sql)
+                                :type 'user-error)
+                (should-not (clutch--confirm-query-execution sql)))))
+          (should (= asked simple)))))))
 
 (ert-deftest clutch-test-preview-execution-sql-uses-result-pending-batch ()
   "Preview in result mode should show generated SQL for staged result changes."
@@ -1308,30 +1288,6 @@ A full first page has a next page only when a row follows it."
                                       "UPDATE \"users\" SET \"name\" = 'lynx' WHERE \"id\" = 1;"
                                       "DELETE FROM \"users\" WHERE \"id\" = 2;")
                                     "\n"))))))))
-
-(ert-deftest clutch-test-result-effective-query-applies-where-filter ()
-  "Result workflows should reuse the filtered SQL, not just display the filter."
-  :tags '(:smoke)
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--base-query "SELECT * FROM t"
-                clutch--last-query "SELECT * FROM t WHERE id > 0"
-                clutch--where-filter "id = 1")
-    (should (equal (clutch-result--effective-query)
-                   "SELECT * FROM (SELECT * FROM t) AS _clutch_filter WHERE id = 1"))))
-
-(ert-deftest clutch-test-execute-page-fetches-lookahead-and-trims-visible-rows ()
-  "Paging should fetch one extra row to distinguish exact last pages."
-  (let ((clutch-result-max-rows 2))
-    (clutch-test--with-sqlite-result (conn result)
-        '("CREATE TABLE t (id INTEGER PRIMARY KEY)"
-          "INSERT INTO t VALUES (1), (2), (3), (4), (5)")
-        "SELECT id FROM t ORDER BY id"
-      (clutch-result-next-page)
-      (should (equal (mapcar #'car clutch--result-rows) '(3 4)))
-      (should clutch--page-has-more)
-      (should (= clutch--page-offset 2))
-      (should (= clutch--page-current 1)))))
 
 (ert-deftest clutch-test-execute-page-reapplies-active-local-sort ()
   "Paging should apply an active local sort to each newly loaded page."
@@ -1454,14 +1410,20 @@ The page stays, and the message says so."
         (should (= (clutch-db-result-affected-rows (car rendered)) 1))))))
 
 (ert-deftest clutch-test-result-sql-commands-use-effective-filtered-query ()
-  "Result SQL commands should consume the active filtered query."
-  (dolist (command '(rerun preview))
+  "Result SQL commands should consume the active filtered query.
+Result workflows reuse the filtered SQL, not just display the filter, and
+the filter wraps the base query, not the last query run."
+  :tags '(:smoke)
+  (dolist (command '(effective-query rerun preview))
     (ert-info ((format "command: %s" command))
       (with-temp-buffer
         (clutch-result-mode)
-        (let (captured)
+        (let ((filtered
+               "SELECT * FROM (SELECT * FROM t) AS _clutch_filter WHERE id = 1")
+              captured)
           (setq-local clutch-connection 'fake-conn
                       clutch--base-query "SELECT * FROM t"
+                      clutch--last-query "SELECT * FROM t WHERE id > 0"
                       clutch--where-filter "id = 1")
           (cl-letf (((symbol-function 'clutch--execute)
                      (lambda (sql &optional context)
@@ -1470,17 +1432,17 @@ The page stays, and the message says so."
                      (lambda (sql &optional _product)
                        (setq captured sql))))
             (pcase command
+              ('effective-query
+               (should (equal (clutch-result--effective-query) filtered)))
               ('rerun
                (clutch-result-rerun)
-               (should (equal (car captured)
-                              "SELECT * FROM (SELECT * FROM t) AS _clutch_filter WHERE id = 1"))
+               (should (equal (car captured) filtered))
                ;; The filter goes with it, so the new result keeps it.
                (should (equal (plist-get (nth 1 captured) :where-filter)
                               "id = 1")))
               ('preview
                (clutch-preview-execution-sql)
-               (should (equal captured
-                              "SELECT * FROM (SELECT * FROM t) AS _clutch_filter WHERE id = 1"))))))))))
+               (should (equal captured filtered))))))))))
 
 (ert-deftest clutch-test-preview-execution-sql-prefers-semicolon-statement-bounds-in-sql-buffer ()
   "Preview should mirror DWIM statement bounds for semicolon-delimited SQL buffers."
@@ -1611,44 +1573,35 @@ statement."
                           (buffer-substring-no-properties beg end))
                          (substring sql 0 (string-search "; SELECT" sql)))))))))
 
-(ert-deftest clutch-test-execute-params-fallback-renders-sql-before-query ()
-  "Fallback parameter execution should render SQL via escape helpers."
+(ert-deftest clutch-test-execute-params-fallback-renders-params-into-the-sql ()
+  "Fallback parameter execution should render each parameter into its SQL.
+Scalars render via escape helpers.  A parameter whose JSON serialization
+fails signals before any SQL is sent."
   (let ((conn (make-clutch-test-conn))
-        captured-sql)
-    (cl-letf (((symbol-function 'clutch-db-query)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 'ok)))
-      (should (eq (clutch-db-execute-params
-                   conn
-                   "UPDATE demo SET name = ?, age = ? WHERE note IS ?"
-                   '("alice" 7 nil))
-                  'ok))
-      (should (equal captured-sql
-                     "UPDATE demo SET name = 'alice', age = 7 WHERE note IS NULL")))))
-
-(ert-deftest clutch-test-execute-params-fallback-json-error-surfaces ()
-  "Fallback parameter execution should signal when JSON parameter serialization fails."
-  (let ((payload (make-hash-table :test 'equal))
-        query-called)
+        (payload (make-hash-table :test 'equal)))
     (puthash "key" "value" payload)
-    (cl-letf (((symbol-function 'json-serialize)
-               (lambda (_value)
-                 (signal 'wrong-type-argument '("json serialization failed"))))
-              ((symbol-function 'clutch-db-query)
-               (lambda (&rest _args)
-                 (setq query-called t)
-                 'unexpected)))
-      (let ((err (should-error
-                  (clutch-db-execute-params
-                   'fake-conn
-                   "INSERT INTO demo(payload) VALUES (?)"
-                   (list payload))
-                  :type 'clutch-db-error)))
-        (should-not query-called)
-        (should (string-match-p
-                 "Cannot serialize parameter value as JSON"
-                 (cadr err)))))))
+    (pcase-dolist (`(,sql ,params ,sent)
+                   `(("UPDATE demo SET name = ?, age = ? WHERE note IS ?"
+                      ("alice" 7 nil)
+                      "UPDATE demo SET name = 'alice', age = 7 WHERE note IS NULL")
+                     ("INSERT INTO demo(payload) VALUES (?)" (,payload) nil)))
+      (ert-info (sql)
+        (let (captured-sql)
+          (cl-letf (((symbol-function 'json-serialize)
+                     (lambda (_value)
+                       (signal 'wrong-type-argument '("json serialization failed"))))
+                    ((symbol-function 'clutch-db-query)
+                     (lambda (_conn sql)
+                       (setq captured-sql sql)
+                       'ok)))
+            (if sent
+                (should (eq (clutch-db-execute-params conn sql params) 'ok))
+              (should (string-match-p
+                       "Cannot serialize parameter value as JSON"
+                       (cadr (should-error
+                              (clutch-db-execute-params conn sql params)
+                              :type 'clutch-db-error)))))
+            (should (equal captured-sql sent))))))))
 
 (ert-deftest clutch-test-execute-statements-remembers-error-details ()
   "Batch statement failures should store details for early and final errors."
@@ -1816,75 +1769,52 @@ statement."
                     'clutch-executed-sql-marker-face))))
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
 
-(ert-deftest clutch-test-execute-quit-distinguishes-confirmation-from-query ()
-  "Only a quit during the database call should retire the connection."
+(ert-deftest clutch-test-execute-quit-retires-only-a-connection-it-cannot-interrupt ()
+  "Only a quit during the database call should retire the connection.
+A quit while confirming keeps the session, and so does a quit during the
+call when a backend interrupt succeeds."
   (skip-unless (sqlite-available-p))
-  (with-temp-buffer
-    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-          confirmation-quit
-          phase
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch--execution-refresh-timer nil))
-      (setq-local clutch-connection conn)
-      (puthash conn 'dirty clutch--tx-state-cache)
-      (unwind-protect
-          (cl-letf (((symbol-function 'clutch--confirm-query-execution)
-                     (lambda (_sql)
-                       (when (eq phase 'confirm) (signal 'quit nil))))
-                    ((symbol-function 'clutch--prepare-row-identity-query)
-                     (lambda (&rest _args)
-                       (should clutch--execution-refresh-timer)
-                       (signal 'quit nil))))
-            (setq phase 'confirm)
-            (condition-case nil
-                (clutch--execute "SELECT 1")
-              (quit (setq confirmation-quit t)))
-            (should confirmation-quit)
-            (should (clutch-db-live-p conn))
-            (should (eq clutch-connection conn))
-            (setq phase 'query)
-            (let ((error (should-error
-                          (clutch--execute "SELECT 1")
-                          :type 'user-error)))
-              (should (equal (cadr error)
-                             clutch--transaction-outcome-unknown-message)))
-            (should-not (clutch-db-live-p conn))
-            (should (eq clutch-connection conn))
-            ;; Retirement keeps the dirty flag as lost-transaction evidence;
-            ;; the next transaction command consumes it and refuses to run.
-            (should (gethash conn clutch--tx-state-cache))
-            (should-not clutch--execution-start-time))
-        (clutch--execution-refresh-stop)
-        (when (clutch-db-live-p conn)
-          (clutch-db-disconnect conn))))))
-
-(ert-deftest clutch-test-execute-quit-prefers-backend-interrupt-over-disconnect ()
-  "Quit should keep the session when a backend interrupt succeeds."
-  (skip-unless (sqlite-available-p))
-  (with-temp-buffer
-    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-          (interrupted nil)
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch--execution-refresh-timer nil))
-      (setq-local clutch-connection conn)
-      (unwind-protect
-          (cl-letf (((symbol-function 'clutch--execute-statement)
-                     (lambda (_sql connection &rest _args)
-                       (clutch--handle-query-quit connection)))
-                    ;; SQLite cannot interrupt a query; this backend can.
-                    ((symbol-function 'clutch-db-interrupt-query)
-                     (lambda (_conn)
-                       (setq interrupted t)
-                       t)))
-            (should-error (clutch--execute "SELECT pg_sleep(10)")
-                          :type 'user-error)
-            (should interrupted)
-            (should (clutch-db-live-p conn))
-            (should (eq clutch-connection conn))
-            (should-not clutch--execution-start-time))
-        (clutch--execution-refresh-stop)
-        (when (clutch-db-live-p conn)
-          (clutch-db-disconnect conn))))))
+  (pcase-dolist (`(,phase ,interrupted ,retired ,error-message)
+                 `((confirm nil nil nil)
+                   (query nil t ,clutch--transaction-outcome-unknown-message)
+                   (query t nil nil)))
+    (ert-info ((format "quit while %s, interrupted: %s" phase interrupted))
+      (with-temp-buffer
+        (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+              (clutch--tx-state-cache (make-hash-table :test 'eq))
+              (clutch--execution-refresh-timer nil))
+          (setq-local clutch-connection conn)
+          (puthash conn 'dirty clutch--tx-state-cache)
+          (unwind-protect
+              (cl-letf (((symbol-function 'clutch--confirm-query-execution)
+                         (lambda (_sql)
+                           (when (eq phase 'confirm) (signal 'quit nil))))
+                        ((symbol-function 'clutch--prepare-row-identity-query)
+                         (lambda (&rest _args)
+                           (should clutch--execution-refresh-timer)
+                           (signal 'quit nil)))
+                        ;; SQLite cannot interrupt a query; other backends can.
+                        ((symbol-function 'clutch-db-interrupt-query)
+                         (lambda (_conn) interrupted)))
+                (if (eq phase 'confirm)
+                    (should (eq (condition-case nil
+                                    (clutch--execute "SELECT 1")
+                                  (quit 'quit))
+                                'quit))
+                  (should (equal (cadr (should-error (clutch--execute "SELECT 1")
+                                                     :type 'user-error))
+                                 error-message)))
+                (if retired
+                    (should-not (clutch-db-live-p conn))
+                  (should (clutch-db-live-p conn)))
+                (should (eq clutch-connection conn))
+                ;; Retirement keeps the dirty flag as lost-transaction evidence;
+                ;; the next transaction command consumes it and refuses to run.
+                (should (gethash conn clutch--tx-state-cache))
+                (should-not clutch--execution-start-time))
+            (clutch--execution-refresh-stop)
+            (when (clutch-db-live-p conn)
+              (clutch-db-disconnect conn))))))))
 
 (ert-deftest clutch-test-execute-db-error-preserves-dead-reconnect-anchor ()
   "Query errors should retain a dead connection for the next reconnect."
@@ -2749,58 +2679,23 @@ cached keys and their metadata stayed that database's."
             (should-not (gethash conn clutch--schema-cache))
             (should (eq primed conn))))))))
 
-(ert-deftest clutch-test-namespace-follow-up-keeps-metadata-when-nothing-moved ()
+(ert-deftest clutch-test-namespace-follow-up-replaces-metadata-only-when-it-moved ()
   "Following a possible switch should replace metadata only when it moved.
 A PostgreSQL COMMIT or ROLLBACK is followed in case it undid a search_path,
 and replacing the metadata after every one reloaded the schema for nothing,
 also after the first one on a console whose parameters had no path yet.
-The parameters take the namespace either way."
+The parameters take the namespace either way.  A DuckDB USE of another
+database can keep a schema named main, and comparing the schema alone kept
+the cached tables of the database left."
   (with-temp-buffer
-    (let ((namespace "public") (cleared 0) (primed 0))
+    (let (schema scope (cleared 0) (primed 0))
       (setq-local clutch-connection 'ns-conn)
       (setq-local clutch--connection-params '(:backend pg))
       (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
                  (lambda (_conn params)
-                   (plist-put (copy-sequence params) :search-path namespace)))
+                   (plist-put (copy-sequence params) :search-path schema)))
                 ((symbol-function 'clutch-db-current-schema)
-                 (lambda (_conn) namespace))
-                ((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 (lambda (_conn) (cl-incf cleared)))
-                ((symbol-function 'clutch--prime-schema-cache)
-                 (lambda (_conn) (cl-incf primed))))
-        (clutch--note-namespace-switch 'ns-conn '("public" nil))
-        (should (equal (plist-get clutch--connection-params :search-path)
-                       "public"))
-        (should (= cleared 0))
-        (should (= primed 0))
-        (setq namespace "alt")
-        (clutch--note-namespace-switch 'ns-conn '("public" nil))
-        (should (equal (plist-get clutch--connection-params :search-path) "alt"))
-        (should (= cleared 1))
-        (should (= primed 1))
-        ;; A connection lost right after its statement cannot answer.
-        (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
-                   (lambda (_conn _params)
-                     (signal 'clutch-db-error '("connection lost"))))
-                  ((symbol-function 'message) #'ignore))
-          (clutch--note-namespace-switch 'ns-conn '("alt" nil)))
-        (should (equal (plist-get clutch--connection-params :search-path)
-                       "alt"))))))
-
-(ert-deftest clutch-test-namespace-follow-up-replaces-metadata-of-another-catalog ()
-  "Following a possible switch should replace metadata read in another catalog.
-A DuckDB USE of another database can keep a schema named main, and
-comparing the schema alone kept the cached tables of the database left."
-  (with-temp-buffer
-    (let ((scope '((catalog . "home") (schema . "main"))) (cleared 0) (primed 0))
-      (setq-local clutch-connection 'ns-conn)
-      (setq-local clutch--connection-params '(:backend jdbc))
-      (setq-local clutch--connection-render-state '(:namespace "main"))
-      (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
-                 (lambda (_conn params) params))
-                ((symbol-function 'clutch-db-current-schema)
-                 (lambda (_conn) "main"))
+                 (lambda (_conn) schema))
                 ((symbol-function 'clutch-db-metadata-scope)
                  (lambda (_conn) scope))
                 ((symbol-function 'clutch--update-mode-line) #'ignore)
@@ -2808,14 +2703,35 @@ comparing the schema alone kept the cached tables of the database left."
                  (lambda (_conn) (cl-incf cleared)))
                 ((symbol-function 'clutch--prime-schema-cache)
                  (lambda (_conn) (cl-incf primed))))
-        (let ((before (clutch--namespace-before 'ns-conn)))
-          (clutch--note-namespace-switch 'ns-conn before)
-          (should (= cleared 0))
-          (should (= primed 0))
-          (setq scope '((catalog . "att") (schema . "main")))
-          (clutch--note-namespace-switch 'ns-conn before)
-          (should (= cleared 1))
-          (should (= primed 1)))))))
+        (pcase-dolist (`(,label (,shown ,shown-scope) (,new-schema ,new-scope) ,moved)
+                       '(("nothing moved" ("public" nil) ("public" nil) nil)
+                         ("schema moved" ("public" nil) ("alt" nil) t)
+                         ("same catalog" ("main" ((catalog . "home")))
+                          ("main" ((catalog . "home"))) nil)
+                         ("another catalog" ("main" ((catalog . "home")))
+                          ("main" ((catalog . "att"))) t)))
+          (ert-info (label)
+            (setq-local clutch--connection-render-state (list :namespace shown))
+            (setq scope shown-scope)
+            (let ((before (clutch--namespace-before 'ns-conn)))
+              (setq schema new-schema
+                    scope new-scope
+                    cleared 0
+                    primed 0)
+              (clutch--note-namespace-switch 'ns-conn before))
+            (should (equal (plist-get clutch--connection-params :search-path)
+                           new-schema))
+            (should (= cleared (if moved 1 0)))
+            (should (= primed (if moved 1 0)))))
+        ;; A connection lost right after its statement cannot answer.
+        (cl-letf (((symbol-function 'clutch-db-update-namespace-params)
+                   (lambda (_conn _params)
+                     (signal 'clutch-db-error '("connection lost"))))
+                  ((symbol-function 'message) #'ignore))
+          (clutch--note-namespace-switch
+           'ns-conn (clutch--namespace-before 'ns-conn)))
+        (should (equal (plist-get clutch--connection-params :search-path)
+                       "main"))))))
 
 (ert-deftest clutch-test-transaction-commands-follow-the-namespace-back ()
   "Ending a transaction from a command should follow the namespace back.
@@ -3096,62 +3012,42 @@ started loading a page there cleared the time of that running load."
         (ert-run-idle-timers)
         (should-not clutch--execution-start-time)))))
 
-(ert-deftest clutch-test-last-page-stops-when-its-count-is-cancelled ()
-  "C-g during the count of a last-page move should stop the page load.
+(ert-deftest clutch-test-last-page-counts-rows-first ()
+  "The last page of an uncounted result should load once the count arrives.
+C-g during the count of a last-page move should stop the page load.
 The cancel may meet a count that has already finished; the move stops
 there, and the result keeps its rows and its unknown total."
-  (clutch-test--with-result-state
-      (:columns '("id") :rows '((1) (2)) :connection 'async-conn
-       :base-query "SELECT id FROM t" :server-pageable t :server-rewritable t
-       :page-total-rows nil :result-max-rows 2)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-db-build-count-sql)
-                 (lambda (&rest _) "SELECT count(*) FROM t"))
-                ((symbol-function 'clutch-db-build-paged-sql)
-                 (lambda (_conn _sql page-num &rest _)
-                   (format "SELECT id FROM t PAGE %d" page-num)))
-                ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
-                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result-last-page)
-        (clutch-cancel-query-or-quit)
-        (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
-        (ert-run-idle-timers)
-        (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
-        (should-not clutch--page-total-rows)
-        (should (equal clutch--result-rows '((1) (2))))
-        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
-
-(ert-deftest clutch-test-last-page-counts-rows-first-without-blocking ()
-  "The last page of an uncounted result should load once the count arrives."
-  (clutch-test--with-result-state
-      (:columns '("id")
-       :rows '((1) (2))
-       :connection 'async-conn
-       :base-query "SELECT id FROM t"
-       :server-pageable t
-       :server-rewritable t
-       :page-total-rows nil
-       :result-max-rows 2)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-db-build-count-sql)
-                 (lambda (&rest _) "SELECT count(*) FROM t"))
-                ((symbol-function 'clutch-db-build-paged-sql)
-                 (lambda (_conn _sql page-num &rest _)
-                   (format "SELECT id FROM t PAGE %d" page-num)))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
-                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result-last-page)
-        (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
-        (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
-        (ert-run-idle-timers)
-        (should (= clutch--page-total-rows 5))
-        (should (equal (mapcar #'car finishes)
-                       '("SELECT id FROM t PAGE 2" "SELECT count(*) FROM t")))
-        ;; The page load counts its own time once the count's has ended.
-        (should clutch--execution-start-time)))))
+  (pcase-dolist (`(,cancel ,sent ,total)
+                 '((nil ("SELECT id FROM t PAGE 2" "SELECT count(*) FROM t") 5)
+                   (t ("SELECT count(*) FROM t") nil)))
+    (ert-info ((format "cancelled: %s" cancel))
+      (clutch-test--with-result-state
+          (:columns '("id") :rows '((1) (2)) :connection 'async-conn
+           :base-query "SELECT id FROM t" :server-pageable t :server-rewritable t
+           :page-total-rows nil :result-max-rows 2)
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-db-build-count-sql)
+                     (lambda (&rest _) "SELECT count(*) FROM t"))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn _sql page-num &rest _)
+                       (format "SELECT id FROM t PAGE %d" page-num)))
+                    ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
+                    ((symbol-function 'clutch--refresh-display) #'ignore)
+                    ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result-last-page)
+            (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
+            (when cancel
+              (clutch-cancel-query-or-quit))
+            (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
+            (ert-run-idle-timers)
+            (should (equal (mapcar #'car finishes) sent))
+            (should (equal clutch--page-total-rows total))
+            (should (equal clutch--result-rows '((1) (2))))
+            (if cancel
+                (should-not (clutch-db--foreground-busy-p 'async-conn))
+              ;; The page load counts its own time once the count's has ended.
+              (should clutch--execution-start-time))))))))
 
 (ert-deftest clutch-test-async-execute-drops-outcome-of-killed-buffer ()
   "A statement finishing after its buffer is killed should only be reported."
