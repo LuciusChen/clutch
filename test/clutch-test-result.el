@@ -165,7 +165,11 @@ default returns the default."
         ;; Without a column at point, RET asks for the whole condition.
         (point-on "nothing")
         (filter "" "id = 2")
-        (should (equal (ids) '(2)))))))
+        (should (equal (ids) '(2)))
+        ;; A bare value after a column compares for equality.
+        (filter "score" "10")
+        (should (equal (ids) '(1)))
+        (should (member "Filter applied: WHERE \"score\" = 10" shown))))))
 
 (ert-deftest clutch-test-where-filter-column-prompt-prefers-exact-names ()
   "A name at the column prompt should pick the column it spells exactly.
@@ -1128,7 +1132,8 @@ CSV, TSV and Org table copies honor the installed no-header switch."
             (should (equal (current-kill 0) expected))))))))
 
 (ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
-  "Refined copy should copy the final rectangle, not the initial region."
+  "Refined copy should copy the final rectangle, not the initial region.
+Without a region, choosing a format with refinement is refused."
   (clutch-test--with-result-state
       (:columns '("id" "name" "score")
        :rows '((1 "alice" 10)
@@ -1144,7 +1149,13 @@ CSV, TSV and Org table copies honor the installed no-header switch."
       (clutch-refine-toggle-row)
       (clutch-refine-toggle-col)
       (clutch-refine-confirm)
-      (should (equal (current-kill 0) "score\n10\n30")))))
+      (should (equal (current-kill 0) "score\n10\n30"))
+      (ert-info ("without a region")
+        (let ((err (should-error (clutch-test--type-keys "c -r c")
+                                 :type 'user-error)))
+          (should (string-match-p "Set a region"
+                                  (error-message-string err))))
+        (should-not clutch-refine-mode)))))
 
 (ert-deftest clutch-test-copy-org-table-escapes-table-sensitive-content ()
   "Org table copy should keep one logical table row per result row."
@@ -1275,7 +1286,9 @@ Cancelling should exit without invoking the callback and drop them."
         (should scheduled)))))
 
 (ert-deftest clutch-test-refine-toggle-excludes-and-includes ()
-  "Refine mode should toggle row and column exclusions at point."
+  "Refine mode should toggle row and column exclusions at point.
+It refuses a row or column outside the selection, and a point off the
+table."
   (dolist (case '((row clutch-row-idx clutch-refine-toggle-row
                        clutch--refine-excluded-rows)
                   (column clutch-col-idx clutch-refine-toggle-col
@@ -1292,7 +1305,22 @@ Cancelling should exit without invoking the callback and drop them."
           (funcall toggle)
           (should (equal (symbol-value state-var) '(1)))
           (funcall toggle)
-          (should-not (symbol-value state-var)))))))
+          (should-not (symbol-value state-var))))))
+  (with-temp-buffer
+    (clutch-test--setup-refine-result-buffer)
+    (clutch-result--start-refine '((0 1) . (0)) #'ignore)
+    (dolist (case '(((2 0) clutch-refine-toggle-row "Row not in selection")
+                    ((0 1) clutch-refine-toggle-col "Column not in selection")
+                    (nil clutch-refine-toggle-row "No row at point")
+                    (nil clutch-refine-toggle-col "No column at point")))
+      (pcase-let ((`(,cell ,toggle ,text) case))
+        (ert-info ((format "refused: %s" text))
+          (if cell
+              (apply #'clutch--goto-cell cell)
+            (goto-char (point-max)))
+          (should (equal (error-message-string
+                          (should-error (funcall toggle) :type 'user-error))
+                         text)))))))
 
 (ert-deftest clutch-test-refine-confirm-calls-callback-with-filtered-rect ()
   "Refine confirm should pass the remaining rectangle to the callback."
@@ -1410,9 +1438,17 @@ Cancelling should exit without invoking the callback and drop them."
           (list "CREATE TABLE t (id INTEGER PRIMARY KEY)"
                 (clutch-test--insert-ids-sql 30))
           "SELECT id FROM t ORDER BY id"
-        (clutch-result-count-total)
-        (clutch-test--await-queries)
-        (should (= clutch--page-total-rows 30))
+        ;; Before the rows are counted, M-> counts them and then only
+        ;; says this page is the last; once counted, it refuses.
+        (let (shown)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (when fmt
+                         (push (apply #'format-message fmt args) shown)))))
+            (clutch-result-last-page)
+            (clutch-test--await-queries))
+          (should (= clutch--page-total-rows 30))
+          (should (equal (car shown) "Already on last page")))
         (should-error (clutch-result-last-page) :type 'user-error)))))
 
 (ert-deftest clutch-test-sort-cycle-real-sqlite-workflow ()
