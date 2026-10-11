@@ -4936,7 +4936,15 @@ DETAILS, when non-nil, is returned by `clutch--ensure-column-details'."
           (should (string-prefix-p "│I I1 " rendered))
           (should (string-match-p "<generated>" rendered))
           (should (string-match-p "<default>" rendered))
-          (should (string-match-p "alice" rendered)))))))
+          (should (string-match-p "alice" rendered)))
+        ;; A disconnect leaves the result without its connection, so without
+        ;; placeholders; the staged value showed as NULL with them.
+        (setq-local clutch-connection nil)
+        (erase-buffer)
+        (setq render-state (clutch--build-render-state))
+        (clutch--insert-pending-insert-rows '(0 1 2 3) [12 12 12 12] 3 0 row-positions
+                                            render-state)
+        (should (string-match-p "alice" (buffer-string)))))))
 
 (ert-deftest clutch-test-pending-insert-placeholders-skip-metadata-without-inserts ()
   "Result rendering should not request insert placeholder metadata without inserts."
