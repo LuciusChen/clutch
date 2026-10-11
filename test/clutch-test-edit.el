@@ -310,42 +310,47 @@ the edit buffer behind it is killed with it."
             (should-not (get-buffer "*clutch-edit: [0].name*"))))))))
 
 (ert-deftest clutch-test-edit-cell-json-sub-editor-contract ()
-  "JSON cells should open the JSON sub-editor with serialized JSON text."
+  "JSON cells should open the JSON sub-editor with serialized JSON text.
+Text cells containing JSON objects should still use the JSON editor."
   (let ((object (make-hash-table :test 'equal)))
     (puthash "test" t object)
     (puthash "data" (vector 1 2) object)
     (dolist (case (list (list :label "raw json"
+                              :type 'json
                               :payload "{\"a\":1}"
-                              :expected "{\n  \"a\": 1\n}"
-                              :buffer-match "\\*clutch-edit-json: payload\\*"
-                              :header-match "JSON field payload")
+                              :expected "{\n  \"a\": 1\n}")
                         (list :label "parsed object"
+                              :type 'json
                               :payload object
                               :matches '("\"test\": true" "\"data\": \\[")
                               :not-matches '("#s(hash-table"))
                         (list :label "json string"
+                              :type 'json
                               :payload "hello"
-                              :expected "\"hello\"")))
+                              :expected "\"hello\"")
+                        (list :label "text holding a json object"
+                              :type 'text
+                              :payload "{\"order\":{\"id\":42},\"lines\":[1,2]}"
+                              :expected "{\n  \"order\": {\n    \"id\": 42\n  },\n  \"lines\": [\n    1,\n    2\n  ]\n}")))
       (ert-info ((format "case: %s" (plist-get case :label)))
-        (let ((payload (plist-get case :payload)))
+        (let ((type (plist-get case :type)))
           (clutch-test--with-open-edit-cell (buf result-buf)
               (:connection (make-clutch-test-conn :table "shipping_incidents"
-                                                  :columns '((:name "payload" :type "json")))
+                                                  :columns `((:name "payload" :type ,(symbol-name type))))
                :source-table "shipping_incidents"
                :columns '("payload")
-               :column-defs '((:name "payload" :type-category json))
-               :rows (list (list payload))
+               :column-defs `((:name "payload" :type-category ,type))
+               :rows (list (list (plist-get case :payload)))
                :row-identity
                (clutch-test--primary-row-identity
                 "shipping_incidents" '("payload") '(0)))
               '(0 0)
-            (when-let* ((buffer-match (plist-get case :buffer-match)))
-              (should (string-match-p buffer-match (buffer-name buf))))
+            (should (string-match-p "\\*clutch-edit-json: payload\\*"
+                                    (buffer-name buf)))
             (with-current-buffer buf
               (should (equal clutch-result-edit-json--field-name "payload"))
-              (when-let* ((header-match (plist-get case :header-match)))
-                (should (string-match-p header-match
-                                        (format "%s" header-line-format))))
+              (should (string-match-p "JSON field payload"
+                                      (format "%s" header-line-format)))
               (let ((text (buffer-substring-no-properties
                            (point-min) (point-max))))
                 (when-let* ((expected (plist-get case :expected)))
@@ -354,26 +359,6 @@ the edit buffer behind it is killed with it."
                   (should (string-match-p pattern text)))
                 (dolist (pattern (plist-get case :not-matches))
                   (should-not (string-match-p pattern text)))))))))))
-
-(ert-deftest clutch-test-edit-cell-json-looking-text-opens-json-sub-editor ()
-  "Text cells containing JSON objects should still use the JSON editor."
-  (clutch-test--with-open-edit-cell (buf result-buf)
-      (:connection (make-clutch-test-conn :table "events"
-                                          :columns '((:name "payload" :type "text")))
-       :source-table "events"
-       :columns '("payload")
-       :column-defs '((:name "payload" :type-category text))
-       :rows '(("{\"order\":{\"id\":42},\"lines\":[1,2]}"))
-       :row-identity
-       (clutch-test--primary-row-identity "events" '("payload") '(0)))
-      '(0 0)
-    (should (string-match-p "\\*clutch-edit-json: payload\\*"
-                            (buffer-name buf)))
-    (with-current-buffer buf
-      (should (string-match-p "JSON field payload"
-                              (format "%s" header-line-format)))
-      (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                     "{\n  \"order\": {\n    \"id\": 42\n  },\n  \"lines\": [\n    1,\n    2\n  ]\n}")))))
 
 (ert-deftest clutch-test-edit-cell-auto-json-closes-edit-flow ()
   "Auto-opened JSON editors should close the parent edit flow."
@@ -546,30 +531,46 @@ the edit buffer behind it is killed with it."
         (should-error (clutch-result-insert-fill-current-time)
                       :type 'user-error))))))
 
-(ert-deftest clutch-test-insert-buffer-labels-show_field_metadata ()
-  "Insert buffer labels should show field metadata without changing parsed names."
+(ert-deftest clutch-test-insert-buffer-labels-every-field-with-its-metadata ()
+  "Insert buffers should render every field, labelled with its metadata.
+Every field should render without a sparse toggle, and labels should show
+field metadata without changing parsed names."
+  :tags '(:smoke)
   (clutch-test--with-pop-to-buffer-capture insert-buf
     (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("id" "severity" "postmortem" "is_ship_blocked" "opened_at")
+        (:columns '("id" "severity" "owner" "postmortem" "is_ship_blocked"
+                    "opened_at" "created_at")
          :column-defs '((:name "id" :type-category numeric)
                         (:name "severity" :type-category text)
+                        (:name "owner" :type-category text)
                         (:name "postmortem" :type-category json)
                         (:name "is_ship_blocked" :type-category numeric)
-                        (:name "opened_at" :type-category datetime))
+                        (:name "opened_at" :type-category datetime)
+                        (:name "created_at" :type-category datetime))
          :connection (make-clutch-test-conn :table "shipping_incidents"
                                             :columns '((:name "id" :type "int" :generated t :nullable nil)
                                                        (:name "severity" :type "enum('low','medium')" :nullable nil)
+                                                       (:name "owner" :type "varchar(64)" :default "system" :nullable t)
                                                        (:name "postmortem" :type "json" :nullable t)
                                                        (:name "is_ship_blocked" :type "tinyint(1)" :default "0" :nullable nil)
-                                                       (:name "opened_at" :type "datetime" :nullable nil))))
+                                                       (:name "opened_at" :type "datetime" :nullable nil)
+                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
+         :source-table "shipping_incidents")
       (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
-        (let ((rendered (buffer-string)))
-          (should (string-match-p "^id[ ]+\\[generated\\]: $" rendered))
-          (should (string-match-p "^severity[ ]+\\[enum required\\]: $" rendered))
-          (should (string-match-p "^postmortem[ ]+\\[json\\]: $" rendered))
-          (should (string-match-p "^is_ship_blocked \\[default=0 bool\\]: $" rendered))
-          (should (string-match-p "^opened_at[ ]+\\[datetime required\\]: $" rendered)))
+        (should (string-match-p "C-c \\. Set current time"
+                                (substring-no-properties
+                                 (clutch-result-insert--header-line))))
+        (should-not (lookup-key clutch--result-insert-major-mode-map
+                                (kbd "C-c C-a")))
+        (dolist (label '("id[ ]+\\[generated\\]"
+                         "severity[ ]+\\[enum required\\]"
+                         "owner[ ]+\\[default=system\\]"
+                         "postmortem[ ]+\\[json\\]"
+                         "is_ship_blocked[ ]+\\[default=0 bool\\]"
+                         "opened_at[ ]+\\[datetime required\\]"
+                         "created_at[ ]+\\[default=CURRENT_TIMESTAMP datetime\\]"))
+          (should (string-match-p (concat "^" label ": $") (buffer-string))))
         (goto-char (point-min))
         (should (get-text-property (point) 'read-only))
         (should (eq (get-text-property (point) 'face)
@@ -579,43 +580,12 @@ the edit buffer behind it is killed with it."
                     'clutch-insert-field-tag-face))
         (clutch-test--goto-insert-field-value "severity" t)
         (insert "low")
-        (goto-char (point-min))
-        (let ((fields (clutch-result-insert--parse-fields)))
-          (should (equal fields '(("severity" . "low")))))))))
-
-(ert-deftest clutch-test-insert-buffer-shows-all-fields-by-default ()
-  "Insert buffers should render every field without a sparse toggle."
-  :tags '(:smoke)
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("id" "severity" "owner" "created_at")
-         :column-defs '((:name "id" :type-category numeric)
-                        (:name "severity" :type-category text)
-                        (:name "owner" :type-category text)
-                        (:name "created_at" :type-category datetime))
-         :connection (make-clutch-test-conn :table "shipping_incidents"
-                                            :columns '((:name "id" :type "int" :generated t :nullable nil)
-                                                       (:name "severity" :type "enum('low','medium','high')" :nullable nil)
-                                                       (:name "owner" :type "varchar(64)" :default "system" :nullable t)
-                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
-         :source-table "shipping_incidents")
-      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-      (with-current-buffer insert-buf
-        (should (string-match-p "C-c \\. Set current time"
-                                (substring-no-properties
-                                 (clutch-result-insert--header-line))))
-        (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
-        (should (string-match-p "^severity[ ]+\\[enum required\\]: $" (buffer-string)))
-        (should (string-match-p "^owner[ ]+\\[default=system\\]: $" (buffer-string)))
-        (should (string-match-p "^created_at[ ]+\\[default=CURRENT_TIMESTAMP datetime\\]: "
-                                (buffer-string)))
-        (should-not (lookup-key clutch--result-insert-major-mode-map
-                                (kbd "C-c C-a")))
-        (goto-char (point-min))
-        (re-search-forward "^owner.*: " nil t)
+        (clutch-test--goto-insert-field-value "owner" t)
         (insert "bob")
         (should (string-match-p "^owner[ ]+\\[default=system\\]: bob$"
-                                (buffer-string)))))))
+                                (buffer-string)))
+        (should (equal (clutch-result-insert--parse-fields)
+                       '(("severity" . "low") ("owner" . "bob"))))))))
 
 (ert-deftest clutch-test-clone-row-to-insert-prefills-effective-result-values ()
   "Cloning a result row should reuse visible row values and staged edits."
@@ -740,132 +710,91 @@ the edit buffer behind it is killed with it."
                  (call-interactively #'clutch-result-insert-import-delimited))))))
     (should (equal (buffer-string) "existing form text"))))
 
-(ert-deftest clutch-test-insert-import-delimited-parses-quoted-csv-row ()
-  "Single-row CSV import should prefill the current insert form."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("owner" "severity")
-         :column-defs '((:name "owner" :type-category text)
-                        (:name "severity" :type-category text))
-         :connection (make-clutch-test-conn :table "shipping_incidents"
-                                            :columns '((:name "owner" :type "varchar(64)" :nullable t)
-                                                       (:name "severity" :type "enum('low','high')" :nullable nil)))
-         :source-table "shipping_incidents")
-      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-      (with-current-buffer insert-buf
-        (clutch-result-insert-import-delimited
-         "owner,severity\n\"Bob, Jr.\",high\n")
-        (should (string-match-p "^owner[ ]*: Bob, Jr\\.$" (buffer-string)))
-        (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
-                                (buffer-string)))))))
-
-(ert-deftest clutch-test-insert-import-delimited-stages-multi-row-header-mapping ()
-  "Multi-row delimited import should stage inserts by header names."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("severity" "owner" "created_at")
-         :column-defs '((:name "severity" :type-category text)
-                        (:name "owner" :type-category text)
-                        (:name "created_at" :type-category datetime))
-         :connection (make-clutch-test-conn :table "shipping_incidents"
-                                            :columns '((:name "severity" :type "enum('low','high')" :nullable nil)
-                                                       (:name "owner" :type "varchar(64)" :nullable t)
-                                                       (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
-         :source-table "shipping_incidents"
-         :render t)
-      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-      (with-current-buffer insert-buf
-        (clutch-result-insert-import-delimited
-         "owner\tseverity\nbob\thigh\nann\tlow\n")
-        (should (equal (with-current-buffer result-buf
-                         clutch--pending-inserts)
-                       '((("owner" . "bob") ("severity" . "high"))
-                         (("owner" . "ann") ("severity" . "low")))))
-        (should (string-match-p "^severity[ ]+\\[enum required\\]: $"
-                                (buffer-string))))
-      ;; The staged rows show as ghost rows.
-      (with-current-buffer result-buf
-        (should (= (length clutch--row-start-positions) 2))
-        (should (string-match-p "bob" (clutch-test--rendered-line-at 0)))))))
-
-(ert-deftest clutch-test-insert-import-refuses-while-a-query-runs ()
-  "Importing rows should be refused while a statement runs, as staging is.
-The page that statement brings would replace the staged rows."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-insert-result-buffer result-buf
-        (:columns '("severity" "owner")
-         :column-defs '((:name "severity" :type-category text)
-                        (:name "owner" :type-category text))
-         :connection (make-clutch-test-conn :table "shipping_incidents"
-                                            :columns '((:name "severity" :type "text" :nullable t)
-                                                       (:name "owner" :type "text" :nullable t)))
-         :source-table "shipping_incidents")
+(ert-deftest clutch-test-insert-import-delimited-prefills-or-stages-rows ()
+  "Delimited import should prefill the form from one row and stage several.
+Single-row CSV import should prefill the current insert form, and
+multi-row delimited import should stage inserts by header names.
+Importing rows should be refused while a statement runs, as staging is:
+the page that statement brings would replace the staged rows."
+  (pcase-dolist (`(,label ,text ,running ,form ,staged)
+                 '(("one CSV row" "owner,severity\n\"Bob, Jr.\",high\n" nil
+                    ("^owner[ ]*: Bob, Jr\\.$"
+                     "^severity[ ]+\\[enum required\\]: high$")
+                    nil)
+                   ("TSV rows" "owner\tseverity\nbob\thigh\nann\tlow\n" nil
+                    ("^severity[ ]+\\[enum required\\]: $")
+                    ((("owner" . "bob") ("severity" . "high"))
+                     (("owner" . "ann") ("severity" . "low"))))
+                   ("TSV rows while a query runs"
+                    "owner\tseverity\nbob\thigh\nann\tlow\n" t nil nil)))
+    (ert-info (label)
       (let ((clutch--running-queries (make-hash-table :test 'eq)))
-        (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-        (puthash (buffer-local-value 'clutch-connection result-buf)
-                 (list :buffer result-buf) clutch--running-queries)
-        (with-current-buffer insert-buf
-          (should-error (clutch-result-insert-import-delimited
-                         "owner\tseverity\nbob\thigh\nann\tlow\n")
-                        :type 'user-error))
-        (should-not (with-current-buffer result-buf
-                      clutch--pending-inserts))))))
+        (clutch-test--with-pop-to-buffer-capture insert-buf
+          (clutch-test--with-insert-result-buffer result-buf
+              (:columns '("severity" "owner" "created_at")
+               :column-defs '((:name "severity" :type-category text)
+                              (:name "owner" :type-category text)
+                              (:name "created_at" :type-category datetime))
+               :connection (make-clutch-test-conn :table "shipping_incidents"
+                                                  :columns '((:name "severity" :type "enum('low','high')" :nullable nil)
+                                                             (:name "owner" :type "varchar(64)" :nullable t)
+                                                             (:name "created_at" :type "datetime" :default "CURRENT_TIMESTAMP" :nullable t)))
+               :source-table "shipping_incidents"
+               :render t)
+            (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
+            (when running
+              (puthash (buffer-local-value 'clutch-connection result-buf)
+                       (list :buffer result-buf) clutch--running-queries))
+            (with-current-buffer insert-buf
+              (if running
+                  (should-error (clutch-result-insert-import-delimited text)
+                                :type 'user-error)
+                (clutch-result-insert-import-delimited text))
+              (dolist (field form)
+                (should (string-match-p field (buffer-string)))))
+            (with-current-buffer result-buf
+              (should (equal clutch--pending-inserts staged))
+              ;; The staged rows show as ghost rows.
+              (should (= (length clutch--row-start-positions)
+                         (length staged))))))))))
 
 ;;;; Edit — staged mutations (row identity)
 
-(ert-deftest clutch-test-insert-stage-replaces-existing-pending-insert ()
-  "Staging a re-edited insert should replace the pending entry in place."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-result-state-buffer result-buf
-        (:connection (make-clutch-test-conn :table "incidents"
-                                            :columns '((:name "severity")))
-         :source-table "incidents"
-         :columns '("severity")
-         :column-defs '((:name "severity"))
-         :rows '(("low") ("medium"))
-         :pending-inserts (list '(("severity" . "low")))
-         :render t)
-      ;; Redrawing every row would move the selection off its rows.
-      (let ((selection-start (with-current-buffer result-buf
-                               (clutch-test--select-cells '(0 0) '(1 0))
-                               (mark))))
-        (clutch-result-insert--open-buffer
-         "incidents" result-buf '(("severity" . "low")) 0)
-        (with-current-buffer insert-buf
-          (clutch-test--set-insert-field-value "severity" "high")
-          (cl-letf (((symbol-function 'quit-window) #'ignore))
-            (clutch-result-insert-stage)))
-        (with-current-buffer result-buf
-          (should (equal clutch--pending-inserts '((("severity" . "high")))))
-          (should (= (length clutch--row-start-positions) 3))
-          (should (string-match-p "high" (clutch-test--rendered-line-at 2)))
-          (should (= (mark) selection-start)))))))
-
-(ert-deftest clutch-test-insert-stage-appends-new-pending-insert-locally ()
-  "Staging a new insert should append one ghost row without full redraw."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-result-state-buffer result-buf
-        (:connection (make-clutch-test-conn :table "users"
-                                            :columns '((:name "name")))
-         :source-table "users"
-         :columns '("name")
-         :column-defs '((:name "name"))
-         :rows '(("alice") ("bob"))
-         :render t)
-      ;; Redrawing every row would move the selection off its rows.
-      (let ((selection-start (with-current-buffer result-buf
-                               (clutch-test--select-cells '(0 0) '(1 0))
-                               (mark))))
-        (clutch-result-insert--open-buffer "users" result-buf)
-        (with-current-buffer insert-buf
-          (clutch-test--set-insert-field-value "name" "carol")
-          (cl-letf (((symbol-function 'quit-window) #'ignore))
-            (clutch-result-insert-stage)))
-        (with-current-buffer result-buf
-          (should (equal clutch--pending-inserts '((("name" . "carol")))))
-          (should (= (length clutch--row-start-positions) 3))
-          (should (string-match-p "I1 .*carol" (clutch-test--rendered-line-at 2)))
-          (should (= (mark) selection-start)))))))
+(ert-deftest clutch-test-insert-stage-renders-only-its-ghost-row ()
+  "Staging an insert form should render only its own ghost row.
+Staging a re-edited insert should replace the pending entry in place,
+and staging a new insert should append one ghost row without full
+redraw."
+  (pcase-dolist (`(,label ,staged ,index ,typed)
+                 '(("new insert" nil nil "carol")
+                   ("re-edited insert" ((("name" . "carol"))) 0 "dave")))
+    (ert-info (label)
+      (clutch-test--with-pop-to-buffer-capture insert-buf
+        (clutch-test--with-result-state-buffer result-buf
+            (:connection (make-clutch-test-conn :table "users"
+                                                :columns '((:name "name")))
+             :source-table "users"
+             :columns '("name")
+             :column-defs '((:name "name"))
+             :rows '(("alice") ("bob"))
+             :pending-inserts (copy-sequence staged)
+             :render t)
+          ;; Redrawing every row would move the selection off its rows.
+          (let ((selection-start (with-current-buffer result-buf
+                                   (clutch-test--select-cells '(0 0) '(1 0))
+                                   (mark))))
+            (clutch-result-insert--open-buffer
+             "users" result-buf (car staged) index)
+            (with-current-buffer insert-buf
+              (clutch-test--set-insert-field-value "name" typed)
+              (cl-letf (((symbol-function 'quit-window) #'ignore))
+                (clutch-result-insert-stage)))
+            (with-current-buffer result-buf
+              (should (equal clutch--pending-inserts `((("name" . ,typed)))))
+              (should (= (length clutch--row-start-positions) 3))
+              (should (string-match-p (concat "I1 .*" typed)
+                                      (clutch-test--rendered-line-at 2)))
+              (should (= (mark) selection-start)))))))))
 
 (ert-deftest clutch-test-insert-stage-rejects-stale-result-table-before-closing ()
   "Insert staging should keep the form open when the parent result table changed."
@@ -893,22 +822,29 @@ The page that statement brings would replace the staged rows."
         (should-not (with-current-buffer result-buf
                       clutch--pending-inserts))))))
 
-(ert-deftest clutch-test-apply-edit-errors-clearly-without-row-identity ()
-  "Edit staging should explain why update/delete are disabled."
-  (clutch-test--with-result-state
-      (:connection-params '(:backend mysql)
-       :last-query "SELECT * FROM users"
-       :source-table "users"
-       :rows '((1 "before")))
-    (let ((err (should-error (clutch-result--apply-edit
-                              0 1 "after"
-                              (list :identity [1]
-                                    :original "before"
-                                    :original-state '(nil . "before")))
-                             :type 'user-error)))
-      (should (string-match-p
-               "no primary, unique, or row locator identity available for table users"
-               (error-message-string err))))))
+(ert-deftest clutch-test-staging-explains-a-missing-row-identity ()
+  "Edit and delete staging should explain why update/delete are disabled."
+  (pcase-dolist (`(,label ,stage)
+                 `(("edit" ,(lambda ()
+                              (clutch-result--apply-edit
+                               0 1 "after"
+                               (list :identity [1]
+                                     :original "before"
+                                     :original-state '(nil . "before")))))
+                   ("delete" ,(lambda ()
+                                (clutch--goto-cell 0 0)
+                                (clutch-result-delete-rows)))))
+    (ert-info (label)
+      (clutch-test--with-result-state
+          (:connection-params '(:backend mysql)
+           :last-query "SELECT * FROM users"
+           :source-table "users"
+           :rows '((1 "before"))
+           :render t)
+        (should (string-match-p
+                 "no primary, unique, or row locator identity available for table users"
+                 (error-message-string
+                  (should-error (funcall stage) :type 'user-error))))))))
 
 (ert-deftest clutch-test-apply-edit-with-filter-noop-uses-visible-row ()
   "Edit staging should compare against the filtered display row."
@@ -926,21 +862,6 @@ The page that statement brings would replace the staged rows."
                       :original "beta"
                       :original-state '(nil . "beta")))
     (should-not clutch--pending-edits)))
-
-(ert-deftest clutch-test-delete-rows-errors-clearly-without-row-identity ()
-  "Delete staging should explain why update/delete are disabled."
-  (clutch-test--with-result-state
-      (:connection-params '(:backend mysql)
-       :last-query "SELECT * FROM users"
-       :source-table "users"
-       :rows '((1 "before"))
-       :render t)
-    (clutch--goto-cell 0 0)
-    (let ((err (should-error (clutch-result-delete-rows)
-                             :type 'user-error)))
-      (should (string-match-p
-               "no primary, unique, or row locator identity available for table users"
-               (error-message-string err))))))
 
 (ert-deftest clutch-test-discard-pending-at-point-contract ()
   "Discarding at point should remove matching delete, insert, or edit state."
@@ -1239,80 +1160,66 @@ A context that cannot be read is recorded as `unknown'."
         (should (clutch--tx-dirty-p conn))
         (should-not clutch--pending-inserts)))))
 
-(ert-deftest clutch-test-submit-handles-known-session-restore-outcomes ()
-  "Pending state must follow the known outcome when restoring Auto mode fails."
-  (dolist (outcome '(committed rolled-back))
-    (ert-info ((format "outcome: %s" outcome))
-      (clutch-test--with-result-state
-          (:connection (make-clutch-test-conn :table "users"
-                                              :columns '((:name "name" :type "text")))
-           :source-table "users"
-           :columns '("name")
-           :rows nil
-           :pending-inserts '((("name" . "first")) (("name" . "second"))))
-        (let ((pending clutch--pending-inserts)
-              refreshed reverted)
-          (setq-local revert-buffer-function
-                      (lambda (&rest _args) (setq reverted t)))
-          (advice-add 'clutch--refresh-transaction-ui :before
-                      (lambda (_conn) (setq refreshed t))
-                      '((name . test-refreshed)))
-          (advice-add 'clutch-db-call-with-atomic-batch :override
-                      (lambda (&rest _)
-                        (signal
-                         'clutch-db-session-restore-error
-                         (list "Restoring auto-commit failed"
-                               :outcome outcome)))
-                      '((name . test-restore)))
-          (unwind-protect
-              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
-                (should-error (clutch-result-submit) :type 'user-error))
-            (advice-remove 'clutch-db-call-with-atomic-batch 'test-restore)
-            (advice-remove 'clutch--refresh-transaction-ui 'test-refreshed))
-          (should refreshed)
-          (if (eq outcome 'committed)
-              (should-not clutch--pending-inserts)
-            (should (equal clutch--pending-inserts pending)))
-          (should (eq (not (null reverted))
-                      (eq outcome 'committed))))))))
-
-(ert-deftest clutch-test-submit-marks-unknown-batch-outcome-uncertain ()
-  "An uncertain batch should retain staging and require transaction recovery."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (conn (make-clutch-test-conn :table "users"
-                                     :columns '((:name "name" :type "text"))
-                                     :commit-mode 'manual)))
-    (clutch-test--with-result-state
-        (:connection conn
-         :source-table "users"
-         :columns '("name")
-         :rows nil
-         :pending-inserts '((("name" . "first")) (("name" . "second"))))
-      (let ((pending clutch--pending-inserts)
-            reverted)
-        (setq-local revert-buffer-function
-                    (lambda (&rest _args) (setq reverted t)))
-        (advice-add 'clutch-db-call-with-atomic-batch :override
-                    (lambda (&rest _)
-                      (signal
-                       'clutch-db-batch-outcome-uncertain
-                       '("commit outcome is uncertain" :phase commit)))
-                    '((name . test-uncertain)))
-        (unwind-protect
-            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
-              (let ((err (should-error (clutch-result-submit) :type 'user-error)))
-                (should (string-match-p
-                         "roll back or reconnect"
-                         (error-message-string err)))))
-          (advice-remove 'clutch-db-call-with-atomic-batch 'test-uncertain))
-        (should (clutch--tx-uncertain-p conn))
-        (clutch-db-disconnect conn)
-        (should (string-match-p
-                 "Transaction state is uncertain"
-                 (error-message-string
-                  (should-error (clutch-result-submit) :type 'user-error))))
-        (should (equal clutch--pending-inserts pending))
-        (should-not reverted)))))
+(ert-deftest clutch-test-submit-follows-the-outcome-of-a-failed-batch ()
+  "Staged changes should follow what a failed batch is known to have done.
+Pending state must follow the known outcome when restoring Auto mode
+fails: a commit clears staging and reverts the result, a rollback keeps
+both.  An uncertain batch should retain staging and require transaction
+recovery."
+  (pcase-dolist (`(,label ,commit-mode ,failure ,message ,committed ,uncertain)
+                 '(("committed" nil
+                    (clutch-db-session-restore-error
+                     "Restoring auto-commit failed" :outcome committed)
+                    "Restoring auto-commit failed" t nil)
+                   ("rolled back" nil
+                    (clutch-db-session-restore-error
+                     "Restoring auto-commit failed" :outcome rolled-back)
+                    "Restoring auto-commit failed" nil nil)
+                   ("uncertain" manual
+                    (clutch-db-batch-outcome-uncertain
+                     "commit outcome is uncertain" :phase commit)
+                    "roll back or reconnect" nil t)))
+    (ert-info (label)
+      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+            (conn (make-clutch-test-conn :table "users"
+                                         :columns '((:name "name" :type "text"))
+                                         :commit-mode commit-mode)))
+        (clutch-test--with-result-state
+            (:connection conn
+             :source-table "users"
+             :columns '("name")
+             :rows nil
+             :pending-inserts '((("name" . "first")) (("name" . "second"))))
+          (let ((pending clutch--pending-inserts)
+                refreshed reverted)
+            (setq-local revert-buffer-function
+                        (lambda (&rest _args) (setq reverted t)))
+            (advice-add 'clutch--refresh-transaction-ui :before
+                        (lambda (_conn) (setq refreshed t))
+                        '((name . test-refreshed)))
+            (advice-add 'clutch-db-call-with-atomic-batch :override
+                        (lambda (&rest _) (signal (car failure) (cdr failure)))
+                        '((name . test-failure)))
+            (unwind-protect
+                (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+                  (should (string-match-p
+                           message
+                           (error-message-string
+                            (should-error (clutch-result-submit)
+                                          :type 'user-error)))))
+              (advice-remove 'clutch-db-call-with-atomic-batch 'test-failure)
+              (advice-remove 'clutch--refresh-transaction-ui 'test-refreshed))
+            (should refreshed)
+            (should (equal clutch--pending-inserts (unless committed pending)))
+            (should (eq reverted committed))
+            (should (eq (clutch--tx-uncertain-p conn) uncertain))
+            (when uncertain
+              (clutch-db-disconnect conn)
+              (should (string-match-p
+                       "Transaction state is uncertain"
+                       (error-message-string
+                        (should-error (clutch-result-submit)
+                                      :type 'user-error)))))))))))
 
 (ert-deftest clutch-test-rollback-to-a-savepoint-keeps-the-transaction-dirty ()
   "Only a rollback of the whole transaction should clear its uncommitted work.
@@ -1371,37 +1278,10 @@ a word that ends a whole rollback, such as CHAIN."
 
 ;;;; Edit — validation
 
-(ert-deftest clutch-test-insert-local-validation-updates-inline-error ()
-  "Insert field live validation should show and clear inline errors."
-  (clutch-test--with-insert-result-buffer result-buf
-      (:columns '("impact_score")
-       :column-defs '((:name "impact_score" :type-category numeric))
-       :connection (make-clutch-test-conn :table "shipping_incidents"
-                                          :columns '((:name "impact_score" :type "decimal(5,1)"))))
-    (clutch-test--with-pop-to-buffer-capture insert-buf
-      (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-      (with-current-buffer insert-buf
-        (clutch-test--goto-insert-field-value "impact_score")
-        (insert "x")
-        (clutch-result-insert--run-idle-validation insert-buf)
-        (let* ((field (clutch-result-insert--field-state "impact_score"))
-               (after (overlay-get (plist-get field :error-overlay)
-                                   'after-string)))
-          (should (equal (plist-get field :error-message)
-                         "Field impact_score expects a numeric value"))
-          (should (overlayp (plist-get field :error-overlay)))
-          (should (string-match-p "\\[invalid numeric\\]" after))
-          (should-not (string-prefix-p "\n" after))
-          (clutch-test--goto-insert-field-value "impact_score")
-          (delete-region (point) (line-end-position))
-          (insert "1.5")
-          (clutch-result-insert--run-idle-validation insert-buf)
-          (setq field (clutch-result-insert--field-state "impact_score"))
-          (should-not (plist-get field :error-message))
-          (should-not (plist-get field :error-overlay)))))))
-
-(ert-deftest clutch-test-insert-idle-validation-covers-all-changed-fields ()
-  "Idle validation should validate every field changed since the last run."
+(ert-deftest clutch-test-insert-idle-validation-flags-and-clears-changed-fields ()
+  "Idle validation should flag every invalid changed field inline, then clear it.
+Insert field live validation should show and clear inline errors, and
+idle validation should validate every field changed since the last run."
   (clutch-test--with-insert-result-buffer result-buf
       (:columns '("impact_score" "severity")
        :column-defs '((:name "impact_score" :type-category numeric)
@@ -1412,29 +1292,31 @@ a word that ends a whole rollback, such as CHAIN."
     (clutch-test--with-pop-to-buffer-capture insert-buf
       (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
-        (clutch-test--goto-insert-field-value "impact_score")
-        (insert "x")
-        (clutch-test--goto-insert-field-value "severity")
-        (insert "1")
-        (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
-                                         insert-buf)))
-          (apply (timer--function timer) (timer--args timer)))
-        (should (equal (plist-get (clutch-result-insert--field-state "impact_score")
-                                  :error-message)
-                       "Field impact_score expects a numeric value"))
-        (should-not (plist-get (clutch-result-insert--field-state "severity")
-                               :error-message))
-        (clutch-test--goto-insert-field-value "impact_score")
-        (delete-region (point) (line-end-position))
-        (insert "1.5")
-        (clutch-test--goto-insert-field-value "severity" t)
-        (insert "2")
-        (let ((timer (buffer-local-value 'clutch-result-insert--validation-timer
-                                         insert-buf)))
-          (apply (timer--function timer) (timer--args timer)))
-        (let ((field (clutch-result-insert--field-state "impact_score")))
-          (should-not (plist-get field :error-message))
-          (should-not (plist-get field :error-overlay)))))))
+        (cl-flet ((run-idle-validation ()
+                    (let ((timer clutch-result-insert--validation-timer))
+                      (apply (timer--function timer) (timer--args timer)))))
+          (clutch-test--goto-insert-field-value "impact_score")
+          (insert "x")
+          (clutch-test--goto-insert-field-value "severity")
+          (insert "1")
+          (run-idle-validation)
+          (let ((field (clutch-result-insert--field-state "impact_score")))
+            (should (equal (plist-get field :error-message)
+                           "Field impact_score expects a numeric value"))
+            (should (overlayp (plist-get field :error-overlay)))
+            (let ((after (overlay-get (plist-get field :error-overlay)
+                                      'after-string)))
+              (should (string-match-p "\\[invalid numeric\\]" after))
+              (should-not (string-prefix-p "\n" after))))
+          (should-not (plist-get (clutch-result-insert--field-state "severity")
+                                 :error-message))
+          (clutch-test--set-insert-field-value "impact_score" "1.5")
+          (clutch-test--goto-insert-field-value "severity" t)
+          (insert "2")
+          (run-idle-validation)
+          (let ((field (clutch-result-insert--field-state "impact_score")))
+            (should-not (plist-get field :error-message))
+            (should-not (plist-get field :error-overlay))))))))
 
 (ert-deftest clutch-test-json-validation-is-scheduled-on-idle ()
   "JSON insert and edit buffers should defer local validation until idle."
@@ -1536,74 +1418,46 @@ a word that ends a whole rollback, such as CHAIN."
               (should-not staged-value)
               (should (buffer-live-p edit-buf)))))))))
 
-(ert-deftest clutch-test-edit-set-null-stages-nil ()
-  "The explicit NULL command should stage a nil value."
-  (let ((staged-value :not-called)
-        quit-called)
-    (clutch-test--with-result-edit-buffer _edit-buf "12.5"
-      (setq-local clutch-result-edit--column-name "impact_score"
-                  clutch-result-edit--column-def '(:name "impact_score" :type-category numeric)
-                  clutch-result-edit--column-detail
-                  '(:name "impact_score" :type "decimal(5,1)" :nullable t)
-                  clutch-result--edit-callback
-                  (lambda (value) (setq staged-value (list value))))
-      (cl-letf (((symbol-function 'quit-window)
-                 (lambda (&rest _args) (setq quit-called t))))
-        (clutch-result-edit-set-null)
-        (clutch-result-edit-finish)
-        (should quit-called)
-        (should (equal staged-value '(nil)))))))
-
-(ert-deftest clutch-test-edit-set-default-stages-explicit-sentinel ()
-  "The explicit DEFAULT command should stage the database-default sentinel."
-  (let ((staged-value :not-called)
-        quit-called)
-    (clutch-test--with-result-edit-buffer _edit-buf "manual"
-      (setq-local clutch-result-edit--column-name "status"
-                  clutch-result-edit--column-def
-                  '(:name "status" :type-category text)
-                  clutch-result-edit--column-detail
-                  '(:name "status" :type "text" :nullable t :default "'new'")
-                  clutch-result-edit--default-supported-p t
-                  clutch-result--edit-callback
-                  (lambda (value) (setq staged-value value)))
-      (cl-letf (((symbol-function 'quit-window)
-                 (lambda (&rest _args) (setq quit-called t))))
-        (should (eq (lookup-key clutch--result-edit-mode-map (kbd "C-c C-d"))
-                    #'clutch-result-edit-set-default))
-        (clutch-result-edit-set-default)
-        (should (eq clutch-result-edit--special-value 'default))
-        (should (equal (buffer-string) ""))
-        (should (equal
-                 (substring-no-properties
-                  (overlay-get clutch-result-edit--special-placeholder-overlay
-                               'after-string))
-                 "<default>"))
-        (should (eq (get-text-property
-                     0 'face
-                     (overlay-get clutch-result-edit--special-placeholder-overlay
-                                  'after-string))
-                    'clutch-null-face))
-        (clutch-result-edit-finish)
-        (should quit-called)
-        (should (eq staged-value clutch--cell-default-placeholder))))))
-
-(ert-deftest clutch-test-edit-finish-preserves-literal-special-strings ()
-  "Typing NULL or DEFAULT should stage literal text, not a special value."
-  (dolist (text '("NULL" "DEFAULT"))
-    (let (staged-value)
-      (clutch-test--with-result-edit-buffer _edit-buf text
-        (setq-local clutch-result-edit--column-name "note"
-                    clutch-result-edit--column-def
-                    '(:name "note" :type-category text)
-                    clutch-result-edit--column-detail
-                    '(:name "note" :type "text" :nullable t :default "'x'")
-                    clutch-result-edit--default-supported-p t
-                    clutch-result--edit-callback
-                    (lambda (value) (setq staged-value value)))
-        (cl-letf (((symbol-function 'quit-window) #'ignore))
-          (clutch-result-edit-finish)
-          (should (equal staged-value text)))))))
+(ert-deftest clutch-test-edit-special-values-stage-only-from-their-commands ()
+  "Only the NULL and DEFAULT commands should stage special values.
+The explicit NULL command should stage a nil value, and the explicit
+DEFAULT command, on \\`C-c C-d', the database-default sentinel; the edit
+buffer shows either as a placeholder.  Typing NULL or DEFAULT should
+stage literal text, not a special value."
+  (should (eq (lookup-key clutch--result-edit-mode-map (kbd "C-c C-d"))
+              #'clutch-result-edit-set-default))
+  (pcase-dolist (`(,text ,command ,special ,placeholder ,expected)
+                 `(("12.5" clutch-result-edit-set-null null "<null>" nil)
+                   ("manual" clutch-result-edit-set-default default "<default>"
+                    ,clutch--cell-default-placeholder)
+                   ("NULL" nil nil nil "NULL")
+                   ("DEFAULT" nil nil nil "DEFAULT")))
+    (ert-info ((format "%S, then %s" text (or command "typing")))
+      (let ((staged-value :not-called)
+            quit-called)
+        (clutch-test--with-result-edit-buffer _edit-buf text
+          (setq-local clutch-result-edit--column-name "note"
+                      clutch-result-edit--column-def
+                      '(:name "note" :type-category text)
+                      clutch-result-edit--column-detail
+                      '(:name "note" :type "text" :nullable t :default "'x'")
+                      clutch-result-edit--default-supported-p t
+                      clutch-result--edit-callback
+                      (lambda (value) (setq staged-value value)))
+          (cl-letf (((symbol-function 'quit-window)
+                     (lambda (&rest _args) (setq quit-called t))))
+            (when command
+              (funcall command)
+              (let ((shown (overlay-get
+                            clutch-result-edit--special-placeholder-overlay
+                            'after-string)))
+                (should (equal (buffer-string) ""))
+                (should (equal (substring-no-properties shown) placeholder))
+                (should (eq (get-text-property 0 'face shown) 'clutch-null-face))))
+            (should (eq clutch-result-edit--special-value special))
+            (clutch-result-edit-finish)
+            (should quit-called)
+            (should (equal staged-value expected))))))))
 
 (ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
   "Finishing a cell edit should restore point without shifting the viewport."
