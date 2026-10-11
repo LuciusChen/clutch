@@ -187,111 +187,146 @@
                   '(:backend pg :database "app") "/tmp/project/")
                  '(:backend pg :database "app"))))
 
-(ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
-  "Connection building should not synthesize backend timeout defaults.
-The globals are bound to non-default values so a backend that received
-them would fail the plist-member assertions rather than coincide."
+(ert-deftest clutch-test-build-conn-backend-facing-params ()
+  "The backend should receive its own connection keys and nothing else.
+Clutch-level keys such as `:pass-entry' and `:profile-entry' are stripped,
+a password that a credential source resolves is materialized as
+`:password', and no timeout defaults are synthesized: the timeout globals
+are bound to non-default values so a backend that received them would
+fail the comparison rather than coincide."
   (let ((clutch-connect-timeout-seconds 11)
-        (clutch-read-idle-timeout-seconds 42)
-        captured)
-    (clutch-test--without-credentials
-      (cl-letf (((symbol-function 'clutch-db-connect)
-                 (lambda (_backend params)
-                   (setq captured params)
-                   (make-clutch-test-conn))))
-        (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
-                          (:backend pg :host "127.0.0.1" :port 5432 :user "u")
-                          (:backend oracle :host "db" :port 1521 :user "u")
-                          (:backend sqlite :database ":memory:")))
-          (setq captured nil)
-          (clutch--build-conn params)
-          (should-not (plist-member captured :connect-timeout))
-          (should-not (plist-member captured :read-idle-timeout))
-          (should-not (plist-member captured :query-timeout))
-          (should-not (plist-member captured :rpc-timeout)))))))
+        (clutch-read-idle-timeout-seconds 42))
+    (dolist (case
+             '((:label "mysql without timeouts"
+                :params (:backend mysql :host "127.0.0.1" :port 3306 :user "u")
+                :backend mysql
+                :expected (:host "127.0.0.1" :port 3306 :user "u"))
+               (:label "pg without timeouts"
+                :params (:backend pg :host "127.0.0.1" :port 5432 :user "u")
+                :backend pg
+                :expected (:host "127.0.0.1" :port 5432 :user "u"))
+               (:label "oracle without timeouts"
+                :params (:backend oracle :host "db" :port 1521 :user "u")
+                :backend oracle
+                :expected (:host "db" :port 1521 :user "u"))
+               (:label "sqlite without timeouts"
+                :params (:backend sqlite :database ":memory:")
+                :backend sqlite
+                :expected (:database ":memory:"))
+               (:label "passwordless mongodb"
+                :params (:backend mongodb
+                         :host "127.0.0.1"
+                         :port 27017
+                         :database "app"
+                         :pass-entry "mongdb")
+                :backend mongodb
+                :expected (:host "127.0.0.1"
+                           :port 27017
+                           :database "app"))
+               (:label "passwordless redis"
+                :params (:backend redis
+                         :host "127.0.0.1"
+                         :port 6379
+                         :database 0
+                         :pass-entry "redis-local")
+                :backend redis
+                :expected (:host "127.0.0.1"
+                           :port 6379
+                           :database 0))
+               (:label "authenticated mongodb"
+                :authinfo ("machine mongo.example.com login root port 27017 password secret")
+                :params (:backend mongodb
+                         :host "mongo.example.com"
+                         :port 27017
+                         :database "app"
+                         :auth-database "admin"
+                         :user "root"
+                         :pass-entry "mongodb-root")
+                :backend mongodb
+                :expected (:host "mongo.example.com"
+                           :port 27017
+                           :database "app"
+                           :auth-database "admin"
+                           :user "root"
+                           :password "secret"))
+               (:label "profile entry"
+                :authinfo ("machine clutch/app backend mysql db-host db.example.com port 3306 login u database app password secret")
+                :params (:profile-entry "clutch/app")
+                :backend mysql
+                :expected (:host "db.example.com"
+                           :port 3306
+                           :user "u"
+                           :database "app"
+                           :password "secret"))))
+      (ert-info ((plist-get case :label))
+        (let ((conn (make-clutch-test-conn))
+              captured-backend captured-params)
+          (clutch-test--with-authinfo (plist-get case :authinfo)
+            (cl-letf (((symbol-function 'clutch-db-connect)
+                       (lambda (backend params)
+                         (setq captured-backend backend
+                               captured-params params)
+                         conn)))
+              (should (eq (clutch--build-conn (plist-get case :params)) conn))
+              (should (eq captured-backend (plist-get case :backend)))
+              (should (equal captured-params (plist-get case :expected))))))))))
 
-(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-ssh-tunnel ()
-  "SSH-backed host/port connections should target the local forwarded port."
+(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-forwards ()
+  "Forwarded host/port connections should target the local forwarded port.
+SSH-backed and TRAMP-backed connections hand the backend 127.0.0.1 and
+the forward's local port without the transport key, and remember the
+remote endpoint and the transport for display and cleanup."
   (dolist (case
            (list
-            (list :label "SQL backend"
-                  :local-port 40123
+            (list :label "SSH, SQL backend"
+                  :starter 'clutch--start-ssh-tunnel
+                  :transport '(:kind ssh :process fake-proc :local-port 40123
+                               :ssh-host "bastion-prod")
                   :params '(:backend pg
                             :host "db.internal"
                             :port 5432
                             :user "alice"
                             :database "appdb"
                             :ssh-host "bastion-prod"))
-            (list :label "MongoDB backend"
-                  :local-port 47017
+            (list :label "SSH, MongoDB backend"
+                  :starter 'clutch--start-ssh-tunnel
+                  :transport '(:kind ssh :process fake-proc :local-port 47017
+                               :ssh-host "bastion-prod")
                   :params '(:backend mongodb
                             :host "mongo.internal"
                             :port 27017
                             :database "app"
-                            :ssh-host "bastion-prod"))))
-    (ert-info ((format "SSH endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
-            (input (plist-get case :params))
-            (conn (make-clutch-test-conn))
-            captured)
-        (clutch-test--without-credentials
-          (cl-letf (((symbol-function 'clutch--start-ssh-tunnel)
-                     (lambda (params)
-                       (should (eq (plist-get params :backend)
-                                   (plist-get input :backend)))
-                       (should (equal (plist-get params :host)
-                                      (plist-get input :host)))
-                       (should (= (plist-get params :port)
-                                  (plist-get input :port)))
-                       (should (equal (plist-get params :ssh-host) "bastion-prod"))
-                       (list :kind 'ssh
-                             :process 'fake-proc
-                             :local-port (plist-get case :local-port)
-                             :ssh-host "bastion-prod")))
-                    ((symbol-function 'clutch-db-connect)
-                     (lambda (backend params)
-                       (should (eq backend (plist-get input :backend)))
-                       (setq captured params)
-                       conn)))
-            (should (eq (clutch--build-conn input) conn))
-            (should (equal (plist-get captured :host) "127.0.0.1"))
-            (should (= (plist-get captured :port) (plist-get case :local-port)))
-            (should-not (plist-member captured :ssh-host))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :host)
-                           (plist-get input :host)))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :ssh-host)
-                           "bastion-prod"))))))))
-
-(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-tramp-forward ()
-  "TRAMP-backed host/port connections should target the local forwarded port."
-  (dolist (case
-           (list
-            (list :label "SQL backend"
-                  :local-port 40124
+                            :ssh-host "bastion-prod"))
+            (list :label "TRAMP, SQL backend"
+                  :starter 'clutch--start-tramp-tcp-forward
+                  :transport '(:kind tramp :process fake-listener :local-port 40124
+                               :tramp-default-directory "/ssh:devbox:/workspace/")
                   :params '(:backend pg
                             :host "db"
                             :port 5432
                             :user "alice"
                             :database "appdb"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))
-            (list :label "MongoDB backend"
-                  :local-port 47018
+            (list :label "TRAMP, MongoDB backend"
+                  :starter 'clutch--start-tramp-tcp-forward
+                  :transport '(:kind tramp :process fake-listener :local-port 47018
+                               :tramp-default-directory "/ssh:devbox:/workspace/")
                   :params '(:backend mongodb
                             :host "mongo.internal"
                             :port 27017
                             :database "app"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))))
-    (ert-info ((format "TRAMP endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
-            (input (plist-get case :params))
-            (conn (make-clutch-test-conn))
-            captured)
+    (ert-info ((plist-get case :label))
+      (let* ((clutch--connection-transport-cache (make-hash-table :test 'eq))
+             (input (plist-get case :params))
+             (transport (plist-get case :transport))
+             (transport-key (if (eq (plist-get transport :kind) 'ssh)
+                                :ssh-host
+                              :tramp-default-directory))
+             (conn (make-clutch-test-conn))
+             captured)
         (clutch-test--without-credentials
-          (cl-letf (((symbol-function 'clutch--start-tramp-tcp-forward)
+          (cl-letf (((symbol-function (plist-get case :starter))
                      (lambda (params)
                        (should (eq (plist-get params :backend)
                                    (plist-get input :backend)))
@@ -299,12 +334,9 @@ them would fail the plist-member assertions rather than coincide."
                                       (plist-get input :host)))
                        (should (= (plist-get params :port)
                                   (plist-get input :port)))
-                       (should (equal (plist-get params :tramp-default-directory)
-                                      "/ssh:devbox:/workspace/"))
-                       (list :kind 'tramp
-                             :process 'fake-listener
-                             :local-port (plist-get case :local-port)
-                             :tramp-default-directory "/ssh:devbox:/workspace/")))
+                       (should (equal (plist-get params transport-key)
+                                      (plist-get input transport-key)))
+                       transport))
                     ((symbol-function 'clutch-db-connect)
                      (lambda (backend params)
                        (should (eq backend (plist-get input :backend)))
@@ -312,20 +344,15 @@ them would fail the plist-member assertions rather than coincide."
                        conn)))
             (should (eq (clutch-open-connection input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
-            (should (= (plist-get captured :port) (plist-get case :local-port)))
-            (should-not (plist-member captured :tramp-default-directory))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :host)
-                           (plist-get input :host)))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :tramp-default-directory)
-                           "/ssh:devbox:/workspace/"))
-            (should (eq (plist-get
-                         (gethash conn clutch--connection-transport-cache)
-                         :kind)
-                        'tramp))))))))
+            (should (= (plist-get captured :port)
+                       (plist-get transport :local-port)))
+            (should-not (plist-member captured transport-key))
+            (let ((cached (gethash conn clutch--connection-transport-cache)))
+              (should (equal (plist-get cached :host) (plist-get input :host)))
+              (should (equal (plist-get cached transport-key)
+                             (plist-get input transport-key)))
+              (should (eq (plist-get cached :kind)
+                          (plist-get transport :kind))))))))))
 
 (ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
   "A connection must not combine SSH and TRAMP transports."
@@ -508,180 +535,143 @@ and the ssh -N process has no owner yet at that point."
                                           (plist-get tunnel :local-port))
                              "bastion-prod")))))))
 
-(ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
-  "OpenSSH TRAMP forward startup should use -L, adding -J for SSH-like hops."
+(ert-deftest clutch-test-start-tramp-forward-starts-ssh-forward ()
+  "OpenSSH TRAMP forward startup should run ssh -L for ssh-like directories.
+SSH-like hops become -J, and an rpc directory adds tramp-rpc's
+ControlMaster options before the target."
   (dolist (case
            (list
-            (list "direct ssh directory" "/ssh:devbox:/workspace/"
-                  '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:%d:db:5432" "devbox"))
-            (list "ssh-like hops mapped to ProxyJump"
-                  "/rpc:jump|rpc:devbox:/workspace/"
-                  '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:%d:db:5432" "-J" "jump" "devbox"))))
-    (pcase-let ((`(,label ,tramp-dir ,expected-command) case))
-      (ert-info ((format "case: %s" label))
-        (let (make-process-args waited)
-          (cl-letf (((symbol-function 'executable-find)
-                     (lambda (program)
-                       (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'make-process)
-                     (lambda (&rest args)
-                       (setq make-process-args args)
-                       'fake-proc))
-                    ((symbol-function 'clutch--wait-for-ssh-tunnel)
-                     (lambda (proc port params buffer timeout)
-                       (setq waited (list proc port params buffer timeout)))))
-            (let* ((transport (condition-case err
-                                  (clutch--start-tramp-tcp-forward
-                                   `(:backend pg
-                                     :host "db"
-                                     :port 5432
-                                     :tramp-default-directory ,tramp-dir))
-                                (clutch-db-error
-                                 (if (string-match-p "Operation not permitted"
-                                                     (error-message-string err))
-                                     (ert-skip (error-message-string err))
-                                   (signal (car err) (cdr err))))))
-                   (local-port (plist-get transport :local-port)))
-              (should (integerp local-port))
-              (should (equal (plist-get make-process-args :command)
-                             (mapcar (lambda (arg) (format arg local-port))
-                                     expected-command)))
-              (should (eq (plist-get make-process-args :noquery) t))
+            (list :label "direct ssh directory"
+                  :tramp-default-directory "/ssh:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("devbox"))
+            (list :label "ssh-like hops mapped to ProxyJump"
+                  :tramp-default-directory "/rpc:jump|rpc:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("-J" "jump" "devbox"))
+            (list :label "tramp-rpc ControlMaster reuse"
+                  :tramp-default-directory "/rpc:devbox:/workspace/"
+                  :host "127.0.0.1" :port 55433
+                  :controlmaster-options '("-o" "ControlMaster=auto"
+                                           "-o" "ControlPath=/tmp/tramp-rpc.sock")
+                  :forward "127.0.0.1:%d:127.0.0.1:55433"
+                  :tail '("-o" "ControlMaster=auto"
+                          "-o" "ControlPath=/tmp/tramp-rpc.sock"
+                          "devbox"))))
+    (ert-info ((plist-get case :label))
+      (let (make-process-args waited)
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (program)
+                     (when (equal program "ssh") "/usr/bin/ssh")))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (setq make-process-args args)
+                     'fake-proc))
+                  ((symbol-function 'clutch--wait-for-ssh-tunnel)
+                   (lambda (proc port params buffer timeout)
+                     (setq waited (list proc port params buffer timeout))))
+                  ;; tramp-rpc is not installed; answer for an rpc vector as it would.
+                  ((symbol-function 'tramp-rpc-controlmaster-options)
+                   (lambda (vec)
+                     (should (equal (tramp-file-name-method vec) "rpc"))
+                     (plist-get case :controlmaster-options))))
+          (let* ((transport (condition-case err
+                                (clutch--start-tramp-tcp-forward
+                                 (list :backend 'pg
+                                       :host (plist-get case :host)
+                                       :port (plist-get case :port)
+                                       :tramp-default-directory
+                                       (plist-get case :tramp-default-directory)))
+                              (clutch-db-error
+                               (if (string-match-p "Operation not permitted"
+                                                   (error-message-string err))
+                                   (ert-skip (error-message-string err))
+                                 (signal (car err) (cdr err))))))
+                 (local-port (plist-get transport :local-port)))
+            (should (integerp local-port))
+            (should (equal (plist-get make-process-args :command)
+                           (append (list "ssh"
+                                         "-N"
+                                         "-o" "BatchMode=yes"
+                                         "-o" "ExitOnForwardFailure=yes"
+                                         "-L" (format (plist-get case :forward)
+                                                      local-port))
+                                   (plist-get case :tail))))
+            (should (eq (plist-get make-process-args :noquery) t))
+            (should (eq (plist-get transport :kind) 'tramp))
+            (should (eq (plist-get transport :process) 'fake-proc))
+            (should (equal (plist-get transport :tramp-default-directory)
+                           (plist-get case :tramp-default-directory)))
+            (should (equal (nth 0 waited) 'fake-proc))
+            (should (= (nth 1 waited) local-port))
+            (should (equal (plist-get (nth 2 waited) :ssh-host) "devbox"))))))))
+
+(ert-deftest clutch-test-start-tramp-forward-starts-container-relay ()
+  "Container TRAMP forward startup should create a local relay listener.
+A local container path runs the container runtime directly; a container
+path behind SSH hops runs it remotely through the hop, with the exec
+command quoted for the remote shell."
+  (dolist (case
+           (list
+            (list :label "docker, local"
+                  :executable "docker"
+                  :tramp-default-directory "/docker:vscode@app:/workspace/"
+                  :command (list "docker" "exec" "-i" "-u" "vscode" "app"
+                                 "sh" "-lc" clutch--container-relay-script
+                                 "clutch-container-relay" "db" "5432"))
+            (list :label "podman behind an ssh hop"
+                  :executable "ssh"
+                  :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"
+                  :command (append
+                            (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                            (mapcar
+                             #'shell-quote-argument
+                             (list "podman" "exec" "-i" "app" "sh" "-lc"
+                                   clutch--container-relay-script
+                                   "clutch-container-relay" "db" "5432"))))))
+    (ert-info ((plist-get case :label))
+      (let (transport)
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (program)
+                     (when (equal program (plist-get case :executable))
+                       (concat "/usr/bin/" program)))))
+          (setq transport
+                (condition-case err
+                    (clutch--start-tramp-tcp-forward
+                     (list :backend 'pg
+                           :host "db"
+                           :port 5432
+                           :tramp-default-directory
+                           (plist-get case :tramp-default-directory)))
+                  (file-error
+                   (let ((message (error-message-string err)))
+                     (if (string-match-p
+                          "\\`Cannot bind server socket: Operation not permitted\\'"
+                          message)
+                         (ert-skip
+                          (format "Cannot bind localhost server socket: %s"
+                                  message))
+                       (signal (car err) (cdr err))))))))
+        (unwind-protect
+            (let ((listener (plist-get transport :process)))
+              (should (equal (process-name listener)
+                             "clutch-tramp-container-db:5432"))
+              (should (eq (process-contact listener :server) t))
+              (should (equal (process-contact listener :host) "127.0.0.1"))
+              (should (equal (process-coding-system listener)
+                             '(no-conversion . no-conversion)))
+              (should-not (process-query-on-exit-flag listener))
+              (should (equal (process-get listener :clutch-container-command)
+                             (plist-get case :command)))
               (should (eq (plist-get transport :kind) 'tramp))
-              (should (eq (plist-get transport :process) 'fake-proc))
+              (should (= (plist-get transport :local-port)
+                         (process-contact listener :service)))
               (should (equal (plist-get transport :tramp-default-directory)
-                             tramp-dir))
-              (should (equal (nth 0 waited) 'fake-proc))
-              (should (= (nth 1 waited) local-port))
-              (should (equal (plist-get (nth 2 waited) :ssh-host)
-                             "devbox")))))))))
-
-(ert-deftest clutch-test-start-tramp-forward-starts-rpc-forward ()
-  "tramp-rpc directories should be mapped to OpenSSH -L."
-  (let ((old-bound (boundp 'tramp-rpc-use-controlmaster))
-        (old-value (and (boundp 'tramp-rpc-use-controlmaster)
-                        (symbol-value 'tramp-rpc-use-controlmaster)))
-        make-process-args)
-    (unwind-protect
-        (progn
-          (set 'tramp-rpc-use-controlmaster t)
-          (cl-letf (((symbol-function 'executable-find)
-                     (lambda (program)
-                       (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'make-process)
-                     (lambda (&rest args)
-                       (setq make-process-args args)
-                       'fake-proc))
-                    ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore)
-                    ((symbol-function 'tramp-rpc-controlmaster-options)
-                     (lambda (vec)
-                       (should (equal (tramp-file-name-method vec) "rpc"))
-                       '("-o" "ControlMaster=auto"
-                         "-o" "ControlPath=/tmp/tramp-rpc.sock"))))
-            (let ((transport (condition-case err
-                                 (clutch--start-tramp-tcp-forward
-                                  '(:backend pg
-                                    :host "127.0.0.1"
-                                    :port 55433
-                                    :tramp-default-directory "/rpc:devbox:/workspace/"))
-                               (clutch-db-error
-                                (if (string-match-p "Operation not permitted"
-                                                    (error-message-string err))
-                                    (ert-skip (error-message-string err))
-                                  (signal (car err) (cdr err)))))))
-              (should (equal (plist-get make-process-args :command)
-                             (list "ssh"
-                                   "-N"
-                                   "-o" "BatchMode=yes"
-                                   "-o" "ExitOnForwardFailure=yes"
-                                   "-L" (format "127.0.0.1:%d:127.0.0.1:55433"
-                                                (plist-get transport :local-port))
-                                   "-o" "ControlMaster=auto"
-                                   "-o" "ControlPath=/tmp/tramp-rpc.sock"
-                                   "devbox"))))))
-      (if old-bound
-          (set 'tramp-rpc-use-controlmaster old-value)
-        (makunbound 'tramp-rpc-use-controlmaster)))))
-
-(ert-deftest clutch-test-start-tramp-forward-starts-docker-container-relay ()
-  "Docker TRAMP forward startup should create a local relay listener."
-  (let (transport)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (when (equal program "docker") "/usr/bin/docker"))))
-      (setq transport
-            (condition-case err
-                (clutch--start-tramp-tcp-forward
-                 '(:backend pg
-                   :host "db"
-                   :port 5432
-                   :tramp-default-directory
-                   "/docker:vscode@app:/workspace/"))
-              (file-error
-               (let ((message (error-message-string err)))
-                 (if (string-match-p
-                      "\\`Cannot bind server socket: Operation not permitted\\'"
-                      message)
-                     (ert-skip
-                      (format "Cannot bind localhost server socket: %s"
-                              message))
-                   (signal (car err) (cdr err))))))))
-    (unwind-protect
-        (let ((listener (plist-get transport :process)))
-          (should (equal (process-name listener) "clutch-tramp-container-db:5432"))
-          (should (eq (process-contact listener :server) t))
-          (should (equal (process-contact listener :host) "127.0.0.1"))
-          (should (equal (process-coding-system listener)
-                         '(no-conversion . no-conversion)))
-          (should-not (process-query-on-exit-flag listener))
-          (should (equal (process-get listener :clutch-container-command)
-                         (list "docker" "exec" "-i" "-u" "vscode" "app"
-                               "sh" "-lc" clutch--container-relay-script
-                               "clutch-container-relay" "db" "5432")))
-          (should (eq (plist-get transport :kind) 'tramp))
-          (should (= (plist-get transport :local-port)
-                     (process-contact listener :service)))
-          (should (equal (plist-get transport :tramp-default-directory)
-                         "/docker:vscode@app:/workspace/")))
-      (clutch--stop-connection-transport transport)
-      (should-not (process-live-p (plist-get transport :process))))))
-
-(ert-deftest clutch-test-start-tramp-forward-starts-remote-podman-container-relay ()
-  "Container TRAMP paths behind SSH hops should run the runtime remotely."
-  (let (transport)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (when (equal program "ssh") "/usr/bin/ssh"))))
-      (setq transport
-            (condition-case err
-                (clutch--start-tramp-tcp-forward
-                 '(:backend pg
-                   :host "db"
-                   :port 5432
-                   :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
-              (file-error
-               (let ((message (error-message-string err)))
-                 (if (string-match-p
-                      "\\`Cannot bind server socket: Operation not permitted\\'"
-                      message)
-                     (ert-skip
-                      (format "Cannot bind localhost server socket: %s"
-                              message))
-                   (signal (car err) (cdr err))))))))
-    (unwind-protect
-        (let ((listener (plist-get transport :process)))
-          (should (equal (process-name listener) "clutch-tramp-container-db:5432"))
-          (should (equal (process-get listener :clutch-container-command)
-                         (append
-                          (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
-                          (mapcar
-                           #'shell-quote-argument
-                           (list "podman" "exec" "-i" "app" "sh" "-lc"
-                                 clutch--container-relay-script
-                                 "clutch-container-relay" "db" "5432"))))))
-      (clutch--stop-connection-transport transport))))
+                             (plist-get case :tramp-default-directory))))
+          (clutch--stop-connection-transport transport)
+          (should-not (process-live-p (plist-get transport :process))))))))
 
 (ert-deftest clutch-test-container-forward-relays-bytes ()
   "Container relay listener should bridge bytes between client and relay."
@@ -822,59 +812,6 @@ and the ssh -N process has no owner yet at that point."
          :type 'user-error)
         (should-not connect-called)))))
 
-(ert-deftest clutch-test-build-conn-pass-entry-contract ()
-  "Connection build should strip or materialize native pass-entry credentials."
-  (dolist (case
-           '((:label "passwordless mongodb"
-              :params (:backend mongodb
-                       :host "127.0.0.1"
-                       :port 27017
-                       :database "app"
-                       :pass-entry "mongdb")
-              :backend mongodb
-              :expected (:host "127.0.0.1"
-                         :port 27017
-                         :database "app"))
-             (:label "passwordless redis"
-              :params (:backend redis
-                       :host "127.0.0.1"
-                       :port 6379
-                       :database 0
-                       :pass-entry "redis-local")
-              :backend redis
-              :expected (:host "127.0.0.1"
-                         :port 6379
-                         :database 0))
-             (:label "authenticated mongodb"
-              :authinfo ("machine mongo.example.com login root port 27017 password secret")
-              :params (:backend mongodb
-                       :host "mongo.example.com"
-                       :port 27017
-                       :database "app"
-                       :auth-database "admin"
-                       :user "root"
-                       :pass-entry "mongodb-root")
-              :backend mongodb
-              :expected (:host "mongo.example.com"
-                         :port 27017
-                         :database "app"
-                         :auth-database "admin"
-                         :user "root"
-                         :password "secret"))))
-    (ert-info ((plist-get case :label))
-      (let ((conn (make-clutch-test-conn))
-            captured-backend captured-params)
-        (clutch-test--with-authinfo (plist-get case :authinfo)
-          (cl-letf (((symbol-function 'clutch-db-connect)
-                     (lambda (backend params)
-                       (setq captured-backend backend
-                             captured-params params)
-                       conn)))
-            (should (eq (clutch--build-conn (plist-get case :params)) conn))
-            (should (eq captured-backend (plist-get case :backend)))
-            (should (equal captured-params
-                           (plist-get case :expected)))))))))
-
 (ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
   "Unreadable pass entries should fail before the backend sees auth."
   (let (connect-called)
@@ -951,82 +888,52 @@ and the ssh -N process has no owner yet at that point."
       (should (equal (plist-get params :password) "secret"))
       (should-not (plist-member params :profile-entry)))))
 
-(ert-deftest clutch-test-profile-entry-loads-authinfo-connection-fields ()
-  "Authinfo profiles should use machine as profile id and db-host as host."
-  (clutch-test--with-authinfo
-      '("machine mysql/reporting backend mysql db-host db.example.com port 3306 login report_user database reporting ssh-host arch password secret")
-    (let ((params (clutch--canonicalize-connection-params
-                   '(:profile-entry "mysql/reporting"))))
-      (should (eq (plist-get params :backend) 'mysql))
-      (should (equal (plist-get params :host) "db.example.com"))
-      (should (= (plist-get params :port) 3306))
-      (should (equal (plist-get params :user) "report_user"))
-      (should (equal (plist-get params :database) "reporting"))
-      (should (equal (plist-get params :ssh-host) "arch"))
-      (should (equal (plist-get params :password) "secret"))
-      (should-not (plist-member params :profile-entry)))))
-
-(ert-deftest clutch-test-profile-entry-authinfo-parse-errors-surface ()
-  "Authinfo profile field errors should not be wrapped as lookup failures."
-  (clutch-test--with-authinfo
-      '("machine mysql/bad backend mysql db-host db.example.com port bad password x")
-    (let ((err (should-error
-                (clutch--canonicalize-connection-params
-                 '(:profile-entry "mysql/bad"))
-                :type 'user-error)))
-      (should (equal
-               (cadr err)
-               "Connection profile field :port must be a non-negative integer, got \"bad\"")))))
-
-(ert-deftest clutch-test-profile-entry-explicit-fields-win ()
-  "Saved connection fields should override profile defaults."
-  (clutch-test--with-authinfo
-      '("machine mysql/prod backend pg db-host db.example.com port 3306 login profile_user database profile_db ssh-host arch password profile-secret")
-    (let ((params (clutch--canonicalize-connection-params
-                   '(:backend mysql
-                     :profile-entry "mysql/prod"
-                     :database "readonly"
-                     :pass-entry "override-pass"))))
-      (should (eq (plist-get params :backend) 'mysql))
-      (should (equal (plist-get params :host) "db.example.com"))
-      (should (= (plist-get params :port) 3306))
-      (should (equal (plist-get params :user) "profile_user"))
-      (should (equal (plist-get params :database) "readonly"))
-      (should (equal (plist-get params :pass-entry) "override-pass"))
-      (should (equal (plist-get params :ssh-host) "arch"))
-      (should-not (plist-member params :password))
-      (should-not (plist-member params :profile-entry)))))
-
-(ert-deftest clutch-test-profile-entry-explicit-backend-guides-profile-parsing ()
-  "Explicit backend should guide backend-specific profile value parsing."
-  (clutch-test--with-authinfo
-      '("machine redis/prod db-host 127.0.0.1 port 6379 database 0")
-    (let ((params (clutch--canonicalize-connection-params
-                   '(:backend redis :profile-entry "redis/prod"))))
-      (should (eq (plist-get params :backend) 'redis))
-      (should (equal (plist-get params :host) "127.0.0.1"))
-      (should (= (plist-get params :port) 6379))
-      (should (= (plist-get params :database) 0)))))
-
-(ert-deftest clutch-test-profile-entry-is-not-passed-to-backend ()
-  "Profile-entry is a Clutch-level field and should not reach adapters."
-  (let ((conn (make-clutch-test-conn))
-        captured-backend captured-params)
-    (clutch-test--with-authinfo
-        '("machine clutch/app backend mysql db-host db.example.com port 3306 login u database app password secret")
-      (cl-letf (((symbol-function 'clutch-db-connect)
-                 (lambda (backend params)
-                   (setq captured-backend backend
-                         captured-params params)
-                   conn)))
-        (should (eq (clutch--build-conn '(:profile-entry "clutch/app")) conn))
-        (should (eq captured-backend 'mysql))
-        (should (equal captured-params
-                       '(:host "db.example.com"
-                         :port 3306
-                         :user "u"
-                         :database "app"
-                         :password "secret")))))))
+(ert-deftest clutch-test-profile-entry-authinfo-contract ()
+  "Authinfo profiles should fill connection fields before backend setup.
+The `machine' is the profile id and `db-host' the database host.  Saved
+connection fields override profile defaults, and an explicit `:pass-entry'
+hides the profile password.  The explicit backend guides backend-specific
+value parsing.  Profile field errors surface as they are, not wrapped as
+lookup failures."
+  (dolist (case
+           '((:label "profile fields fill the connection"
+              :authinfo ("machine mysql/reporting backend mysql db-host db.example.com port 3306 login report_user database reporting ssh-host arch password secret")
+              :params (:profile-entry "mysql/reporting")
+              :expected (:backend mysql :host "db.example.com" :port 3306
+                         :user "report_user" :database "reporting"
+                         :ssh-host "arch" :password "secret"))
+             (:label "explicit fields win"
+              :authinfo ("machine mysql/prod backend pg db-host db.example.com port 3306 login profile_user database profile_db ssh-host arch password profile-secret")
+              :params (:backend mysql
+                       :profile-entry "mysql/prod"
+                       :database "readonly"
+                       :pass-entry "override-pass")
+              :expected (:backend mysql :host "db.example.com" :port 3306
+                         :user "profile_user" :database "readonly"
+                         :pass-entry "override-pass" :ssh-host "arch")
+              :absent (:password))
+             (:label "explicit backend guides value parsing"
+              :authinfo ("machine redis/prod db-host 127.0.0.1 port 6379 database 0")
+              :params (:backend redis :profile-entry "redis/prod")
+              :expected (:backend redis :host "127.0.0.1" :port 6379 :database 0))
+             (:label "field errors surface unwrapped"
+              :authinfo ("machine mysql/bad backend mysql db-host db.example.com port bad password x")
+              :params (:profile-entry "mysql/bad")
+              :error "Connection profile field :port must be a non-negative integer, got \"bad\"")))
+    (ert-info ((plist-get case :label))
+      (clutch-test--with-authinfo (plist-get case :authinfo)
+        (if-let* ((message (plist-get case :error)))
+            (should (equal (cadr (should-error
+                                  (clutch--canonicalize-connection-params
+                                   (plist-get case :params))
+                                  :type 'user-error))
+                           message))
+          (let ((params (clutch--canonicalize-connection-params
+                         (plist-get case :params))))
+            (cl-loop for (key value) on (plist-get case :expected) by #'cddr
+                     do (should (equal (plist-get params key) value)))
+            (dolist (key (cons :profile-entry (plist-get case :absent)))
+              (should-not (plist-member params key)))))))))
 
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
@@ -1042,22 +949,58 @@ and the ssh -N process has no owner yet at that point."
              (cadr err)
              "Database password lookup failed via auth-source for scott@db.example.com:3306: bad decrypt"))))
 
-(ert-deftest clutch-test-build-conn-relays-db-errors-without-duplicate-prefixes ()
-  "User-facing connect errors should not duplicate nested connection-failed wrappers."
-  (let ((err (clutch-test--without-credentials
-               (cl-letf (((symbol-function 'clutch-db-connect)
-                          (lambda (&rest _args)
-                            (signal 'clutch-db-error
-                                    '("Connection failed (oracle): Connection attempt timed out")))))
-                 (should-error
-                  (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
-                  :type 'user-error)))))
-    (should (string-match-p
-             "Connection failed [(]oracle[)]: Connection attempt timed out"
-             (cadr err)))
-    (should (string-match-p "clutch-debug-mode" (cadr err)))
-    (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                            (cadr err)))))
+(ert-deftest clutch-test-build-conn-failure-guidance ()
+  "Connect failures should surface as `user-error' with the right guidance.
+The backend message appears once, without nested connection-failed
+wrappers.  The debug workflow is offered as enabling `clutch-debug-mode'
+while capture is off and as inspecting the debug buffer while it is on.
+A missing JDBC driver or agent points to its own fix command instead."
+  (dolist (case
+           `((:label "backend message, debug capture off"
+              :message "Connection failed (oracle): Connection attempt timed out"
+              :params (:backend oracle :host "db" :port 1521 :user "u")
+              :mentions ("Connection failed [(]oracle[)]: Connection attempt timed out"
+                         "clutch-debug-mode"
+                         ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "connection refused, debug capture off"
+              :message "Connection refused (host=db.example.com, port=3306)"
+              :params (:backend mysql :host "db.example.com" :port 3306)
+              :mentions ("check host and port"
+                         "clutch-debug-mode"
+                         ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "connection refused, debug capture on"
+              :debug-mode t
+              :message "Connection refused (host=db.example.com, port=3306)"
+              :params (:backend mysql :host "db.example.com" :port 3306)
+              :mentions ("check host and port"
+                         ,(regexp-quote clutch-debug-buffer-name))
+              :omits ("clutch-debug-mode"))
+             (:label "missing JDBC driver"
+              :message "SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL"
+              :params (:backend oracle :driver jdbc :host "db" :port 1521)
+              :mentions ("clutch-jdbc-install-driver RET oracle")
+              :omits ("clutch-debug-mode"
+                      ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "missing JDBC agent"
+              :message "JDBC agent jar not found: /tmp/clutch-jdbc-agent.jar\nRun M-x clutch-jdbc-ensure-agent"
+              :params (:backend oracle :driver jdbc :host "db" :port 1521)
+              :mentions ("Run M-x clutch-jdbc-ensure-agent")
+              :omits ("clutch-debug-mode"
+                      ,(regexp-quote clutch-debug-buffer-name)))))
+    (ert-info ((plist-get case :label))
+      (let* ((clutch-debug-mode (plist-get case :debug-mode))
+             (err (clutch-test--without-credentials
+                    (cl-letf (((symbol-function 'clutch-db-connect)
+                               (lambda (_backend _params)
+                                 (signal 'clutch-db-error
+                                         (list (plist-get case :message))))))
+                      (should-error
+                       (clutch--build-conn (plist-get case :params))
+                       :type 'user-error)))))
+        (dolist (pattern (plist-get case :mentions))
+          (should (string-match-p pattern (cadr err))))
+        (dolist (pattern (plist-get case :omits))
+          (should-not (string-match-p pattern (cadr err))))))))
 
 (ert-deftest clutch-test-build-conn-wraps-ssh-setup-errors-before-user-display ()
   "SSH setup errors should be normalized before they reach the minibuffer."
@@ -1177,56 +1120,6 @@ and the ssh -N process has no owner yet at that point."
                 :type 'user-error)))
       (should (string-match-p ":backend oracle"
                               (error-message-string err))))))
-
-(ert-deftest clutch-test-build-conn-failure-debug-guidance ()
-  "Connect failures should adapt their debug guidance to debug-mode state."
-  (dolist (case '((:label "debug capture off"
-                   :debug-mode nil
-                   :mentions-enable t)
-                  (:label "debug capture on"
-                   :debug-mode t
-                   :mentions-enable nil)))
-    (ert-info ((format "build-conn debug guidance: %s" (plist-get case :label)))
-      (let ((clutch-debug-mode (plist-get case :debug-mode)))
-        (clutch-test--without-credentials
-          (cl-letf (((symbol-function 'clutch-db-connect)
-                     (lambda (_backend _params)
-                       (signal 'clutch-db-error
-                               '("Connection refused (host=db.example.com, port=3306)")))))
-            (let ((err (should-error
-                        (clutch--build-conn
-                         '(:backend mysql :host "db.example.com" :port 3306))
-                        :type 'user-error)))
-              (should (string-match-p "check host and port" (cadr err)))
-              (if (plist-get case :mentions-enable)
-                  (should (string-match-p "clutch-debug-mode" (cadr err)))
-                (should-not (string-match-p "clutch-debug-mode" (cadr err))))
-              (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                      (cadr err))))))))))
-
-(ert-deftest clutch-test-build-conn-jdbc-missing-driver-or-agent-points-to-fix-command ()
-  "Missing JDBC driver/agent should point to its own fix, not the debug workflow."
-  (dolist (case
-           (list
-            (list "missing driver"
-                  "SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL"
-                  "clutch-jdbc-install-driver RET oracle")
-            (list "missing agent"
-                  "JDBC agent jar not found: /tmp/clutch-jdbc-agent.jar\nRun M-x clutch-jdbc-ensure-agent"
-                  "Run M-x clutch-jdbc-ensure-agent")))
-    (pcase-let ((`(,label ,signaled-message ,expected-pattern) case))
-      (ert-info ((format "case: %s" label))
-        (let ((err (clutch-test--without-credentials
-                     (cl-letf (((symbol-function 'clutch-db-connect)
-                                (lambda (_backend _params)
-                                  (signal 'clutch-db-error (list signaled-message)))))
-                       (should-error
-                        (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
-                        :type 'user-error)))))
-          (should (string-match-p expected-pattern (cadr err)))
-          (should-not (string-match-p "clutch-debug-mode" (cadr err)))
-          (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                      (cadr err))))))))
 
 (ert-deftest clutch-test-readers-do-not-require-clutch-entrypoint ()
   "Saved-connection readers should consume assembled configuration directly."
@@ -2108,51 +2001,84 @@ The owner invalidating them and disconnecting from them both end it."
                      "fallback"))
       (should (= calls 1)))))
 
-(ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
-  "MongoDB completion should offer shell methods and cached collections."
+(ert-deftest clutch-test-mongodb-completion-contexts ()
+  "MongoDB completion should offer what the text before point calls for.
+After `db.' it offers cached collections and shell methods; after a
+collection, its helper methods and templates; after a chainable query,
+the cursor helpers that may still follow; MQL operators after `$';
+sampled field names as document keys and `$' field paths; and
+collections inside `from:' and `into:' strings.  Completing inserts the
+candidate, and a finished key completion adds its colon."
   (clutch-test--with-isolated-metadata-caches
     (let ((conn (make-clutch-test-conn))
           (schema (make-hash-table :test 'equal)))
       (puthash "users" nil schema)
-      (puthash "orders" nil schema)
+      (puthash "orders" '("status" "userId" "items.productId") schema)
+      (puthash "products" '("sku" "category") schema)
       (puthash conn schema clutch--schema-cache)
       (with-temp-buffer
         (clutch-mongodb-mode)
         (setq-local clutch-connection conn)
-        (should (derived-mode-p 'prog-mode))
-        (should-not (derived-mode-p 'js-mode))
-        (should (eq indent-line-function #'clutch-mongodb-indent-line))
-        (should (equal comment-start "// "))
-        (insert "db.")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "" (nth 2 capf))))
-          (should (equal (car capf) (point)))
-          (should (equal (cadr capf) (point)))
-          (should (member "users" candidates))
-          (should (member "orders" candidates))
-          (should (member "runCommand()" candidates))
-          (should-not (member "getSiblingDB()" candidates)))
-        (erase-buffer)
-        (insert "db.users.")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "" (nth 2 capf))))
-          (should (member "find()" candidates))
-          (should (member "aggregate()" candidates))
-          (should (member "find({}).limit(20)" candidates))
-          (should (member "aggregate([{ $match: {} }, { $limit: 20 }])"
-                          candidates))
-          (should (member "countDocuments()" candidates))
-          (should-not (member "estimatedDocumentCount()" candidates)))
-        (erase-buffer)
-        (insert "db.users.fi")
-        (cl-letf (((symbol-function 'completion-in-region)
-                   (lambda (beg end collection &optional _predicate)
-                     (delete-region beg end)
-                     (insert (car (all-completions
-                                   "fi" collection)))
-                     t)))
-          (clutch-mongodb-complete-at-point)
-          (should (equal (buffer-string) "db.users.find()")))))))
+        (pcase-dolist (`(,text ,prefix ,offered ,withheld)
+                       '(("db." ""
+                          ("users" "orders" "runCommand()") ("getSiblingDB()"))
+                         ("db.users." ""
+                          ("find()" "aggregate()" "countDocuments()"
+                           "find({}).limit(20)"
+                           "aggregate([{ $match: {} }, { $limit: 20 }])")
+                          ("estimatedDocumentCount()"))
+                         ("db.users.find({})." ""
+                          ("limit()" "sort()" "explain()") ("batchSize()" "find()"))
+                         ("db.users.find({}).sort({createdAt: -1})." ""
+                          ("limit()" "skip()") nil)
+                         ("db.users.aggregate([])." ""
+                          ("allowDiskUse()" "maxTimeMS()" "explain()") ("limit()"))
+                         ("db.orders.aggregate([{$" "$"
+                          ("$match" "$lookup" "$sum" "$dateTrunc") ("$vectorSearch"))
+                         ("db.orders.find({st" "st" ("status") ("find()"))
+                         ("db.orders.aggregate([{$group:{_id:\"$u" "$u"
+                          ("$userId") nil)
+                         ("db.orders.aggregate([{$lookup:{from:\"pro" "pro"
+                          ("products") nil)
+                         ("db.orders.aggregate([{$merge:{into:\"pro" "pro"
+                          ("products") nil)))
+          (ert-info ((format "candidates after %S" text))
+            (erase-buffer)
+            (insert text)
+            (let* ((capf (clutch-mongodb-completion-at-point))
+                   (candidates (all-completions prefix (nth 2 capf))))
+              (should (= (cadr capf) (point)))
+              (should (= (- (cadr capf) (car capf)) (length prefix)))
+              (dolist (candidate offered)
+                (should (member candidate candidates)))
+              (dolist (candidate withheld)
+                (should-not (member candidate candidates))))))
+        (pcase-dolist (`(,text ,prefix ,completed)
+                       '(("db.users.fi" "fi" "db.users.find()")
+                         ("db.users.find({}).li" "li" "db.users.find({}).limit()")))
+          (ert-info ((format "completing after %S" text))
+            (erase-buffer)
+            (insert text)
+            (cl-letf (((symbol-function 'completion-in-region)
+                       (lambda (beg end collection &optional _predicate)
+                         (delete-region beg end)
+                         (insert (car (all-completions prefix collection)))
+                         t)))
+              (clutch-mongodb-complete-at-point)
+              (should (equal (buffer-string) completed)))))
+        (pcase-dolist (`(,text ,key ,completed)
+                       '(("db.orders.find({st" "status" "db.orders.find({status: ")
+                         ("db.orders.aggregate([{$m" "$match"
+                          "db.orders.aggregate([{$match: ")))
+          (ert-info ((format "finishing key %S" key))
+            (erase-buffer)
+            (insert text)
+            (pcase-let ((`(,beg ,end ,_collection . ,plist)
+                         (clutch-mongodb-completion-at-point)))
+              (delete-region beg end)
+              (insert key)
+              (funcall (plist-get plist :exit-function) key 'finished)
+              (should (equal (buffer-string) completed)))))))))
 
 (ert-deftest clutch-test-mongodb-completion-defers-uncached-field-sampling ()
   "Installed MongoDB CAPF should defer uncached field metadata sampling."
@@ -2244,115 +2170,17 @@ The owner invalidating them and disconnecting from them both end it."
                                   (with-current-buffer shown
                                     (buffer-string)))))))))
 
-(ert-deftest clutch-test-mongodb-completion-uses-cursor-chain-candidates ()
-  "MongoDB completion should offer cursor helpers after chainable queries."
+(ert-deftest clutch-test-mongodb-mode-setup ()
+  "MongoDB query buffers should be set up for MQL without SQL transaction keys.
+The mode is a `prog-mode', not a `js-mode', with its own indentation and
+`//' comments, and does not expose the SQL commit, rollback and
+auto-commit keys."
   (with-temp-buffer
     (clutch-mongodb-mode)
-    (insert "db.users.find({}).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "limit()" candidates))
-      (should (member "sort()" candidates))
-      (should (member "explain()" candidates))
-      (should-not (member "batchSize()" candidates))
-      (should-not (member "find()" candidates)))
-    (erase-buffer)
-    (insert "db.users.find({}).sort({createdAt: -1}).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "limit()" candidates))
-      (should (member "skip()" candidates)))
-    (erase-buffer)
-    (insert "db.users.aggregate([]).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "allowDiskUse()" candidates))
-      (should (member "maxTimeMS()" candidates))
-      (should (member "explain()" candidates))
-      (should-not (member "limit()" candidates)))
-    (erase-buffer)
-    (insert "db.users.find({}).li")
-    (cl-letf (((symbol-function 'completion-in-region)
-               (lambda (beg end collection &optional _predicate)
-                 (delete-region beg end)
-                 (insert (car (all-completions
-                               "li" collection)))
-                 t)))
-      (clutch-mongodb-complete-at-point)
-      (should (equal (buffer-string) "db.users.find({}).limit()")))))
-
-(ert-deftest clutch-test-mongodb-completion-offers-mql-operators-and-fields ()
-  "MongoDB completion should offer MQL operators and sampled field names."
-  (clutch-test--with-isolated-metadata-caches
-    (let ((conn (make-clutch-test-conn))
-          (schema (make-hash-table :test 'equal)))
-      (puthash "orders" '("status" "userId" "items.productId") schema)
-      (puthash "products" '("sku" "category") schema)
-      (puthash conn schema clutch--schema-cache)
-      (with-temp-buffer
-        (clutch-mongodb-mode)
-        (setq-local clutch-connection conn)
-        (insert "db.orders.aggregate([{$")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "$" (nth 2 capf))))
-          (should (member "$match" candidates))
-          (should (member "$lookup" candidates))
-          (should (member "$sum" candidates))
-          (should (member "$dateTrunc" candidates))
-          (should-not (member "$vectorSearch" candidates)))
-        (erase-buffer)
-        (insert "db.orders.find({st")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "st" (nth 2 capf))))
-          (should (member "status" candidates))
-          (should-not (member "find()" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$group:{_id:\"$u")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "$u" (nth 2 capf))))
-          (should (member "$userId" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$lookup:{from:\"pro")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "pro" (nth 2 capf))))
-          (should (member "products" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$merge:{into:\"pro")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "pro" (nth 2 capf))))
-          (should (member "products" candidates)))))))
-
-(ert-deftest clutch-test-mongodb-completion-inserts-key-colon ()
-  "MongoDB field and operator completion should add a key separator."
-  (clutch-test--with-isolated-metadata-caches
-    (let ((conn (make-clutch-test-conn))
-          (schema (make-hash-table :test 'equal)))
-      (puthash "orders" '("status" "userId") schema)
-      (puthash conn schema clutch--schema-cache)
-      (with-temp-buffer
-        (clutch-mongodb-mode)
-        (setq-local clutch-connection conn)
-        (insert "db.orders.find({st")
-        (pcase-let ((`(,beg ,end ,collection . ,plist)
-                     (clutch-mongodb-completion-at-point)))
-          (delete-region beg end)
-          (insert "status")
-          (funcall (plist-get plist :exit-function) "status" 'finished)
-          (should (equal (buffer-string) "db.orders.find({status: ")))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$m")
-        (pcase-let ((`(,beg ,end ,collection . ,plist)
-                     (clutch-mongodb-completion-at-point)))
-          (delete-region beg end)
-          (insert "$match")
-          (funcall (plist-get plist :exit-function) "$match" 'finished)
-          (should (equal (buffer-string)
-                         "db.orders.aggregate([{$match: ")))))))
-
-(ert-deftest clutch-test-mongodb-mode-keymap-keeps-document-actions-only ()
-  "MongoDB query buffers should not expose SQL transaction keys."
-  (with-temp-buffer
-    (clutch-mongodb-mode)
+    (should (derived-mode-p 'prog-mode))
+    (should-not (derived-mode-p 'js-mode))
+    (should (eq indent-line-function #'clutch-mongodb-indent-line))
+    (should (equal comment-start "// "))
     (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a"))
       (should-not (lookup-key clutch-mongodb-mode-map (kbd key))))))
 
