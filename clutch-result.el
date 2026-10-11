@@ -1565,7 +1565,7 @@ result in place."
 It restores the filter and keeps the current result's paging, server-side
 rewrites, source table and the row identity of PLAN, which the filtered SQL
 alone would lose.  With FILTER nil it only clears the filter."
-  (append (list :base-query (when filter base) :where-filter filter)
+  (append (list :base-query base :where-filter filter)
           (and filter
                (list :server-pageable (clutch-result--server-pageable-p)
                      :server-rewritable t
