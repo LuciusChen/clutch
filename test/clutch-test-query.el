@@ -123,7 +123,28 @@
         (should (equal tsv
                        "name\tscore\nthree\t30\nfour\t40\nfive\t50\n"))
         (should-not
-         (string-match-p "one\\|two\\|clutch__rid\\|id\t" tsv))))))
+         (string-match-p "one\\|two\\|clutch__rid\\|id\t" tsv)))
+      ;; Clearing the filter leaves a result like a fresh one of its query,
+      ;; so exporting all rows still fetches them in pages.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) ""))
+                ((symbol-function 'read-string) (lambda (&rest _args) "")))
+        (clutch-result-apply-filter))
+      (should-not clutch--where-filter)
+      (let* ((clutch-export-page-size 2)
+             (pages 0)
+             (count-page (lambda (&rest _) (cl-incf pages))))
+        (advice-add 'clutch-db-build-paged-sql :before count-page)
+        (unwind-protect
+            (cl-letf (((symbol-function 'transient-args)
+                       (lambda (_prefix) nil)))
+              (funcall (oref (clutch-test--transient-suffix-for-key
+                              'clutch-result-export "t")
+                             command)))
+          (advice-remove 'clutch-db-build-paged-sql count-page))
+        (should (= pages 3))
+        (should (equal (current-kill 0 t)
+                       (concat "name\tscore\none\t10\ntwo\t20\nthree\t30\n"
+                               "four\t40\nfive\t50\n")))))))
 
 (ert-deftest clutch-test-cte-result-rewrites-real-sqlite-workflow ()
   "A simple query over a CTE should count, sort and filter on the server."

@@ -151,7 +151,8 @@ default returns the default."
         (filter "" "")
         (should (equal (ids) '(1 2 3)))
         (should-not (buffer-local-value 'clutch--where-filter result))
-        (should-not (buffer-local-value 'clutch--base-query result))
+        (should (equal (buffer-local-value 'clutch--base-query result)
+                       "SELECT id, name, score FROM people ORDER BY id"))
         (should (member "Filter cleared" shown))
         ;; A mistake without a filter keeps the query, so g and the
         ;; next filter still start from it.
