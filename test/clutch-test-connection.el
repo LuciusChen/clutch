@@ -1604,21 +1604,23 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
         (should-not clutch--execution-refresh-timer)))))
 
 (ert-deftest clutch-test-run-db-query-updates-manual-commit-dirty-state ()
-  "Query execution should update dirty state from SQL and backend DDL semantics."
-  (dolist (case '((dml "UPDATE demo SET x = 1" nil nil t)
+  "Query execution should update dirty state from SQL and backend DDL semantics.
+Staged statements do not publish it before their batch succeeds."
+  (dolist (case '((dml "UPDATE demo SET x = 1" nil nil dirty)
                   (dml-in-with-clause
                    "WITH i AS (INSERT INTO demo VALUES (1) RETURNING id) SELECT * FROM i"
-                   nil nil t)
-                  (select-into-table "SELECT * INTO demo_copy FROM demo" nil nil t)
+                   nil nil dirty)
+                  (select-into-table "SELECT * INTO demo_copy FROM demo" nil nil dirty)
                   (select-into-variable "SELECT x INTO @x FROM demo" nil nil nil)
                   (data-change-table
                    "SELECT * FROM FINAL TABLE (INSERT INTO demo VALUES (1))"
-                   nil nil t)
-                  (transactional-ddl "CREATE TABLE demo (id int)" dirty nil t)
+                   nil nil dirty)
+                  (transactional-ddl "CREATE TABLE demo (id int)" dirty nil dirty)
                   (autocommit-ddl "CREATE TABLE demo (id int)" clear t nil)
                   (commit "COMMIT" nil t nil)
-                  (unknown-ddl "ALTER TABLE demo ADD x NUMBER" nil t t)))
-    (pcase-let ((`(,label ,sql ,schema-effect ,initial-dirty ,expected-dirty)
+                  (unknown-ddl "ALTER TABLE demo ADD x NUMBER" nil t dirty)
+                  (deferred-dml "UPDATE demo SET x = 1" nil nil nil t)))
+    (pcase-let ((`(,label ,sql ,schema-effect ,initial-dirty ,expected ,defer)
                  case))
       (ert-info ((format "case: %s" label))
         (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
@@ -1629,9 +1631,8 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
                      (lambda (_conn _sql) '(:ok t)))
                     ((symbol-function 'clutch-db-schema-transaction-effect)
                      (lambda (_conn _sql) schema-effect)))
-            (clutch--run-db-query conn sql)
-            (should (eq (not (null (clutch--tx-dirty-p conn)))
-                        expected-dirty))))))))
+            (clutch--run-db-query conn sql nil defer)
+            (should (eq (clutch--tx-state conn) expected))))))))
 
 (ert-deftest clutch-test-transaction-state-follows-the-server-report ()
   "Uncommitted work should be known until the server reports no transaction.
@@ -1697,15 +1698,6 @@ report of none open clears it."
             (clutch--run-db-query conn sql))
           (should (eq (clutch--tx-state conn) state)))))))
 
-(ert-deftest clutch-test-run-db-query-can-defer-transaction-state-to-batch ()
-  "Staged statements should not publish dirty state before their batch succeeds."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (conn (make-clutch-test-conn :commit-mode 'manual)))
-    (cl-letf (((symbol-function 'clutch-db-query)
-               (lambda (_conn _sql) '(:ok t))))
-      (clutch--run-db-query conn "UPDATE demo SET x = 1" nil t)
-      (should-not (clutch--tx-state conn)))))
-
 (ert-deftest clutch-test-uncertain-transaction-requires-rollback ()
   "An unknown batch should block work while allowing session recovery."
   (with-temp-buffer
@@ -1761,64 +1753,53 @@ Work of a transaction begun with BEGIN in Auto mode is asked about too."
                 (should (string-suffix-p "Disconnect? " prompt)))
             (should-not prompt)))))))
 
-(ert-deftest clutch-test-transaction-commands-error-in-autocommit-mode ()
-  "Commit and rollback should error when the connection is not in manual mode."
-  (dolist (command '(clutch-commit clutch-rollback))
-    (ert-info ((format "command: %s" command))
-      (let ((clutch-connection (make-clutch-test-conn :commit-mode 'auto)))
-        (should-error (funcall command) :type 'user-error)))))
-
-(ert-deftest clutch-test-commit-failure-marks-outcome-uncertain ()
-  "A failed COMMIT response must not leave the transaction merely dirty."
-  (with-temp-buffer
-    (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch-connection (make-clutch-test-conn :commit-mode 'manual)))
-      (puthash clutch-connection 'dirty clutch--tx-state-cache)
-      (cl-letf (((symbol-function 'clutch-db-commit)
-                 (lambda (_conn)
-                   (signal 'clutch-db-error '("commit response lost")))))
-        (let ((err (should-error (clutch-commit) :type 'user-error)))
-          (should (string-match-p "outcome is uncertain"
-                                  (error-message-string err))))
-        (should (clutch--tx-uncertain-p clutch-connection))))))
-
-(ert-deftest clutch-test-transaction-commands-call-rpc-and-clear-dirty ()
-  "Commit and rollback should fire their RPC and clear the dirty cache."
-  (dolist (case '((commit clutch-commit clutch-db-commit)
-                  (rollback clutch-rollback clutch-db-rollback)))
-    (pcase-let ((`(,label ,command ,rpc) case))
-      (ert-info ((format "case: %s" label))
-        (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              (clutch-connection (make-clutch-test-conn :commit-mode 'manual))
-              called)
-          (puthash clutch-connection 'dirty clutch--tx-state-cache)
-          (cl-letf (((symbol-function rpc)
-                     (lambda (_conn) (setq called t))))
-            (funcall command)
-            (should called)
-            (should-not (clutch--tx-dirty-p clutch-connection))))))))
-
-(ert-deftest clutch-test-commit-reports-backend-rollback ()
-  "A failed backend transaction should be reported as rolled back, not committed."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection (make-clutch-test-conn :commit-mode 'manual))
-        committed
-        rolled-back)
-    (puthash clutch-connection 'dirty clutch--tx-state-cache)
-    (cl-letf (((symbol-function 'clutch-db-commit)
-               (lambda (_conn) 'rolled-back))
-              ((symbol-function 'clutch--mark-dml-results-committed)
-               (lambda (_conn) (setq committed t)))
-              ((symbol-function 'clutch--mark-dml-results-rolled-back)
-               (lambda (_conn) (setq rolled-back t))))
-      (let ((err (should-error (clutch-commit) :type 'user-error)))
-        (should (string-match-p "nothing was committed"
-                                (error-message-string err)))
-        (should-not (string-match-p "outcome is uncertain"
-                                    (error-message-string err))))
-      (should rolled-back)
-      (should-not committed)
-      (should-not (clutch--tx-state clutch-connection)))))
+(ert-deftest clutch-test-transaction-commands-report-the-backend-outcome ()
+  "Commit and rollback should end the transaction as the backend reports.
+In Auto mode they refuse.  A failed COMMIT response must not leave the
+transaction merely dirty, and a failed backend transaction should be
+reported as rolled back, not committed."
+  (pcase-dolist (`(,command ,mode ,answer ,error-pattern ,state ,banner)
+                 '((clutch-commit manual nil nil nil "committed")
+                   (clutch-rollback manual nil nil nil "rolled back")
+                   (clutch-commit manual error "outcome is uncertain" uncertain nil)
+                   (clutch-commit manual rolled-back
+                                  "\\`Transaction had already failed" nil "rolled back")
+                   (clutch-commit auto nil
+                                  "\\`Connection is in autocommit mode\\'" nil nil)
+                   (clutch-rollback auto nil
+                                    "\\`Connection is in autocommit mode\\'" nil nil)))
+    (ert-info ((format "%s in %s mode, backend answer %s" command mode answer))
+      (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+             (conn (make-clutch-test-conn :commit-mode mode))
+             (dml (clutch-test--make-dml-result-buf conn))
+             called)
+        (when (eq mode 'manual)
+          (puthash conn 'dirty clutch--tx-state-cache))
+        (unwind-protect
+            (with-temp-buffer
+              (setq-local clutch-connection conn)
+              (cl-letf (((symbol-function (if (eq command 'clutch-commit)
+                                              'clutch-db-commit
+                                            'clutch-db-rollback))
+                         (lambda (_conn)
+                           (setq called t)
+                           (if (eq answer 'error)
+                               (signal 'clutch-db-error '("commit response lost"))
+                             answer))))
+                (if error-pattern
+                    (should (string-match-p
+                             error-pattern
+                             (error-message-string
+                              (should-error (funcall command)
+                                            :type 'user-error))))
+                  (funcall command)))
+              (should (eq called (eq mode 'manual)))
+              (should (eq (clutch--tx-state conn) state))
+              (let ((header (buffer-local-value 'header-line-format dml)))
+                (if banner
+                    (should (string-match-p banner header))
+                  (should-not header))))
+          (kill-buffer dml))))))
 
 (ert-deftest clutch-test-session-teardown-step-matrix ()
   "Each teardown kind should run exactly the steps it documents.
@@ -1904,124 +1885,96 @@ commit an empty transaction instead of reporting the loss."
         (should-error (clutch--do-disconnect conn) :type 'clutch-db-error)
         (should-not (gethash conn clutch--connection-transport-cache))))))
 
-(ert-deftest clutch-test-transaction-commands-refuse-lost-transaction ()
-  "Commit and rollback must not report success after the session was replaced.
+(ert-deftest clutch-test-transaction-commands-refuse-a-dead-session ()
+  "Transaction commands must not run on a replacement of a dead session.
 A dead manual-commit session was already rolled back by the server, so a
-replacement connection would run the statement against an empty transaction."
-  (dolist (command '(clutch-commit clutch-rollback clutch-toggle-auto-commit))
-    (ert-info ((format "command: %s" command))
-      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-            (clutch-connection (make-clutch-test-conn :live nil
-                                                      :commit-mode 'manual))
-            reconnected
-            rpc-called)
-        (puthash clutch-connection 'dirty clutch--tx-state-cache)
-        (cl-letf (((symbol-function 'clutch--try-reconnect)
-                   (lambda () (setq reconnected t)))
-                  ((symbol-function 'clutch-db-commit)
-                   (lambda (_conn) (setq rpc-called t)))
-                  ((symbol-function 'clutch-db-rollback)
-                   (lambda (_conn) (setq rpc-called t)))
-                  ((symbol-function 'clutch-db-set-auto-commit)
-                   (lambda (&rest _) (setq rpc-called t))))
-          (should-error (funcall command) :type 'user-error)
-          (should-not rpc-called)
-          (should-not reconnected)
-          ;; The loss is reported once; the session is then clean so the next
-          ;; command reconnects normally.
-          (should-not (clutch--tx-dirty-p clutch-connection)))))))
-
-(ert-deftest clutch-test-transaction-commands-preserve-dead-uncertain-outcome ()
-  "A dead uncertain session must not be replaced and reported as rolled back."
-  (with-temp-buffer
-    (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
-           (conn (make-clutch-test-conn :live nil))
-           (dml (clutch-test--make-dml-result-buf conn)))
-      (unwind-protect
-          (progn
-            (setq-local clutch-connection conn)
-            (puthash conn 'uncertain clutch--tx-state-cache)
-            ;; A reconnect attempt would fail with "Not connected" instead.
-            (should (string-match-p
-                     "verify"
-                     (error-message-string
-                      (should-error (clutch--ensure-transaction-connection)
-                                    :type 'user-error))))
-            (should-not (buffer-local-value 'header-line-format dml))
-            (should (clutch--tx-uncertain-p conn)))
-        (kill-buffer dml)))))
+replacement connection would run the statement against an empty
+transaction.  A dead uncertain session must not be replaced and reported
+as rolled back either."
+  (pcase-dolist (`(,state ,error-pattern ,banner ,state-after)
+                 '((dirty "uncommitted changes were lost" "rolled back" nil)
+                   (uncertain "verify" nil uncertain)))
+    (dolist (command '(clutch-commit clutch-rollback clutch-toggle-auto-commit))
+      (ert-info ((format "%s with %s state" command state))
+        (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+               (conn (make-clutch-test-conn :live nil :commit-mode 'manual))
+               (dml (clutch-test--make-dml-result-buf conn))
+               rpc-called)
+          (puthash conn state clutch--tx-state-cache)
+          (unwind-protect
+              (with-temp-buffer
+                (setq-local clutch-connection conn)
+                (cl-letf (((symbol-function 'clutch-db-commit)
+                           (lambda (_conn) (setq rpc-called t)))
+                          ((symbol-function 'clutch-db-rollback)
+                           (lambda (_conn) (setq rpc-called t)))
+                          ((symbol-function 'clutch-db-set-auto-commit)
+                           (lambda (&rest _) (setq rpc-called t))))
+                  ;; A reconnect attempt would fail with "Not connected".
+                  (should (string-match-p
+                           error-pattern
+                           (error-message-string
+                            (should-error (funcall command)
+                                          :type 'user-error)))))
+                (should-not rpc-called)
+                (let ((header (buffer-local-value 'header-line-format dml)))
+                  (if banner
+                      (should (string-match-p banner header))
+                    (should-not header)))
+                ;; A loss is reported once; the session is then clean so the
+                ;; next command reconnects normally.
+                (should (eq (clutch--tx-state conn) state-after)))
+            (kill-buffer dml)))))))
 
 (ert-deftest clutch-test-reconnect-reports-prior-transaction-state-accurately ()
-  "Reconnect should distinguish lost work from an unknown submission outcome."
-  (dolist (case '((dirty dead-conn "uncommitted")
-                  (uncertain nil "outcome is unknown")))
-    (pcase-let ((`(,state ,expected-mark ,message-pattern) case))
-      (ert-info ((format "state: %s" state))
-        (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              marked
-              messages)
-          (with-temp-buffer
-            (setq-local clutch-connection 'dead-conn
-                        clutch--connection-params
-                        '(:backend pg :host "db.internal")
-                        clutch--conn-sql-product 'pg)
-            (puthash 'dead-conn state clutch--tx-state-cache)
-            (cl-letf (((symbol-function 'clutch--build-conn)
-                       (lambda (_params) 'new-conn))
-                      ((symbol-function 'clutch--connection-alive-p)
-                       (lambda (conn) (eq conn 'new-conn)))
-                      ((symbol-function 'clutch--release-connection-transport)
-                       #'ignore)
-                      ((symbol-function 'clutch--clear-connection-problem-capture)
-                       #'ignore)
-                      ((symbol-function 'clutch--clear-connection-metadata-caches)
-                       #'ignore)
-                      ((symbol-function 'clutch--rebind-connection-buffers)
-                       #'ignore)
-                      ((symbol-function 'clutch--finalize-rebound-connection)
-                       #'ignore)
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (_conn) "pg:db.internal"))
-                      ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                      ((symbol-function 'clutch--mark-dml-results-rolled-back)
-                       (lambda (conn) (setq marked conn)))
-                      ((symbol-function 'message)
-                       (lambda (format-string &rest args)
-                         (push (apply #'format format-string args) messages))))
-              (should (clutch--try-reconnect))
-              (should (eq marked expected-mark))
-              (should-not (clutch--tx-state 'dead-conn))
-              (should
-               (seq-find
-                (lambda (text)
-                  (string-match-p message-pattern text))
-                messages)))))))))
-(ert-deftest clutch-test-try-reconnect-without-sql-product ()
-  "Backends without a SQL product, such as Redis, should still reconnect."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        rebound)
-    (with-temp-buffer
-      (setq-local clutch-connection 'dead-conn
-                  clutch--connection-params '(:backend redis :host "cache.internal")
-                  clutch--conn-sql-product nil)
-      (cl-letf (((symbol-function 'clutch--build-conn)
-                 (lambda (_params) 'new-conn))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'clutch--release-connection-transport) #'ignore)
-                ((symbol-function 'clutch--clear-connection-problem-capture)
-                 #'ignore)
-                ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 #'ignore)
-                ((symbol-function 'clutch--rebind-connection-buffers)
-                 (lambda (old-conn new-conn _params product)
-                   (setq rebound (list old-conn new-conn product))))
-                ((symbol-function 'clutch--finalize-rebound-connection) #'ignore)
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "redis:cache.internal"))
-                ((symbol-function 'message) #'ignore))
-        (should (clutch--try-reconnect))
-        (should (equal rebound '(dead-conn new-conn nil)))))))
+  "Reconnect should distinguish lost work from an unknown submission outcome.
+Backends without a SQL product, such as Redis, reconnect too."
+  (pcase-dolist (`(,state ,params ,product ,banner ,message-pattern)
+                 '((dirty (:backend pg :host "db.internal") pg
+                          "rolled back" "uncommitted")
+                   (uncertain (:backend pg :host "db.internal") pg
+                              nil "outcome is unknown")
+                   (nil (:backend redis :host "cache.internal") nil
+                        nil "Reconnected to")))
+    (ert-info ((format "state: %s" state))
+      (clutch-test--with-isolated-metadata-caches
+        (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+               (old (make-clutch-test-conn :live nil))
+               (new (make-clutch-test-conn))
+               (dml (clutch-test--make-dml-result-buf old))
+               messages)
+          (unwind-protect
+              (with-temp-buffer
+                (setq-local clutch-connection old
+                            clutch--connection-params params
+                            clutch--conn-sql-product product)
+                (when state
+                  (puthash old state clutch--tx-state-cache))
+                (cl-letf (((symbol-function 'clutch--build-conn)
+                           (lambda (_params) new))
+                          ;; The shared backend has no schema to prime and
+                          ;; no endpoint to name.
+                          ((symbol-function 'clutch--finalize-rebound-connection)
+                           #'ignore)
+                          ((symbol-function 'clutch--connection-key)
+                           (lambda (_conn) "test-key"))
+                          ((symbol-function 'message)
+                           (lambda (format-string &rest args)
+                             (push (apply #'format format-string args)
+                                   messages))))
+                  (should (eq (clutch--try-reconnect) new)))
+                (should (eq clutch-connection new))
+                (should (eq clutch--conn-sql-product product))
+                (should (eq (buffer-local-value 'clutch-connection dml) new))
+                (let ((header (buffer-local-value 'header-line-format dml)))
+                  (if banner
+                      (should (string-match-p banner header))
+                    (should-not header)))
+                (should-not (clutch--tx-state old))
+                (should (seq-find (lambda (text)
+                                    (string-match-p message-pattern text))
+                                  messages)))
+            (kill-buffer dml)))))))
 
 (ert-deftest clutch-test-try-reconnect-refuses-a-namespace-it-cannot-reach ()
   "The automatic reconnect should refuse when it cannot return to the namespace.
@@ -2157,49 +2110,29 @@ connecting again, but it came before the console was shown."
           (should-not clutch--transaction-shortcuts-mode)
           (should-not (key-binding (kbd "C-c C-m"))))))))
 
-(ert-deftest clutch-test-transaction-shortcuts-disable-on-derived-invalidation ()
-  "Invalidated Result and Record views should drop transaction shortcuts."
+(ert-deftest clutch-test-transaction-shortcuts-leave-with-the-connection ()
+  "Result and Record views should drop transaction shortcuts with their connection.
+The owner invalidating them and disconnecting from them both end it."
   (let ((overriding-local-map nil)
         (overriding-terminal-local-map nil))
-    (dolist (mode '(clutch-result-mode clutch-record-mode))
-      (let ((conn (make-clutch-test-conn :commit-mode 'manual))
-            (owner (generate-new-buffer " *clutch-shortcuts-owner*"))
-            (view (generate-new-buffer " *clutch-shortcuts-view*")))
-        (unwind-protect
-            (progn
-              (with-current-buffer view
-                (funcall mode)
-                (clutch--bind-connection-context conn '(:backend oracle) 'oracle)
-                (should clutch--transaction-shortcuts-mode)
-                (should (eq (key-binding (kbd "C-c C-m"))
-                            #'clutch-commit)))
-              (with-current-buffer owner
-                (clutch--invalidate-derived-buffers conn))
-              (with-current-buffer view
-                (should-not clutch-connection)
-                (should-not clutch--transaction-shortcuts-mode)
-                (should-not (key-binding (kbd "C-c C-m")))))
-          (when (buffer-live-p owner)
-            (kill-buffer owner))
-          (when (buffer-live-p view)
-            (kill-buffer view)))))))
-
-(ert-deftest clutch-test-transaction-shortcuts-disable-on-current-disconnect ()
-  "Disconnecting from a Result view should drop transaction shortcuts."
-  (let ((overriding-local-map nil)
-        (overriding-terminal-local-map nil))
-    (clutch-test--with-isolated-metadata-caches
-      (with-temp-buffer
-        (clutch-result-mode)
-        (clutch--bind-connection-context
-         (make-clutch-test-conn :commit-mode 'manual) '(:backend oracle) 'oracle)
-        (should clutch--transaction-shortcuts-mode)
-        (should (eq (key-binding (kbd "C-c C-m"))
-                    #'clutch-commit))
-        (clutch-disconnect)
-        (should-not clutch-connection)
-        (should-not clutch--transaction-shortcuts-mode)
-        (should-not (key-binding (kbd "C-c C-m")))))))
+    (pcase-dolist (`(,mode ,trigger) '((clutch-result-mode invalidate)
+                                       (clutch-record-mode invalidate)
+                                       (clutch-result-mode disconnect)))
+      (ert-info ((format "%s: %s" mode trigger))
+        (clutch-test--with-isolated-metadata-caches
+          (let ((conn (make-clutch-test-conn :commit-mode 'manual)))
+            (with-temp-buffer
+              (funcall mode)
+              (clutch--bind-connection-context conn '(:backend oracle) 'oracle)
+              (should clutch--transaction-shortcuts-mode)
+              (should (eq (key-binding (kbd "C-c C-m")) #'clutch-commit))
+              (if (eq trigger 'disconnect)
+                  (clutch-disconnect)
+                (with-temp-buffer
+                  (clutch--invalidate-derived-buffers conn)))
+              (should-not clutch-connection)
+              (should-not clutch--transaction-shortcuts-mode)
+              (should-not (key-binding (kbd "C-c C-m"))))))))))
 
 (ert-deftest clutch-test-sqlite-omits-manual-commit-ui ()
   "SQLite should not advertise Clutch manual-commit controls."
