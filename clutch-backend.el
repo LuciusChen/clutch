@@ -157,14 +157,19 @@ than one message, such as a file error, keeps `error-message-string'."
        message))
     (_ (error-message-string err))))
 
+(cl-defgeneric clutch-db--error-data (err)
+  "Return the `clutch-db-error' data for client library error ERR.
+That is its message, see `clutch-db--error-message'; an adapter whose
+library reports more adds it."
+  (list (clutch-db--error-message err)))
+
 (defmacro clutch-db--translate-library-error (condition &rest body)
   "Run BODY and translate backend CONDITION errors to `clutch-db-error'."
   (declare (indent 1) (debug t))
   `(condition-case err
        (progn ,@body)
      (,condition
-      (signal 'clutch-db-error
-              (list (clutch-db--error-message err))))))
+      (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 (defun clutch-db--ensure-client-api (feature label functions)
   "Load FEATURE and verify that its public FUNCTIONS are available.

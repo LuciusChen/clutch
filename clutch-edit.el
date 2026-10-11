@@ -60,7 +60,7 @@ ask where it is now is reported as the server gave it."
                       (clutch-db-resolution-context clutch-connection)
                     (clutch-db-error
                      (user-error "%s" (clutch--humanize-db-error
-                                       (error-message-string err)))))))
+                                       (clutch-db--error-message err)))))))
       (user-error
        "The connection moved to another database or schema since this result's query ran; switch back, or run the query again")))))
 
@@ -1227,27 +1227,27 @@ Execute INSERTs first, then UPDATEs, then DELETEs."
                     restore-error err))
              ('rolled-back
               (user-error "%s" (clutch--humanize-db-error
-                                (error-message-string err))))
+                                (clutch-db--error-message err))))
              (_
               (signal (car err) (cdr err)))))
           (clutch-db-batch-outcome-uncertain
            (clutch--set-tx-uncertain clutch-connection)
            (user-error
             "%s; %s before continuing"
-            (clutch--humanize-db-error (error-message-string err))
+            (clutch--humanize-db-error (clutch-db--error-message err))
             (if (clutch-db-manual-commit-supported-p clutch-connection)
                 "roll back or reconnect"
               "reconnect")))
           (clutch-db-error
            (user-error "%s" (clutch--humanize-db-error
-                             (error-message-string err)))))
+                             (clutch-db--error-message err)))))
         (setq clutch--pending-edits nil
               clutch--pending-deletes nil
               clutch--pending-inserts nil)
         (revert-buffer nil t)
         (if restore-error
             (user-error "%s" (clutch--humanize-db-error
-                              (error-message-string restore-error)))
+                              (clutch-db--error-message restore-error)))
           (message "%s change%s %s"
                    (clutch--message-count (length all-stmts))
                    (if (= (length all-stmts) 1) "" "s")

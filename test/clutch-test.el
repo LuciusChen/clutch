@@ -5783,9 +5783,8 @@ A context that cannot be read is recorded as `unknown'."
                      (make-clutch-db-result :affected-rows 1)))
                   ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
           (let ((err (should-error (clutch-result-submit) :type 'user-error)))
-            (should (string-match-p
-                     "roll back or reconnect"
-                     (error-message-string err))))
+            (should (equal (cadr err)
+                           "commit outcome is uncertain; roll back or reconnect before continuing")))
           (should (clutch--tx-uncertain-p clutch-connection))
           (cl-letf (((symbol-function 'clutch--connection-alive-p) #'ignore))
             (should (string-match-p
@@ -9629,11 +9628,7 @@ The page stays, and the message says so."
                 ((symbol-function 'clutch--run-db-query)
                  (lambda (_conn _sql)
                    (signal 'clutch-db-error (list raw-message)))))
-        (let ((display-summary
-               (condition-case err
-                   (signal 'clutch-db-error (list raw-message))
-                 (clutch-db-error
-                  (clutch--humanize-db-error (error-message-string err))))))
+        (let ((display-summary (clutch--humanize-db-error raw-message)))
           (clutch-result--execute-page 0)
           (should (equal clutch--result-rows '((1))))
           (should (string-suffix-p "(result unchanged)" (car messages)))
@@ -9914,11 +9909,7 @@ statement."
             (let* ((display-parts (clutch--humanize-db-error-parts raw-message))
                    (result-summary (plist-get display-parts :summary))
                    (result-hint (plist-get display-parts :hint))
-                   (display-summary
-                    (condition-case err
-                        (signal 'clutch-db-error (list raw-message))
-                      (clutch-db-error
-                       (clutch--humanize-db-error (error-message-string err)))))
+                   (display-summary (clutch--humanize-db-error raw-message))
                    (signaled (should-error (clutch--execute-statements stmts)
                                            :type 'user-error)))
               (should (eq clutch-connection conn))
@@ -11805,12 +11796,7 @@ Otherwise the connection stays reserved and the mode line keeps counting."
               (should-error (clutch--handle-query-quit clutch-connection)
                             :type 'clutch-query-interrupted)
               (let* ((summary (clutch--humanize-db-error raw-message))
-                     (message-summary
-                      (condition-case err
-                          (signal 'clutch-db-error (list raw-message))
-                        (clutch-db-error
-                         (clutch--humanize-db-error
-                          (error-message-string err)))))
+                     (message-summary (clutch--humanize-db-error raw-message))
                      (details clutch--buffer-error-details)
                      (diag (plist-get details :diag))
                      (context (plist-get diag :context))

@@ -169,7 +169,7 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
      (if (clutch--oracle-i18n-missing-p err)
          (clutch--warn-oracle-i18n-once)
        (clutch--warn-completion-metadata-error-once
-        (error-message-string err)))
+        (clutch-db--error-message err)))
      nil)))
 
 (defun clutch--table-metadata (conn key)
@@ -514,7 +514,7 @@ Only loads table names (fast).  Column info is loaded lazily."
              conn "schema-refresh" "success"
              (format "Loaded %d tables" (length table-names)))))
       (clutch-db-error
-       (clutch--remember-schema-refresh-error conn (error-message-string err))
+       (clutch--remember-schema-refresh-error conn (clutch-db--error-message err))
        nil))))
 
 (defun clutch--prime-schema-cache (conn)
@@ -540,7 +540,7 @@ Fetches from the backend if not yet cached.  Returns column list."
                   col-names)
               (clutch-db-error
                (clutch--set-metadata-status
-                conn table :columns-status 'failed (error-message-string err))
+                conn table :columns-status 'failed (clutch-db--error-message err))
                nil)))))))
 
 (defun clutch--metadata-callback-current-p
@@ -655,7 +655,7 @@ or nil on error.  When STRICT is non-nil, signal `clutch-db-error'."
                conn table :column-details-status)
               details)
           (clutch-db-error
-           (let* ((message (error-message-string err))
+           (let* ((message (clutch-db--error-message err))
                   (details (or (nth 2 err)
                                (clutch-db-error-details conn))))
              (clutch--set-metadata-status
@@ -799,7 +799,7 @@ Returns a string or nil."
                 (clutch--clear-metadata-status conn key :comment-status))
             (clutch-db-error
              (clutch--set-metadata-status
-              conn key :comment-status 'failed (error-message-string err)
+              conn key :comment-status 'failed (clutch-db--error-message err)
               (plist-get (clutch--metadata-status conn key :comment-status)
                          :ticket))))
           (clutch--notify-metadata-state-changed conn)))
