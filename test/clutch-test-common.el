@@ -119,6 +119,26 @@ the default, which is what a user who just presses RET gets."
        ,@body
        (should-not clutch-test--minibuffer-answers))))
 
+(defmacro clutch-test--without-credentials (&rest body)
+  "Run BODY with no auth-source to read, so passwords resolve to nil."
+  (declare (indent 0) (debug (body)))
+  `(let ((auth-sources nil)
+         (auth-source-do-cache nil))
+     ,@body))
+
+(defmacro clutch-test--with-authinfo (lines &rest body)
+  "Run BODY with auth-source reading only a temporary authinfo of LINES."
+  (declare (indent 1) (debug (form body)))
+  (let ((dir (make-symbol "dir")))
+    `(let ((,dir (make-temp-file "clutch-authinfo" t)))
+       (unwind-protect
+           (let ((auth-sources (list (expand-file-name "authinfo" ,dir)))
+                 (auth-source-do-cache nil))
+             (with-temp-file (car auth-sources)
+               (insert (string-join ,lines "\n") "\n"))
+             ,@body)
+         (delete-directory ,dir t)))))
+
 (defun clutch-test--transient-menu-text (prefix)
   "Return the text of PREFIX's menu, opened from the current buffer.
 Open the menu and quit it with keys, as a user would: its descriptions
