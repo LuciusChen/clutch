@@ -28,8 +28,10 @@
 (cl-defstruct clutch-test-conn
   "A single-table metadata backend for result workflows, with no SQL engine.
 TABLE and COLUMNS declare the available metadata.  Other tables and every
-query fail the test rather than silently supplying empty results."
-  (live t) table columns)
+query fail the test rather than silently supplying empty results.
+COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
+`manual'."
+  (live t) table columns commit-mode)
 
 (cl-defmethod clutch-db-live-p ((conn clutch-test-conn))
   "Return whether CONN is open."
@@ -38,6 +40,19 @@ query fail the test rather than silently supplying empty results."
 (cl-defmethod clutch-db-disconnect ((conn clutch-test-conn))
   "Close CONN."
   (setf (clutch-test-conn-live conn) nil))
+
+(cl-defmethod clutch-db-manual-commit-supported-p ((conn clutch-test-conn))
+  "Return whether CONN has a commit mode to switch."
+  (and (clutch-test-conn-commit-mode conn) t))
+
+(cl-defmethod clutch-db-manual-commit-p ((conn clutch-test-conn))
+  "Return whether CONN is in manual-commit mode."
+  (eq (clutch-test-conn-commit-mode conn) 'manual))
+
+(cl-defmethod clutch-db-set-auto-commit ((conn clutch-test-conn) auto-commit)
+  "Put CONN in auto-commit mode when AUTO-COMMIT, else in manual commit."
+  (should (clutch-test-conn-commit-mode conn))
+  (setf (clutch-test-conn-commit-mode conn) (if auto-commit 'auto 'manual)))
 
 (cl-defmethod clutch-db-resolution-context ((_conn clutch-test-conn))
   "Return nil because this backend has no namespace switches."
