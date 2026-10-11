@@ -1226,11 +1226,13 @@ recovery."
                         '((name . test-failure)))
             (unwind-protect
                 (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
-                  (should (string-match-p
-                           message
-                           (error-message-string
-                            (should-error (clutch-result-submit)
-                                          :type 'user-error)))))
+                  (let ((err (should-error (clutch-result-submit)
+                                           :type 'user-error)))
+                    (should (string-match-p message (error-message-string err)))
+                    (when uncertain
+                      (should (equal
+                               (cadr err)
+                               "commit outcome is uncertain; roll back or reconnect before continuing")))))
               (advice-remove 'clutch-db-call-with-atomic-batch 'test-failure)
               (advice-remove 'clutch--refresh-transaction-ui 'test-refreshed))
             (should refreshed)

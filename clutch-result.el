@@ -2125,7 +2125,7 @@ Header controls tabular copy formats and defaults to Yes."
                       (list :name table :type "TABLE"))
                      "\n```\n\n")
            ((clutch-db-error user-error)
-            (let ((message (error-message-string err)))
+            (let ((message (clutch-db--error-message err)))
               (format "- Table metadata unavailable: %s\n\n" message)))))))
     (let* ((tables (or tables (clutch--agent-context-tables sql)))
            (sample (result-sample)))
@@ -3385,7 +3385,7 @@ buffer, or changing its connection, stops the export."
     (cl-labels
         ((report (err)
            (if waiting
-               (message "%s" (error-message-string err))
+               (message "%s" (clutch-db--error-message err))
              (signal (car err) (cdr err))))
          (settle (err)
            (clutch--end-query-activity activity)
