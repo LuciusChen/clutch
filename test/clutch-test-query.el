@@ -839,7 +839,9 @@ leaves the destination and no temporary file behind."
           (delete-directory dir t))))))
 
 (ert-deftest clutch-test-file-export-pages-through-sqlite ()
-  "Paged file output should equal complete formatting for every SQL format."
+  "Paged file output should equal complete formatting for every SQL format.
+A result that cannot page on the server writes the rows it holds in the
+same bounded batches."
   (require 'clutch-db-sqlite)
   (skip-unless (sqlite-available-p))
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
@@ -851,7 +853,7 @@ leaves the destination and no temporary file behind."
           (clutch-test--with-result-state
               (:connection conn :base-query "SELECT id, body FROM items ORDER BY id"
                :last-query "SELECT id, body FROM items ORDER BY id"
-               :server-pageable t :columns '("id" "body")
+               :columns '("id" "body")
                :column-defs '((:name "id" :type-category numeric)
                               (:name "body" :type-category text)))
             (setq-local clutch--result-source-table "items"
@@ -861,35 +863,39 @@ leaves the destination and no temporary file behind."
                   (clutch-export-page-size 2)
                   (rows (clutch-db-result-rows
                          (clutch-db-query conn clutch--base-query))))
-              (dolist (kind '(csv tsv insert update))
-                (dolist (omit-header '(nil t))
-                  (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
-                         (content (plist-get spec :content))
-                         (expected (if (memq kind '(csv tsv))
-                                       (funcall content rows omit-header)
-                                     (funcall content rows)))
-                         (calls 0)
-                         (query (symbol-function 'clutch-db-query))
-                         executed
-                         (format-batch (symbol-function content)))
-                    (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
-                              ((symbol-function 'clutch--read-delimited-export-coding-system)
-                               (lambda (_) 'utf-8))
-                              ((symbol-function 'clutch-db-query)
-                               (lambda (connection sql)
-                                 (push sql executed)
-                                 (funcall query connection sql)))
-                              ((symbol-function content)
-                               (lambda (batch &rest args)
-                                 (should (<= (length batch) 2))
-                                 (cl-incf calls)
-                                 (apply format-batch batch args))))
-                      (clutch--export-result kind 'file omit-header))
-                    (should (= calls 3))
-                    (should (= (length executed) 3))
-                    (should (equal expected (with-temp-buffer
-                                              (insert-file-contents path)
-                                              (buffer-string))))))))))
+              (setq-local clutch--result-rows rows)
+              (dolist (pageable '(t nil))
+                (ert-info ((if pageable "server pages" "rows held locally"))
+                  (setq-local clutch--result-server-pageable pageable)
+                  (dolist (kind '(csv tsv insert update))
+                    (dolist (omit-header '(nil t))
+                      (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
+                             (content (plist-get spec :content))
+                             (expected (if (memq kind '(csv tsv))
+                                           (funcall content rows omit-header)
+                                         (funcall content rows)))
+                             (calls 0)
+                             (query (symbol-function 'clutch-db-query))
+                             executed
+                             (format-batch (symbol-function content)))
+                        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                                  ((symbol-function 'clutch--read-delimited-export-coding-system)
+                                   (lambda (_) 'utf-8))
+                                  ((symbol-function 'clutch-db-query)
+                                   (lambda (connection sql)
+                                     (push sql executed)
+                                     (funcall query connection sql)))
+                                  ((symbol-function content)
+                                   (lambda (batch &rest args)
+                                     (should (<= (length batch) 2))
+                                     (cl-incf calls)
+                                     (apply format-batch batch args))))
+                          (clutch--export-result kind 'file omit-header))
+                        (should (= calls 3))
+                        (should (= (length executed) (if pageable 3 0)))
+                        (should (equal expected (with-temp-buffer
+                                                  (insert-file-contents path)
+                                                  (buffer-string))))))))))))
       (delete-file path)
       (clutch-db-disconnect conn))))
 
