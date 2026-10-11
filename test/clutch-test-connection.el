@@ -573,11 +573,14 @@ ControlMaster options before the target."
                   ((symbol-function 'clutch--wait-for-ssh-tunnel)
                    (lambda (proc port params buffer timeout)
                      (setq waited (list proc port params buffer timeout))))
-                  ;; tramp-rpc is not installed; answer for an rpc vector as it would.
+                  ;; tramp-rpc is not installed.  The ControlMaster case
+                  ;; answers as one that offers its options would; the
+                  ;; others run without it, as with a tramp-rpc too old to.
                   ((symbol-function 'tramp-rpc-controlmaster-options)
-                   (lambda (vec)
-                     (should (equal (tramp-file-name-method vec) "rpc"))
-                     (plist-get case :controlmaster-options))))
+                   (and (plist-get case :controlmaster-options)
+                        (lambda (vec)
+                          (should (equal (tramp-file-name-method vec) "rpc"))
+                          (plist-get case :controlmaster-options)))))
           (let* ((transport (condition-case err
                                 (clutch--start-tramp-tcp-forward
                                  (list :backend 'pg
@@ -3844,6 +3847,7 @@ console's."
             ("beta" . (:backend sqlite :database ,(expand-file-name "db2.db" dir)))
             ("gamma" . (:backend sqlite :database ,(expand-file-name "db3.db" dir)))))
          (clutch--tx-state-cache (make-hash-table :test 'eq))
+         (clutch--connection-transport-cache (make-hash-table :test 'eq))
          (console (generate-new-buffer " *clutch-test-console*"))
          (console-conn (clutch-db-sqlite-connect
                         (clutch--saved-connection-params "alpha")))
@@ -3852,12 +3856,15 @@ console's."
                    (clutch--saved-connection-params "alpha"))))
          beta-conn gamma-conn prompts)
     (unwind-protect
-        (progn
+        (clutch-test--with-isolated-metadata-caches
           (with-current-buffer console
             (setq-local clutch-connection console-conn
                         clutch--session-target target))
-          ;; Closing the console's session would ask about this work.
+          ;; Closing the console's session would ask about this work, and
+          ;; ending it would drop its metadata and transport.
           (puthash console-conn 'dirty clutch--tx-state-cache)
+          (puthash console-conn (make-hash-table :test 'equal) clutch--schema-cache)
+          (puthash console-conn '(:host "db1") clutch--connection-transport-cache)
           (with-temp-buffer
             (clutch-mode)
             (clutch--indirect-mode 1)
@@ -3876,6 +3883,8 @@ console's."
               (should (eq (buffer-local-value 'clutch-connection console)
                           console-conn))
               (should (clutch--tx-dirty-p console-conn))
+              (should (gethash console-conn clutch--schema-cache))
+              (should (gethash console-conn clutch--connection-transport-cache))
               ;; The session the edit connected is its own.
               (puthash beta-conn 'dirty clutch--tx-state-cache)
               (cl-letf (((symbol-function 'yes-or-no-p)
