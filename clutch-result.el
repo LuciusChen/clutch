@@ -103,6 +103,14 @@ quotes or line breaks, and configure the importer to recognize it."
   :type 'string
   :group 'clutch)
 
+(defcustom clutch-csv-delimiter ?,
+  "Character that separates fields in CSV copy and export.
+Fields that contain it are quoted.  Use a single ASCII character other
+than a double quote or a line break, such as a semicolon for spreadsheets
+that expect one."
+  :type 'character
+  :group 'clutch)
+
 (defcustom clutch-export-default-directory nil
   "Default directory offered for file exports.
 When nil, use the current buffer's `default-directory'."
@@ -3054,7 +3062,8 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
   (let ((lines
          (pcase kind
            ('tsv (clutch--delimited-lines-for-rows rows col-indices ?\t))
-           ('csv (clutch--delimited-lines-for-rows rows col-indices ?,))
+           ('csv (clutch--delimited-lines-for-rows
+                  rows col-indices clutch-csv-delimiter))
            ('org-table (clutch--org-table-lines-for-rows rows col-indices))
            ('insert
             (clutch-result--build-insert-statements-for-rows rows col-indices))
@@ -3291,7 +3300,7 @@ When OMIT-HEADER is non-nil, omit the column header."
 (defun clutch--export-csv-content (rows &optional omit-header)
   "Return CSV export text for ROWS using current visible result columns.
 When OMIT-HEADER is non-nil, omit the column header."
-  (clutch--export-delimited-content rows ?, omit-header))
+  (clutch--export-delimited-content rows clutch-csv-delimiter omit-header))
 
 (defun clutch--export-tsv-content (rows &optional omit-header)
   "Return TSV export text for ROWS using current visible result columns.
@@ -3516,11 +3525,18 @@ returns, and it does not run when the export fails."
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
 
+(defvar clutch-result--export-write-size (* 1024 1024)
+  "Characters of export text to collect before appending them to the file.
+Each `write-region' opens the file and creates and deletes its lock file,
+so writing each part of a stream, as small as a network read, is slow.")
+
 (cl-defun clutch-result--write-export-file
     (kind spec path done &key coding omit-header
           (map-batches #'clutch-result--map-export-batches))
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
-Format one batch at a time, following symbolic links in PATH.
+Format one batch at a time, write the text whenever
+`clutch-result--export-write-size' characters of it have collected and
+at the end, and follow symbolic links in PATH.
 PATH's filename-specific handlers receive the complete encoded output once.
 Replace the destination only after successful completion, then call DONE
 with the exported row count.  Pages are fetched without blocking, so DONE
@@ -3535,6 +3551,9 @@ text already formatted and the number of rows it holds."
          returned
          (row-count 0)
          (first t)
+         pending
+         (pending-size 0)
+         written
          (coding (or coding coding-system-for-write 'utf-8-unix))
          (append-coding
           (if-let* ((base (alist-get (coding-system-base coding)
@@ -3553,16 +3572,25 @@ text already formatted and the number of rows it holds."
              (delete-file temporary))
            (when (and transformed (file-exists-p transformed))
              (delete-file transformed)))
+         (flush ()
+           (when pending
+             (let ((coding-system-for-write (if written append-coding coding)))
+               (write-region (mapconcat #'identity (nreverse pending) "") nil
+                             temporary written 'silent))
+             (setq pending nil
+                   pending-size 0
+                   written t)))
          (write-batch (rows &optional count)
            ;; ROWS may be text a backend already formatted, holding COUNT rows.
            (let ((text (cond ((stringp rows) rows)
                              ((memq kind '(csv tsv))
                               (funcall (plist-get spec :content)
                                        rows (or omit-header (not first))))
-                             (t (funcall (plist-get spec :content) rows))))
-                 (coding-system-for-write
-                  (if first coding append-coding)))
-             (write-region text nil temporary (not first) 'silent)
+                             (t (funcall (plist-get spec :content) rows)))))
+             (push text pending)
+             (cl-incf pending-size (length text))
+             (when (>= pending-size clutch-result--export-write-size)
+               (flush))
              (cl-incf row-count (or count (length rows)))
              (setq first nil)))
          (finish (err)
@@ -3570,6 +3598,7 @@ text already formatted and the number of rows it holds."
                (unless err
                  (when (eq kind 'document-insert-many)
                    (write-batch (apply #'nconc (nreverse documents))))
+                 (flush)
                  (unless (eq (find-file-name-handler path 'write-region)
                              (find-file-name-handler temporary 'write-region))
                    (setq transformed
@@ -3669,7 +3698,8 @@ stops it.  Replace the destination only after the whole export succeeds."
             ;; add nothing.
             (lambda (outcome)
               (clutch-db-delimited-export-async
-               clutch-connection sql (if (eq kind 'tsv) ?\t ?,) t
+               clutch-connection sql
+               (if (eq kind 'tsv) ?\t clutch-csv-delimiter) t
                clutch-export-null-value-text emit outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
