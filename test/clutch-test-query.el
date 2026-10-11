@@ -1374,10 +1374,7 @@ The page stays, and the message says so."
                  (lambda (_conn _sql)
                    (signal 'clutch-db-error (list raw-message)))))
         (let ((display-summary
-               (condition-case err
-                   (signal 'clutch-db-error (list raw-message))
-                 (clutch-db-error
-                  (clutch--humanize-db-error (error-message-string err))))))
+               (clutch--humanize-db-error raw-message)))
           (clutch-result--execute-page 0)
           (should (equal (mapcar #'car clutch--result-rows) '(1)))
           (should (string-suffix-p "(result unchanged)" (car messages)))
@@ -3400,11 +3397,7 @@ Otherwise the connection stays reserved and the mode line keeps counting."
                               :type 'clutch-query-interrupted)
                 (let* ((summary (clutch--humanize-db-error raw-message))
                        (message-summary
-                        (condition-case err
-                            (signal 'clutch-db-error (list raw-message))
-                          (clutch-db-error
-                           (clutch--humanize-db-error
-                            (error-message-string err)))))
+                        (clutch--humanize-db-error raw-message))
                        (details clutch--buffer-error-details)
                        (diag (plist-get details :diag))
                        (context (plist-get diag :context))
