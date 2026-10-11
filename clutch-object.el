@@ -1414,14 +1414,11 @@ or starting another schema refresh."
       (clutch--refresh-object-describe-metadata conn entry)
       (clutch--show-object-describe-buffer conn entry params product))))
 
-(defun clutch--object-browse-query (conn entry &optional params)
+(defun clutch--object-browse-query (conn entry)
   "Return a query-console browse query for ENTRY on CONN."
   (or (clutch-db-object-browse-query conn entry)
-      (if (clutch-db-native-document-surface-p conn params)
-          (user-error "Document backend %s does not provide object browse queries"
-                      (clutch-db-backend-key conn))
-        (format "SELECT * FROM %s;"
-                (clutch--object-sql-name conn entry)))))
+      (format "SELECT * FROM %s;"
+              (clutch--object-sql-name conn entry))))
 
 (defun clutch--document-object-action-context (entry action-id)
   "Return native document context for ENTRY and ACTION-ID."
@@ -1504,7 +1501,6 @@ When ENTRY is nil, use the current table-like object."
   (interactive)
   (let* ((context (clutch--command-connection-context))
          (context-connection (plist-get context :connection))
-         (params (plist-get context :params))
          (entry (or entry
                     (clutch--resolve-object-entry "Browse object: " t)))
          (type (clutch--object-type-string entry)))
@@ -1515,7 +1511,7 @@ When ENTRY is nil, use the current table-like object."
     (let* ((conn (or clutch-connection
                      context-connection
                      (user-error "No active connection")))
-           (sql (clutch--object-browse-query conn entry params))
+           (sql (clutch--object-browse-query conn entry))
            (console (or (and (clutch--query-buffer-p)
                              (eq clutch-connection conn)
                              (current-buffer))
