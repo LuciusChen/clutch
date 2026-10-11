@@ -252,7 +252,7 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
               first column of the new view, so TAB continues from there
               → all columns stay searchable because they remain in the buffer
 7. W          Pick column (defaults to column at point), enter value or condition
-              e.g., select "status" then type: pending   → WHERE status = 'pending'
+              e.g., select "status" then type: 'pending' → WHERE status = 'pending'
               e.g., select "amount" then type: > 100     → WHERE amount > 100
               → Appends WHERE clause, re-queries from page 1
 8. /          Client-side filter: type a pattern to narrow visible rows instantly
