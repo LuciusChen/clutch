@@ -1256,9 +1256,7 @@ tracks, and a disconnect no longer asked first."
                  nil)
         (should (equal (clutch-db-result-rows (caar outcomes)) '((1))))
         (funcall finish nil server-error)
-        (should (equal (cadar outcomes)
-                       (list 'clutch-db-error
-                             (error-message-string server-error)))))
+        (should (equal (cadar outcomes) '(clutch-db-error "boom"))))
       (cl-letf (((symbol-function 'pgsql-exec-async) nil))
         (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
 
@@ -1575,6 +1573,50 @@ tracks, and a disconnect no longer asked first."
     (should-error (clutch-db-row-identity-candidates '(:backend broken)
                                                     "demo")
                   :type 'clutch-db-error)))
+
+(ert-deftest clutch-db-test-library-errors-become-their-message ()
+  "A client library's error should reach Clutch as its message, not its printing.
+`error-message-string' quoted the message after the library's label and
+appended the data some libraries attach, so error pages showed a
+PostgreSQL error's fields and SQLite's list of message parts."
+  (pcase-dolist (`(,err ,message)
+                 '(((mysql-query-error "[1146] (42S02) Table 'a.b' doesn't exist")
+                    "[1146] (42S02) Table 'a.b' doesn't exist")
+                   ((pgsql-server-error "ERROR: relation \"b\" does not exist: [42P01]"
+                                        (:severity "ERROR" :sqlstate "42P01"))
+                    "ERROR: relation \"b\" does not exist: [42P01]")
+                   ((redis-error "WRONGTYPE Operation against a key")
+                    "WRONGTYPE Operation against a key")
+                   ((mongodb-error "E11000 duplicate key"
+                                   :error-labels ("RetryableWriteError"))
+                    "E11000 duplicate key")
+                   ((sqlite-error ("SQL logic error" "no such table: t" 1 1))
+                    "no such table: t")
+                   ((sqlite-error "UNIQUE constraint failed: u.id")
+                    "UNIQUE constraint failed: u.id")
+                   ;; Text beyond one message stays as Emacs prints it.
+                   ((file-missing "Opening input file" "No such file or directory" "/x")
+                    "Opening input file: No such file or directory, /x")))
+    (ert-info ((format "%S" err))
+      (should (equal (cdr (should-error
+                           (clutch-db--translate-library-error error
+                             (signal (car err) (cdr err)))
+                           :type 'clutch-db-error))
+                     (list message))))))
+
+(ert-deftest clutch-db-test-sqlite-errors-carry-the-sqlite-message ()
+  "SQLite query errors should carry SQLite's own message."
+  (skip-unless (sqlite-available-p))
+  (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-error-"
+    (clutch-db-query conn "CREATE TABLE u (id INTEGER PRIMARY KEY)")
+    (clutch-db-query conn "INSERT INTO u VALUES (1)")
+    (pcase-dolist (`(,sql ,message)
+                   '(("SELECT * FROM missing" "no such table: missing")
+                     ("INSERT INTO u VALUES (1)" "UNIQUE constraint failed: u.id")))
+      (ert-info (sql)
+        (should (equal (cdr (should-error (clutch-db-query conn sql)
+                                          :type 'clutch-db-error))
+                       (list message)))))))
 
 (ert-deftest clutch-db-test-row-identity-adapters-surface-metadata-errors ()
   "Backend row identity metadata lookup failures should not become nil."
@@ -6095,8 +6137,7 @@ one reads its own verdict."
       (should (equal (clutch-db-result-rows (caar outcomes)) '((1))))
       (funcall finish nil server-error)
       (should (equal (cadar outcomes)
-                     (list 'clutch-db-error
-                           (error-message-string server-error)))))
+                     '(clutch-db-error "[1317] Query execution was interrupted"))))
     (cl-letf (((symbol-function 'mysql-query-async)
                (lambda (&rest _) (signal 'mysql-error '("Connection busy")))))
       (should-error (clutch-db-query-async conn "SELECT 1" #'ignore)
