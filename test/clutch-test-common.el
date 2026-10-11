@@ -32,10 +32,12 @@ unexpected queries fail the test rather than supplying empty results.
 QUERIES is a queue of (SQL . RESPONSE), checked in order.  RESPONSE is a
 result or a function of the connection, for faults during execution.
 PARAMS supplies the endpoint metadata used by the real connection UI.
+ON-DISCONNECT, when non-nil, runs with the connection before closing it,
+for faults during disconnect.
 COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
 `manual'.  BACKEND, when non-nil, is the backend key it answers to, for
 features such as DEFAULT in an UPDATE."
-  (live t) table columns commit-mode backend params queries)
+  (live t) table columns commit-mode backend params queries on-disconnect)
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-test-conn))
   "Return the backend CONN declares, or nil."
@@ -47,6 +49,8 @@ features such as DEFAULT in an UPDATE."
 
 (cl-defmethod clutch-db-disconnect ((conn clutch-test-conn))
   "Close CONN."
+  (when-let* ((function (clutch-test-conn-on-disconnect conn)))
+    (funcall function conn))
   (setf (clutch-test-conn-live conn) nil))
 
 (cl-defmethod clutch-db-manual-commit-supported-p ((conn clutch-test-conn))
