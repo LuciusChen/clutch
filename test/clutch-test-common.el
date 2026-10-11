@@ -28,8 +28,15 @@
 (cl-defstruct clutch-test-conn
   "A single-table metadata backend for result workflows, with no SQL engine.
 TABLE and COLUMNS declare the available metadata.  Other tables and every
-query fail the test rather than silently supplying empty results."
-  (live t) table columns)
+query fail the test rather than silently supplying empty results.
+COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
+`manual'.  BACKEND, when non-nil, is the backend key it answers to, for
+features such as DEFAULT in an UPDATE."
+  (live t) table columns commit-mode backend)
+
+(cl-defmethod clutch-db-backend-key ((conn clutch-test-conn))
+  "Return the backend CONN declares, or nil."
+  (clutch-test-conn-backend conn))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-test-conn))
   "Return whether CONN is open."
@@ -38,6 +45,19 @@ query fail the test rather than silently supplying empty results."
 (cl-defmethod clutch-db-disconnect ((conn clutch-test-conn))
   "Close CONN."
   (setf (clutch-test-conn-live conn) nil))
+
+(cl-defmethod clutch-db-manual-commit-supported-p ((conn clutch-test-conn))
+  "Return whether CONN has a commit mode to switch."
+  (and (clutch-test-conn-commit-mode conn) t))
+
+(cl-defmethod clutch-db-manual-commit-p ((conn clutch-test-conn))
+  "Return whether CONN is in manual-commit mode."
+  (eq (clutch-test-conn-commit-mode conn) 'manual))
+
+(cl-defmethod clutch-db-set-auto-commit ((conn clutch-test-conn) auto-commit)
+  "Put CONN in auto-commit mode when AUTO-COMMIT, else in manual commit."
+  (should (clutch-test-conn-commit-mode conn))
+  (setf (clutch-test-conn-commit-mode conn) (if auto-commit 'auto 'manual)))
 
 (cl-defmethod clutch-db-resolution-context ((_conn clutch-test-conn))
   "Return nil because this backend has no namespace switches."
@@ -104,6 +124,26 @@ the default, which is what a user who just presses RET gets."
        ,@body
        (should-not clutch-test--minibuffer-answers))))
 
+(defmacro clutch-test--without-credentials (&rest body)
+  "Run BODY with no auth-source to read, so passwords resolve to nil."
+  (declare (indent 0) (debug (body)))
+  `(let ((auth-sources nil)
+         (auth-source-do-cache nil))
+     ,@body))
+
+(defmacro clutch-test--with-authinfo (lines &rest body)
+  "Run BODY with auth-source reading only a temporary authinfo of LINES."
+  (declare (indent 1) (debug (form body)))
+  (let ((dir (make-symbol "dir")))
+    `(let ((,dir (make-temp-file "clutch-authinfo" t)))
+       (unwind-protect
+           (let ((auth-sources (list (expand-file-name "authinfo" ,dir)))
+                 (auth-source-do-cache nil))
+             (with-temp-file (car auth-sources)
+               (insert (string-join ,lines "\n") "\n"))
+             ,@body)
+         (delete-directory ,dir t)))))
+
 (defun clutch-test--transient-menu-text (prefix)
   "Return the text of PREFIX's menu, opened from the current buffer.
 Open the menu and quit it with keys, as a user would: its descriptions
@@ -117,6 +157,13 @@ outlast the caller."
         (with-current-buffer " *transient*"
           (buffer-string))
       (execute-kbd-macro (kbd "C-g")))))
+
+(defun clutch-test--type-keys (keys)
+  "Type KEYS in the current buffer, shown in the selected window.
+Driving a Transient menu this way runs its real suffixes and switches."
+  (save-window-excursion
+    (switch-to-buffer (current-buffer))
+    (execute-kbd-macro (kbd keys))))
 
 (defun clutch-test--await-outcome (start)
   "Call START with a continuation and return the value passed to it."
@@ -229,16 +276,6 @@ SPEC is (CONN BACKEND MODEL)."
                     (should (eq backend clutch-test--backend))
                     clutch-test--model)))
          ,@body))))
-
-(defmacro clutch-test--with-native-document-result-buffer (&rest body)
-  "Run BODY in a temporary result buffer for a native document surface."
-  (declare (indent 0) (debug (body)))
-  `(with-temp-buffer
-     (setq-local clutch-connection 'document-conn
-                 clutch--connection-params nil)
-     (clutch-test--with-connection-data-model
-         ('document-conn 'mongodb 'document)
-       ,@body)))
 
 (defun clutch-test--init-result-state (spec)
   "Initialize the current buffer as a small result buffer.
@@ -403,6 +440,90 @@ them does.  Without TO, only move point to FROM's cell."
     (push-mark (point) t t)
     (apply #'clutch--goto-cell to)
     (forward-char 1)))
+
+;;;; Helpers shared by the result, edit and query tests
+
+(defun clutch-test--transient-suffix-for-key (prefix key)
+  "Return the suffix under PREFIX bound to KEY."
+  (cl-find-if
+   (lambda (suffix)
+     (and (slot-boundp suffix 'key)
+          (equal (oref suffix key) key)))
+   (transient-suffixes prefix)))
+
+(defmacro clutch-test--with-sqlite-connection (conn &rest body)
+  "Run BODY with CONN bound to a fresh in-memory SQLite connection.
+Stop the refresh timer and close CONN, even when BODY fails."
+  (declare (indent 1) (debug (symbolp body)))
+  `(progn
+     (skip-unless (sqlite-available-p))
+     (let ((,conn (clutch-db-sqlite-connect '(:database ":memory:")))
+           (clutch--execution-refresh-timer nil))
+       (unwind-protect
+           (progn ,@body)
+         (clutch--execution-refresh-stop)
+         (when (clutch-db-live-p ,conn)
+           (clutch-db-disconnect ,conn))))))
+
+(defmacro clutch-test--with-sqlite-result (bindings setup sql &rest body)
+  "Run SQL over SETUP in a fresh SQLite console, then evaluate BODY.
+BINDINGS is (CONN RESULT).  SETUP is a list of SQL statements.
+BODY runs in RESULT with its window selected.  Close the connection and
+both buffers, and stop the refresh timer, even when BODY fails."
+  (declare (indent 3) (debug ((symbolp symbolp) form form body)))
+  (cl-destructuring-bind (conn result) bindings
+    (let ((source (make-symbol "source")))
+      `(progn
+         (skip-unless (sqlite-available-p))
+         (let* ((,conn (clutch-db-sqlite-connect '(:database ":memory:")))
+                (,source (generate-new-buffer " *clutch-sqlite-source*"))
+                (clutch--execution-refresh-timer nil)
+                ,result)
+           (unwind-protect
+               (save-window-excursion
+                 (dolist (statement ,setup)
+                   (clutch-db-query ,conn statement))
+                 (set-window-buffer (selected-window) ,source)
+                 (with-current-buffer ,source
+                   (clutch-mode)
+                   (setq-local clutch-connection ,conn
+                               clutch--connection-params
+                               '(:backend sqlite :database ":memory:"))
+                   (insert ,sql)
+                   (clutch-execute-buffer)
+                   (setq ,result clutch--last-result-buffer))
+                 (set-window-buffer (selected-window) ,result)
+                 (with-current-buffer ,result ,@body))
+             (clutch--execution-refresh-stop)
+             (when (buffer-live-p ,result) (kill-buffer ,result))
+             (when (buffer-live-p ,source) (kill-buffer ,source))
+             (when (clutch-db-live-p ,conn) (clutch-db-disconnect ,conn)))
+           (should-not clutch--execution-refresh-timer))))))
+
+(defmacro clutch-test--with-pop-to-buffer-capture (var &rest body)
+  "Bind VAR to the buffer passed to `pop-to-buffer' while running BODY."
+  (declare (indent 1) (debug (symbolp body)))
+  (let ((popped (make-symbol "popped")))
+    `(let (,var)
+       (unwind-protect
+           (cl-letf (((symbol-function 'pop-to-buffer)
+                      (lambda (,popped &rest _args)
+                        (setq ,var ,popped)
+                        ,popped)))
+             ,@body)
+         (when (and ,var (buffer-live-p ,var))
+           (kill-buffer ,var))))))
+
+(defmacro clutch-test--with-insert-result-buffer (var spec &rest body)
+  "Bind VAR to a result buffer initialized for insert tests by SPEC."
+  (declare (indent 2))
+  (let ((normalized-spec spec))
+    (unless (memq :connection normalized-spec)
+      (setq normalized-spec (append normalized-spec '(:connection nil))))
+    (unless (memq :rows normalized-spec)
+      (setq normalized-spec (append normalized-spec '(:rows nil))))
+    `(clutch-test--with-result-state-buffer ,var ,normalized-spec
+       ,@body)))
 
 (provide 'clutch-test-common)
 

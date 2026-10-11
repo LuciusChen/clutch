@@ -8,6 +8,7 @@
 
 (eval-and-compile
   (require 'clutch-test-common)
+  (require 'clutch-db-sqlite)
   (require 'clutch-document)
   (require 'clutch-mongodb)
   (require 'clutch-redis))
@@ -24,7 +25,6 @@
 (defvar clutch-test-props)
 
 (declare-function make-clutch-jdbc-conn "clutch-db-jdbc" (&rest slot-value-pairs))
-(declare-function make-clutch-db-sqlite-conn "clutch-db-sqlite" (&rest slot-value-pairs))
 (declare-function make-mysql-conn "mysql" (&rest args))
 (declare-function clutch-db-pg--type-category "clutch-db-pg" (oid))
 
@@ -144,10 +144,11 @@
               :source "/ssh:devbox:/workspace/"
               :params (:backend sqlite :database "/tmp/app.db")
               :absent :tramp-default-directory)
-             (:label "raw url is not forwardable"
+             (:label "raw url is not forwardable, even with host and port"
               :policy auto
               :source "/ssh:devbox:/workspace/"
-              :params (:backend oracle :url "jdbc:oracle:thin:@//db:1521/ORCL")
+              :params (:backend oracle :url "jdbc:oracle:thin:@//db:1521/ORCL"
+                       :host "db" :port 1521)
               :absent :tramp-default-directory)))
     (ert-info ((plist-get case :label))
       (let ((clutch-tramp-context-policy (plist-get case :policy))
@@ -187,158 +188,172 @@
                   '(:backend pg :database "app") "/tmp/project/")
                  '(:backend pg :database "app"))))
 
-(ert-deftest clutch-test-build-conn-leaves-timeout-defaults-to-backends ()
-  "Connection building should not synthesize backend timeout defaults.
-The globals are bound to non-default values so a backend that received
-them would fail the plist-member assertions rather than coincide."
+(ert-deftest clutch-test-build-conn-backend-facing-params ()
+  "The backend should receive its own connection keys and nothing else.
+Clutch-level keys such as `:pass-entry' and `:profile-entry' are stripped,
+a password that a credential source resolves is materialized as
+`:password', and no timeout defaults are synthesized: the timeout globals
+are bound to non-default values so a backend that received them would
+fail the comparison rather than coincide."
   (let ((clutch-connect-timeout-seconds 11)
-        (clutch-read-idle-timeout-seconds 42)
-        captured)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
-                 (setq captured params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
-                        (:backend pg :host "127.0.0.1" :port 5432 :user "u")
-                        (:backend oracle :host "db" :port 1521 :user "u")
-                        (:backend sqlite :database ":memory:")))
-        (setq captured nil)
-        (clutch--build-conn params)
-        (should-not (plist-member captured :connect-timeout))
-        (should-not (plist-member captured :read-idle-timeout))
-        (should-not (plist-member captured :query-timeout))
-        (should-not (plist-member captured :rpc-timeout))))))
+        (clutch-read-idle-timeout-seconds 42))
+    (dolist (case
+             '((:label "mysql without timeouts"
+                :params (:backend mysql :host "127.0.0.1" :port 3306 :user "u")
+                :backend mysql
+                :expected (:host "127.0.0.1" :port 3306 :user "u"))
+               (:label "pg without timeouts"
+                :params (:backend pg :host "127.0.0.1" :port 5432 :user "u")
+                :backend pg
+                :expected (:host "127.0.0.1" :port 5432 :user "u"))
+               (:label "oracle without timeouts"
+                :params (:backend oracle :host "db" :port 1521 :user "u")
+                :backend oracle
+                :expected (:host "db" :port 1521 :user "u"))
+               (:label "sqlite without timeouts"
+                :params (:backend sqlite :database ":memory:")
+                :backend sqlite
+                :expected (:database ":memory:"))
+               (:label "passwordless mongodb"
+                :params (:backend mongodb
+                         :host "127.0.0.1"
+                         :port 27017
+                         :database "app"
+                         :pass-entry "mongdb")
+                :backend mongodb
+                :expected (:host "127.0.0.1"
+                           :port 27017
+                           :database "app"))
+               (:label "passwordless redis"
+                :params (:backend redis
+                         :host "127.0.0.1"
+                         :port 6379
+                         :database 0
+                         :pass-entry "redis-local")
+                :backend redis
+                :expected (:host "127.0.0.1"
+                           :port 6379
+                           :database 0))
+               (:label "authenticated mongodb"
+                :authinfo ("machine mongo.example.com login root port 27017 password secret")
+                :params (:backend mongodb
+                         :host "mongo.example.com"
+                         :port 27017
+                         :database "app"
+                         :auth-database "admin"
+                         :user "root"
+                         :pass-entry "mongodb-root")
+                :backend mongodb
+                :expected (:host "mongo.example.com"
+                           :port 27017
+                           :database "app"
+                           :auth-database "admin"
+                           :user "root"
+                           :password "secret"))
+               (:label "profile entry"
+                :authinfo ("machine clutch/app backend mysql db-host db.example.com port 3306 login u database app password secret")
+                :params (:profile-entry "clutch/app")
+                :backend mysql
+                :expected (:host "db.example.com"
+                           :port 3306
+                           :user "u"
+                           :database "app"
+                           :password "secret"))))
+      (ert-info ((plist-get case :label))
+        (let ((conn (make-clutch-test-conn))
+              captured-backend captured-params)
+          (clutch-test--with-authinfo (plist-get case :authinfo)
+            (cl-letf (((symbol-function 'clutch-db-connect)
+                       (lambda (backend params)
+                         (setq captured-backend backend
+                               captured-params params)
+                         conn)))
+              (should (eq (clutch--build-conn (plist-get case :params)) conn))
+              (should (eq captured-backend (plist-get case :backend)))
+              (should (equal captured-params (plist-get case :expected))))))))))
 
-(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-ssh-tunnel ()
-  "SSH-backed host/port connections should target the local forwarded port."
+(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-forwards ()
+  "Forwarded host/port connections should target the local forwarded port.
+SSH-backed and TRAMP-backed connections hand the backend 127.0.0.1 and
+the forward's local port without the transport key, and remember the
+remote endpoint and the transport for display and cleanup."
   (dolist (case
            (list
-            (list :label "SQL backend"
-                  :conn 'fake-conn
-                  :local-port 40123
+            (list :label "SSH, SQL backend"
+                  :starter 'clutch--start-ssh-tunnel
+                  :transport '(:kind ssh :process fake-proc :local-port 40123
+                               :ssh-host "bastion-prod")
                   :params '(:backend pg
                             :host "db.internal"
                             :port 5432
                             :user "alice"
                             :database "appdb"
                             :ssh-host "bastion-prod"))
-            (list :label "MongoDB backend"
-                  :conn 'fake-mongo-conn
-                  :local-port 47017
+            (list :label "SSH, MongoDB backend"
+                  :starter 'clutch--start-ssh-tunnel
+                  :transport '(:kind ssh :process fake-proc :local-port 47017
+                               :ssh-host "bastion-prod")
                   :params '(:backend mongodb
                             :host "mongo.internal"
                             :port 27017
                             :database "app"
-                            :ssh-host "bastion-prod"))))
-    (ert-info ((format "SSH endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
-            (input (plist-get case :params))
-            captured)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'clutch--start-ssh-tunnel)
-                   (lambda (params)
-                     (should (eq (plist-get params :backend)
-                                 (plist-get input :backend)))
-                     (should (equal (plist-get params :host)
-                                    (plist-get input :host)))
-                     (should (= (plist-get params :port)
-                                (plist-get input :port)))
-                     (should (equal (plist-get params :ssh-host) "bastion-prod"))
-                     (list :kind 'ssh
-                           :process 'fake-proc
-                           :local-port (plist-get case :local-port)
-                           :ssh-host "bastion-prod")))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (should (eq backend (plist-get input :backend)))
-                     (setq captured params)
-                     (plist-get case :conn)))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (let ((conn (plist-get case :conn)))
-            (should (eq (clutch--build-conn input) conn))
-            (should (equal (plist-get captured :host) "127.0.0.1"))
-            (should (= (plist-get captured :port) (plist-get case :local-port)))
-            (should-not (plist-member captured :ssh-host))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :host)
-                           (plist-get input :host)))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :ssh-host)
-                           "bastion-prod"))))))))
-
-(ert-deftest clutch-test-build-conn-rewrites-endpoints-through-tramp-forward ()
-  "TRAMP-backed host/port connections should target the local forwarded port."
-  (dolist (case
-           (list
-            (list :label "SQL backend"
-                  :conn 'fake-conn
-                  :local-port 40124
+                            :ssh-host "bastion-prod"))
+            (list :label "TRAMP, SQL backend"
+                  :starter 'clutch--start-tramp-tcp-forward
+                  :transport '(:kind tramp :process fake-listener :local-port 40124
+                               :tramp-default-directory "/ssh:devbox:/workspace/")
                   :params '(:backend pg
                             :host "db"
                             :port 5432
                             :user "alice"
                             :database "appdb"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))
-            (list :label "MongoDB backend"
-                  :conn 'fake-mongo-conn
-                  :local-port 47018
+            (list :label "TRAMP, MongoDB backend"
+                  :starter 'clutch--start-tramp-tcp-forward
+                  :transport '(:kind tramp :process fake-listener :local-port 47018
+                               :tramp-default-directory "/ssh:devbox:/workspace/")
                   :params '(:backend mongodb
                             :host "mongo.internal"
                             :port 27017
                             :database "app"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))))
-    (ert-info ((format "TRAMP endpoint rewrite: %s" (plist-get case :label)))
-      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
-            (input (plist-get case :params))
-            captured)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'clutch--start-tramp-tcp-forward)
-                   (lambda (params)
-                     (should (eq (plist-get params :backend)
-                                 (plist-get input :backend)))
-                     (should (equal (plist-get params :host)
-                                    (plist-get input :host)))
-                     (should (= (plist-get params :port)
-                                (plist-get input :port)))
-                     (should (equal (plist-get params :tramp-default-directory)
-                                    "/ssh:devbox:/workspace/"))
-                     (list :kind 'tramp
-                           :process 'fake-listener
-                           :local-port (plist-get case :local-port)
-                           :tramp-default-directory "/ssh:devbox:/workspace/")))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (should (eq backend (plist-get input :backend)))
-                     (setq captured params)
-                     (plist-get case :conn)))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (let ((conn (plist-get case :conn)))
+    (ert-info ((plist-get case :label))
+      (let* ((clutch--connection-transport-cache (make-hash-table :test 'eq))
+             (input (plist-get case :params))
+             (transport (plist-get case :transport))
+             (transport-key (if (eq (plist-get transport :kind) 'ssh)
+                                :ssh-host
+                              :tramp-default-directory))
+             (conn (make-clutch-test-conn))
+             captured)
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function (plist-get case :starter))
+                     (lambda (params)
+                       (should (eq (plist-get params :backend)
+                                   (plist-get input :backend)))
+                       (should (equal (plist-get params :host)
+                                      (plist-get input :host)))
+                       (should (= (plist-get params :port)
+                                  (plist-get input :port)))
+                       (should (equal (plist-get params transport-key)
+                                      (plist-get input transport-key)))
+                       transport))
+                    ((symbol-function 'clutch-db-connect)
+                     (lambda (backend params)
+                       (should (eq backend (plist-get input :backend)))
+                       (setq captured params)
+                       conn)))
             (should (eq (clutch-open-connection input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
-            (should (= (plist-get captured :port) (plist-get case :local-port)))
-            (should-not (plist-member captured :tramp-default-directory))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :host)
-                           (plist-get input :host)))
-            (should (equal (plist-get
-                            (gethash conn clutch--connection-transport-cache)
-                            :tramp-default-directory)
-                           "/ssh:devbox:/workspace/"))
-            (should (eq (plist-get
-                         (gethash conn clutch--connection-transport-cache)
-                         :kind)
-                        'tramp))))))))
+            (should (= (plist-get captured :port)
+                       (plist-get transport :local-port)))
+            (should-not (plist-member captured transport-key))
+            (let ((cached (gethash conn clutch--connection-transport-cache)))
+              (should (equal (plist-get cached :host) (plist-get input :host)))
+              (should (equal (plist-get cached transport-key)
+                             (plist-get input transport-key)))
+              (should (eq (plist-get cached :kind)
+                          (plist-get transport :kind))))))))))
 
 (ert-deftest clutch-test-prepare-connect-params-rejects-ambiguous-transports ()
   "A connection must not combine SSH and TRAMP transports."
@@ -373,64 +388,70 @@ them would fail the plist-member assertions rather than coincide."
 The tunnel is already forwarding while `clutch-db-connect' waits.  A
 `clutch-db-error' is translated to `user-error' for display; every other
 condition crosses the function raw, so cleanup cannot live in that handler."
+  (skip-unless (executable-find "sleep"))
   (dolist (case '((quit nil quit)
                   (wrong-type-argument (stringp nil) wrong-type-argument)
                   (clutch-db-error ("db connect failed") user-error)))
     (pcase-let ((`(,signal-condition ,signal-data ,expected-caught) case))
       (ert-info ((format "signals %s, surfaces as %s"
                          signal-condition expected-caught))
-        (let (stopped caught)
-          (cl-letf (((symbol-function 'clutch--resolve-password)
-                     (lambda (_params) nil))
-                    ((symbol-function 'clutch--start-ssh-tunnel)
-                     (lambda (_params)
-                       '(:process fake-proc :local-port 40123
-                         :ssh-host "bastion-prod")))
-                    ((symbol-function 'process-live-p)
-                     (lambda (proc) (eq proc 'fake-proc)))
-                    ((symbol-function 'delete-process)
-                     (lambda (proc) (setq stopped proc)))
-                    ((symbol-function 'clutch-db-connect)
-                     (lambda (_backend _params)
-                       (signal signal-condition signal-data))))
-            (condition-case err
-                (clutch--build-conn
-                 '(:backend pg
-                   :host "db.internal"
-                   :port 5432
-                   :user "alice"
-                   :database "appdb"
-                   :ssh-host "bastion-prod"))
-              (t (setq caught (car err))))
-            (should (eq caught expected-caught))
-            (should (eq stopped 'fake-proc))))))))
+        (let ((tunnel (make-process :name "clutch-test-tunnel"
+                                    :command '("sleep" "30")
+                                    :noquery t))
+              caught)
+          (unwind-protect
+              (clutch-test--without-credentials
+                (cl-letf (((symbol-function 'clutch--start-ssh-tunnel)
+                           (lambda (_params)
+                             (list :process tunnel :local-port 40123
+                                   :ssh-host "bastion-prod")))
+                          ((symbol-function 'clutch-db-connect)
+                           (lambda (_backend _params)
+                             (signal signal-condition signal-data))))
+                  (condition-case err
+                      (clutch--build-conn
+                       '(:backend pg
+                         :host "db.internal"
+                         :port 5432
+                         :user "alice"
+                         :database "appdb"
+                         :ssh-host "bastion-prod"))
+                    (t (setq caught (car err))))
+                  (should (eq caught expected-caught))
+                  (should-not (process-live-p tunnel))))
+            (when (process-live-p tunnel)
+              (delete-process tunnel))))))))
 
 (ert-deftest clutch-test-start-ssh-tunnel-cleans-up-when-wait-quits ()
   "A quit during tunnel readiness must delete the just-started process.
 The readiness wait polls with `accept-process-output', which is quittable,
 and the ssh -N process has no owner yet at that point."
-  (let (deleted caught)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (_name) "/usr/bin/ssh"))
-              ((symbol-function 'clutch--allocate-local-port)
-               (lambda () 40124))
-              ((symbol-function 'make-process)
-               (lambda (&rest _args) 'fake-tunnel))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
-              ((symbol-function 'process-live-p)
-               (lambda (proc) (eq proc 'fake-tunnel)))
-              ((symbol-function 'delete-process)
-               (lambda (proc) (setq deleted proc)))
-              ((symbol-function 'clutch--wait-for-ssh-tunnel)
-               (lambda (&rest _args) (signal 'quit nil))))
-      (condition-case nil
-          (clutch--start-ssh-tunnel '(:backend pg
-                                      :host "db.internal"
-                                      :port 5432
-                                      :ssh-host "bastion-prod"))
-        (quit (setq caught t)))
-      (should caught)
-      (should (eq deleted 'fake-tunnel)))))
+  (skip-unless (executable-find "sleep"))
+  (let ((real-make-process (symbol-function 'make-process))
+        tunnel caught)
+    (unwind-protect
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (_name) "/usr/bin/ssh"))
+                  ((symbol-function 'clutch--allocate-local-port)
+                   (lambda () 40124))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest _args)
+                     (setq tunnel (funcall real-make-process
+                                           :name "clutch-test-tunnel"
+                                           :command '("sleep" "30")
+                                           :noquery t))))
+                  ((symbol-function 'clutch--wait-for-ssh-tunnel)
+                   (lambda (&rest _args) (signal 'quit nil))))
+          (condition-case nil
+              (clutch--start-ssh-tunnel '(:backend pg
+                                          :host "db.internal"
+                                          :port 5432
+                                          :ssh-host "bastion-prod"))
+            (quit (setq caught t)))
+          (should caught)
+          (should-not (process-live-p tunnel)))
+      (when (and tunnel (process-live-p tunnel))
+        (delete-process tunnel)))))
 
 (ert-deftest clutch-test-start-network-forward-rejects-opaque-url-profiles ()
   "SSH tunnels and TRAMP forwarding should reject URL-only profiles."
@@ -464,9 +485,7 @@ and the ssh -N process has no owner yet at that point."
                                    "requires :host/:port params, not :url"))))
     (ert-info ((format "opaque url rejection: %s" (plist-get case :label)))
       (let (connect-called process-called)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'executable-find)
+        (cl-letf (((symbol-function 'executable-find)
                    (lambda (_name) "/usr/bin/ssh"))
                   ((symbol-function 'clutch-db-connect)
                    (lambda (&rest _args)
@@ -486,201 +505,177 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
   "SSH tunnel startup should rely on the real batch tunnel command."
-  (let (process-file-called make-process-args)
+  (let (make-process-args)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
-              ((symbol-function 'process-file)
-               (lambda (&rest _args)
-                 (setq process-file-called t)
-                 0))
-              ((symbol-function 'clutch--allocate-local-port)
-               (lambda () 40123))
               ((symbol-function 'make-process)
-                (lambda (&rest args)
+               (lambda (&rest args)
                  (setq make-process-args args)
                  'fake-proc))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
               ((symbol-function 'clutch--wait-for-ssh-tunnel)
                (lambda (&rest _args) t)))
-      (let ((tunnel (clutch--start-ssh-tunnel
-                     '(:backend pg
-                       :host "db.internal"
-                       :port 5432
-                       :ssh-host "bastion-prod"))))
-        (should-not process-file-called)
+      (let ((tunnel (condition-case err
+                        (clutch--start-ssh-tunnel
+                         '(:backend pg
+                           :host "db.internal"
+                           :port 5432
+                           :ssh-host "bastion-prod"))
+                      (clutch-db-error
+                       (if (string-match-p "Operation not permitted"
+                                           (error-message-string err))
+                           (ert-skip (error-message-string err))
+                         (signal (car err) (cdr err)))))))
+        (should (integerp (plist-get tunnel :local-port)))
         (should (eq (plist-get tunnel :process) 'fake-proc))
         (should (equal (plist-get make-process-args :command)
-                       '("ssh"
-                         "-N"
-                         "-o" "BatchMode=yes"
-                         "-o" "ExitOnForwardFailure=yes"
-                         "-L" "127.0.0.1:40123:db.internal:5432"
-                         "bastion-prod")))))))
-
-(ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
-  "OpenSSH TRAMP forward startup should use -L, adding -J for SSH-like hops."
-  (dolist (case
-           (list
-            (list "direct ssh directory" "/ssh:devbox:/workspace/"
-                  '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:40124:db:5432" "devbox"))
-            (list "ssh-like hops mapped to ProxyJump"
-                  "/rpc:jump|rpc:devbox:/workspace/"
-                  '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:40124:db:5432" "-J" "jump" "devbox"))))
-    (pcase-let ((`(,label ,tramp-dir ,expected-command) case))
-      (ert-info ((format "case: %s" label))
-        (let (make-process-args waited)
-          (cl-letf (((symbol-function 'executable-find)
-                     (lambda (program)
-                       (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'clutch--allocate-local-port)
-                     (lambda () 40124))
-                    ((symbol-function 'make-process)
-                     (lambda (&rest args)
-                       (setq make-process-args args)
-                       'fake-proc))
-                    ((symbol-function 'clutch--wait-for-ssh-tunnel)
-                     (lambda (proc port params buffer timeout)
-                       (setq waited (list proc port params buffer timeout)))))
-            (let ((transport (clutch--start-tramp-tcp-forward
-                              `(:backend pg
-                                :host "db"
-                                :port 5432
-                                :tramp-default-directory ,tramp-dir))))
-              (should (equal (plist-get make-process-args :command)
-                             expected-command))
-              (should (eq (plist-get make-process-args :noquery) t))
-              (should (eq (plist-get transport :kind) 'tramp))
-              (should (eq (plist-get transport :process) 'fake-proc))
-              (should (= (plist-get transport :local-port) 40124))
-              (should (equal (plist-get transport :tramp-default-directory)
-                             tramp-dir))
-              (should (equal (nth 0 waited) 'fake-proc))
-              (should (= (nth 1 waited) 40124))
-              (should (equal (plist-get (nth 2 waited) :ssh-host)
-                             "devbox")))))))))
-
-(ert-deftest clutch-test-start-tramp-forward-starts-rpc-forward ()
-  "tramp-rpc directories should be mapped to OpenSSH -L."
-  (let ((old-bound (boundp 'tramp-rpc-use-controlmaster))
-        (old-value (and (boundp 'tramp-rpc-use-controlmaster)
-                        (symbol-value 'tramp-rpc-use-controlmaster)))
-        make-process-args)
-    (unwind-protect
-        (progn
-          (set 'tramp-rpc-use-controlmaster t)
-          (cl-letf (((symbol-function 'executable-find)
-                     (lambda (program)
-                       (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'clutch--allocate-local-port)
-                     (lambda () 40124))
-                    ((symbol-function 'make-process)
-                     (lambda (&rest args)
-                       (setq make-process-args args)
-                       'fake-proc))
-                    ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
-                    ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore)
-                    ((symbol-function 'tramp-rpc-controlmaster-options)
-                     (lambda (vec)
-                       (should (equal (tramp-file-name-method vec) "rpc"))
-                       '("-o" "ControlMaster=auto"
-                         "-o" "ControlPath=/tmp/tramp-rpc.sock"))))
-            (clutch--start-tramp-tcp-forward
-             '(:backend pg
-               :host "127.0.0.1"
-               :port 55433
-               :tramp-default-directory "/rpc:devbox:/workspace/"))
-            (should (equal (plist-get make-process-args :command)
-                           '("ssh"
+                       (list "ssh"
                              "-N"
                              "-o" "BatchMode=yes"
                              "-o" "ExitOnForwardFailure=yes"
-                             "-L" "127.0.0.1:40124:127.0.0.1:55433"
-                             "-o" "ControlMaster=auto"
-                             "-o" "ControlPath=/tmp/tramp-rpc.sock"
-                             "devbox")))))
-      (if old-bound
-          (set 'tramp-rpc-use-controlmaster old-value)
-        (makunbound 'tramp-rpc-use-controlmaster)))))
+                             "-L" (format "127.0.0.1:%d:db.internal:5432"
+                                          (plist-get tunnel :local-port))
+                             "bastion-prod")))))))
 
-(ert-deftest clutch-test-start-tramp-forward-starts-docker-container-relay ()
-  "Docker TRAMP forward startup should create a local relay listener."
-  (let (network-args puts)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (when (equal program "docker") "/usr/bin/docker")))
-              ((symbol-function 'make-network-process)
-               (lambda (&rest args)
-                 (setq network-args args)
-                 'fake-listener))
-              ((symbol-function 'process-contact)
-               (lambda (_process &optional key _no-block)
-                 (when (eq key :service) 40125)))
-              ((symbol-function 'process-put)
-               (lambda (process key value)
-                 (push (list process key value) puts))))
-      (let ((transport (clutch--start-tramp-tcp-forward
-                        '(:backend pg
-                          :host "db"
-                          :port 5432
-                          :tramp-default-directory
-                          "/docker:vscode@app:/workspace/"))))
-        (should (equal (plist-get network-args :name)
-                       "clutch-tramp-container-db:5432"))
-        (should (eq (plist-get network-args :server) t))
-        (should (equal (plist-get network-args :host) "127.0.0.1"))
-        (should (eq (plist-get network-args :service) t))
-        (should (eq (plist-get network-args :coding) 'no-conversion))
-        (should (eq (plist-get network-args :noquery) t))
-        (should (member
-                 (list 'fake-listener
-                       :clutch-container-command
-                       (list "docker" "exec" "-i" "-u" "vscode" "app"
-                             "sh" "-lc" clutch--container-relay-script
-                             "clutch-container-relay" "db" "5432"))
-                 puts))
-        (should (eq (plist-get transport :kind) 'tramp))
-        (should (eq (plist-get transport :process) 'fake-listener))
-        (should (= (plist-get transport :local-port) 40125))
-        (should (equal (plist-get transport :tramp-default-directory)
-                       "/docker:vscode@app:/workspace/"))))))
+(ert-deftest clutch-test-start-tramp-forward-starts-ssh-forward ()
+  "OpenSSH TRAMP forward startup should run ssh -L for ssh-like directories.
+SSH-like hops become -J, and an rpc directory adds tramp-rpc's
+ControlMaster options before the target."
+  (dolist (case
+           (list
+            (list :label "direct ssh directory"
+                  :tramp-default-directory "/ssh:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("devbox"))
+            (list :label "ssh-like hops mapped to ProxyJump"
+                  :tramp-default-directory "/rpc:jump|rpc:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("-J" "jump" "devbox"))
+            (list :label "tramp-rpc ControlMaster reuse"
+                  :tramp-default-directory "/rpc:devbox:/workspace/"
+                  :host "127.0.0.1" :port 55433
+                  :controlmaster-options '("-o" "ControlMaster=auto"
+                                           "-o" "ControlPath=/tmp/tramp-rpc.sock")
+                  :forward "127.0.0.1:%d:127.0.0.1:55433"
+                  :tail '("-o" "ControlMaster=auto"
+                          "-o" "ControlPath=/tmp/tramp-rpc.sock"
+                          "devbox"))))
+    (ert-info ((plist-get case :label))
+      (let (make-process-args waited)
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (program)
+                     (when (equal program "ssh") "/usr/bin/ssh")))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (setq make-process-args args)
+                     'fake-proc))
+                  ((symbol-function 'clutch--wait-for-ssh-tunnel)
+                   (lambda (proc port params buffer timeout)
+                     (setq waited (list proc port params buffer timeout))))
+                  ;; tramp-rpc is not installed.  The ControlMaster case
+                  ;; answers as one that offers its options would; the
+                  ;; others run without it, as with a tramp-rpc too old to.
+                  ((symbol-function 'tramp-rpc-controlmaster-options)
+                   (and (plist-get case :controlmaster-options)
+                        (lambda (vec)
+                          (should (equal (tramp-file-name-method vec) "rpc"))
+                          (plist-get case :controlmaster-options)))))
+          (let* ((transport (condition-case err
+                                (clutch--start-tramp-tcp-forward
+                                 (list :backend 'pg
+                                       :host (plist-get case :host)
+                                       :port (plist-get case :port)
+                                       :tramp-default-directory
+                                       (plist-get case :tramp-default-directory)))
+                              (clutch-db-error
+                               (if (string-match-p "Operation not permitted"
+                                                   (error-message-string err))
+                                   (ert-skip (error-message-string err))
+                                 (signal (car err) (cdr err))))))
+                 (local-port (plist-get transport :local-port)))
+            (should (integerp local-port))
+            (should (equal (plist-get make-process-args :command)
+                           (append (list "ssh"
+                                         "-N"
+                                         "-o" "BatchMode=yes"
+                                         "-o" "ExitOnForwardFailure=yes"
+                                         "-L" (format (plist-get case :forward)
+                                                      local-port))
+                                   (plist-get case :tail))))
+            (should (eq (plist-get make-process-args :noquery) t))
+            (should (eq (plist-get transport :kind) 'tramp))
+            (should (eq (plist-get transport :process) 'fake-proc))
+            (should (equal (plist-get transport :tramp-default-directory)
+                           (plist-get case :tramp-default-directory)))
+            (should (equal (nth 0 waited) 'fake-proc))
+            (should (= (nth 1 waited) local-port))
+            (should (equal (plist-get (nth 2 waited) :ssh-host) "devbox"))))))))
 
-(ert-deftest clutch-test-start-tramp-forward-starts-remote-podman-container-relay ()
-  "Container TRAMP paths behind SSH hops should run the runtime remotely."
-  (let (network-args puts)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (program)
-                 (when (equal program "ssh") "/usr/bin/ssh")))
-              ((symbol-function 'make-network-process)
-               (lambda (&rest args)
-                 (setq network-args args)
-                 'fake-listener))
-              ((symbol-function 'process-contact)
-               (lambda (_process &optional key _no-block)
-                 (when (eq key :service) 40126)))
-              ((symbol-function 'process-put)
-               (lambda (process key value)
-                 (push (list process key value) puts)))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore))
-      (clutch--start-tramp-tcp-forward
-       '(:backend pg
-         :host "db"
-         :port 5432
-         :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
-      (should (equal (plist-get network-args :name)
-                     "clutch-tramp-container-db:5432"))
-      (should (member
-               (list 'fake-listener
-                     :clutch-container-command
-                     (append
-                      (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
-                      (mapcar
-                       #'shell-quote-argument
-                       (list "podman" "exec" "-i" "app" "sh" "-lc"
-                             clutch--container-relay-script
-                             "clutch-container-relay" "db" "5432"))))
-               puts)))))
+(ert-deftest clutch-test-start-tramp-forward-starts-container-relay ()
+  "Container TRAMP forward startup should create a local relay listener.
+A local container path runs the container runtime directly; a container
+path behind SSH hops runs it remotely through the hop, with the exec
+command quoted for the remote shell."
+  (dolist (case
+           (list
+            (list :label "docker, local"
+                  :executable "docker"
+                  :tramp-default-directory "/docker:vscode@app:/workspace/"
+                  :command (list "docker" "exec" "-i" "-u" "vscode" "app"
+                                 "sh" "-lc" clutch--container-relay-script
+                                 "clutch-container-relay" "db" "5432"))
+            (list :label "podman behind an ssh hop"
+                  :executable "ssh"
+                  :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"
+                  :command (append
+                            (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                            (mapcar
+                             #'shell-quote-argument
+                             (list "podman" "exec" "-i" "app" "sh" "-lc"
+                                   clutch--container-relay-script
+                                   "clutch-container-relay" "db" "5432"))))))
+    (ert-info ((plist-get case :label))
+      (let (transport)
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (program)
+                     (when (equal program (plist-get case :executable))
+                       (concat "/usr/bin/" program)))))
+          (setq transport
+                (condition-case err
+                    (clutch--start-tramp-tcp-forward
+                     (list :backend 'pg
+                           :host "db"
+                           :port 5432
+                           :tramp-default-directory
+                           (plist-get case :tramp-default-directory)))
+                  (file-error
+                   (let ((message (error-message-string err)))
+                     (if (string-match-p
+                          "\\`Cannot bind server socket: Operation not permitted\\'"
+                          message)
+                         (ert-skip
+                          (format "Cannot bind localhost server socket: %s"
+                                  message))
+                       (signal (car err) (cdr err))))))))
+        (unwind-protect
+            (let ((listener (plist-get transport :process)))
+              (should (equal (process-name listener)
+                             "clutch-tramp-container-db:5432"))
+              (should (eq (process-contact listener :server) t))
+              (should (equal (process-contact listener :host) "127.0.0.1"))
+              (should (equal (process-coding-system listener)
+                             '(no-conversion . no-conversion)))
+              (should-not (process-query-on-exit-flag listener))
+              (should (equal (process-get listener :clutch-container-command)
+                             (plist-get case :command)))
+              (should (eq (plist-get transport :kind) 'tramp))
+              (should (= (plist-get transport :local-port)
+                         (process-contact listener :service)))
+              (should (equal (plist-get transport :tramp-default-directory)
+                             (plist-get case :tramp-default-directory))))
+          (clutch--stop-connection-transport transport)
+          (should-not (process-live-p (plist-get transport :process))))))))
 
 (ert-deftest clutch-test-container-forward-relays-bytes ()
   "Container relay listener should bridge bytes between client and relay."
@@ -752,49 +747,37 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-prepare-ssh-host-starts-interactive-session ()
   "Interactive SSH prepare should open a comint session for the alias."
-  (let (started puts sentinel-set query-flag popped message-text proc-lookups)
+  (skip-unless (executable-find "cat"))
+  (let ((real-make-comint (symbol-function 'make-comint-in-buffer))
+        started message-text)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
               ((symbol-function 'make-comint-in-buffer)
                (lambda (name buffer program startfile &rest switches)
                  (setq started (list name buffer program startfile switches))
-                 (get-buffer-create buffer)))
-              ((symbol-function 'get-buffer-process)
-               (lambda (_buffer)
-                 (prog1 (if proc-lookups 'fake-proc nil)
-                   (setq proc-lookups t))))
-              ((symbol-function 'process-live-p)
-               (lambda (proc) (eq proc 'fake-proc)))
-              ((symbol-function 'process-put)
-               (lambda (proc key value)
-                 (push (list proc key value) puts)))
-              ((symbol-function 'set-process-query-on-exit-flag)
-               (lambda (proc flag)
-                 (setq query-flag (list proc flag))))
-              ((symbol-function 'set-process-sentinel)
-               (lambda (proc fn)
-                 (setq sentinel-set (list proc fn))))
-              ((symbol-function 'pop-to-buffer)
-               (lambda (buffer &rest _args)
-                 (setq popped buffer)
-                 buffer))
+                 ;; A real comint session, running cat instead of ssh.
+                 (funcall real-make-comint name buffer "cat" nil)))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (setq message-text (apply #'format fmt args)))))
-      (clutch-prepare-ssh-host "bastion-prod")
-      (should (equal (car started) "clutch-ssh-prepare-bastion-prod"))
-      (should (equal (buffer-name (cadr started))
-                     "*clutch-ssh-prepare bastion-prod*"))
-      (should (equal (cddr started)
-                     '("ssh"
-                       nil
-                       ("bastion-prod" "exit"))))
-      (should (equal query-flag '(fake-proc nil)))
-      (should (equal (car puts) '(fake-proc :clutch-ssh-host "bastion-prod")))
-      (should (eq (car sentinel-set) 'fake-proc))
-      (should (eq (cadr sentinel-set) #'clutch--ssh-prepare-sentinel))
-      (should (equal (buffer-name popped) "*clutch-ssh-prepare bastion-prod*"))
-      (should (string-match-p "Complete any SSH prompts" message-text)))))
+      (clutch-test--with-pop-to-buffer-capture popped
+        (clutch-prepare-ssh-host "bastion-prod")
+        (let ((proc (get-buffer-process popped)))
+          (unwind-protect
+              (progn
+                (should (equal (car started) "clutch-ssh-prepare-bastion-prod"))
+                (should (equal (buffer-name popped)
+                               "*clutch-ssh-prepare bastion-prod*"))
+                (should (equal (cddr started)
+                               '("ssh"
+                                 nil
+                                 ("bastion-prod" "exit"))))
+                (should (process-live-p proc))
+                (should-not (process-query-on-exit-flag proc))
+                (should (equal (process-get proc :clutch-ssh-host) "bastion-prod"))
+                (should (eq (process-sentinel proc) #'clutch--ssh-prepare-sentinel))
+                (should (string-match-p "Complete any SSH prompts" message-text)))
+            (delete-process proc)))))))
 
 (ert-deftest clutch-test-ssh-prepare-sentinel-nonzero-suggests-retry ()
   "Non-zero SSH prepare exit should not imply preparation was useless."
@@ -821,76 +804,17 @@ and the ssh -N process has no owner yet at that point."
 (ert-deftest clutch-test-build-conn-errors-early-when-jdbc-pass-entry-is-unresolved ()
   "JDBC connections should fail fast when :pass-entry resolves to no password."
   (let (connect-called)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (&rest _args)
-                 (setq connect-called t)
-                 'fake-conn)))
-      (should-error
-       (clutch--build-conn
-       '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
-          :pass-entry "prod-oracle"))
-       :type 'user-error)
-      (should-not connect-called))))
-
-(ert-deftest clutch-test-build-conn-pass-entry-contract ()
-  "Connection build should strip or materialize native pass-entry credentials."
-  (dolist (case
-           '((:label "passwordless mongodb"
-              :resolved nil
-              :params (:backend mongodb
-                       :host "127.0.0.1"
-                       :port 27017
-                       :database "app"
-                       :pass-entry "mongdb")
-              :backend mongodb
-              :expected (:host "127.0.0.1"
-                         :port 27017
-                         :database "app"))
-             (:label "passwordless redis"
-              :resolved nil
-              :params (:backend redis
-                       :host "127.0.0.1"
-                       :port 6379
-                       :database 0
-                       :pass-entry "redis-local")
-              :backend redis
-              :expected (:host "127.0.0.1"
-                         :port 6379
-                         :database 0))
-             (:label "authenticated mongodb"
-              :resolved "secret"
-              :params (:backend mongodb
-                       :host "127.0.0.1"
-                       :port 27017
-                       :database "app"
-                       :auth-database "admin"
-                       :user "root"
-                       :pass-entry "mongodb-root")
-              :backend mongodb
-              :expected (:host "127.0.0.1"
-                         :port 27017
-                         :database "app"
-                         :auth-database "admin"
-                         :user "root"
-                         :password "secret"))))
-    (ert-info ((plist-get case :label))
-      (let (captured-backend captured-params)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) (plist-get case :resolved)))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (setq captured-backend backend
-                           captured-params params)
-                     'fake-conn))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (should (eq (clutch--build-conn (plist-get case :params))
-                      'fake-conn))
-          (should (eq captured-backend (plist-get case :backend)))
-          (should (equal captured-params
-                         (plist-get case :expected))))))))
+    (clutch-test--without-credentials
+      (cl-letf (((symbol-function 'clutch-db-connect)
+                 (lambda (&rest _args)
+                   (setq connect-called t)
+                   'fake-conn)))
+        (should-error
+         (clutch--build-conn
+          '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
+            :pass-entry "prod-oracle"))
+         :type 'user-error)
+        (should-not connect-called)))))
 
 (ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
   "Unreadable pass entries should fail before the backend sees auth."
@@ -915,7 +839,11 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-resolve-password-falls-back-when-pass-store-missing ()
   "Missing pass stores should not block host/user/port auth-source lookup."
-  (let (auth-source-args)
+  ;; Entries that differ only in user or port come first.
+  (clutch-test--with-authinfo
+      '("machine 127.0.0.1 login other port 5432 password wrong-user"
+        "machine 127.0.0.1 login postgres port 5433 password wrong-port"
+        "machine 127.0.0.1 login postgres port 5432 password postgres")
     (cl-letf (((symbol-function 'auth-source-pass-entries)
                (lambda ()
                  (signal 'file-missing
@@ -923,22 +851,13 @@ and the ssh -N process has no owner yet at that point."
                            "/home/user/.password-store"))))
               ((symbol-function 'auth-source-pass-parse-entry)
                (lambda (_entry)
-                 (ert-fail "No pass entry should be parsed when listing fails")))
-              ((symbol-function 'auth-source-search)
-               (lambda (&rest args)
-                 (setq auth-source-args args)
-                 (list (list :secret "postgres")))))
+                 (ert-fail "No pass entry should be parsed when listing fails"))))
       (should (equal (clutch--resolve-password
                       '(:host "127.0.0.1"
                         :user "postgres"
                         :port 5432
                         :pass-entry "local-pg"))
-                     "postgres"))
-      (should (equal auth-source-args
-                     '(:host "127.0.0.1"
-                       :user "postgres"
-                       :port 5432
-                       :max 1))))))
+                     "postgres")))))
 
 (ert-deftest clutch-test-resolve-password-skips-auth-source-without-target ()
   "Password lookup should not search all auth-source entries without a target."
@@ -976,80 +895,10 @@ and the ssh -N process has no owner yet at that point."
       (should (equal (plist-get params :password) "secret"))
       (should-not (plist-member params :profile-entry)))))
 
-(ert-deftest clutch-test-profile-entry-loads-authinfo-connection-fields ()
-  "Authinfo profiles should use machine as profile id and db-host as host."
-  (cl-letf (((symbol-function 'clutch--pass-profile-params)
-             (lambda (_entry &optional _default-backend) nil))
-            ((symbol-function 'auth-source-search)
-             (lambda (&rest args)
-               (should (equal args '(:host "mysql/reporting"
-                                     :type netrc
-                                     :max 1)))
-               (list (list :host "mysql/reporting"
-                           :backend "mysql"
-                           :db-host "db.example.com"
-                           :port "3306"
-                           :user "report_user"
-                           :database "reporting"
-                           :ssh-host "arch"
-                           :secret (lambda () "secret"))))))
-    (let ((params (clutch--canonicalize-connection-params
-                   '(:profile-entry "mysql/reporting"))))
-      (should (eq (plist-get params :backend) 'mysql))
-      (should (equal (plist-get params :host) "db.example.com"))
-      (should (= (plist-get params :port) 3306))
-      (should (equal (plist-get params :user) "report_user"))
-      (should (equal (plist-get params :database) "reporting"))
-      (should (equal (plist-get params :ssh-host) "arch"))
-      (should (equal (plist-get params :password) "secret"))
-      (should-not (plist-member params :profile-entry)))))
-
-(ert-deftest clutch-test-profile-entry-authinfo-parse-errors-surface ()
-  "Authinfo profile field errors should not be wrapped as lookup failures."
-  (cl-letf (((symbol-function 'clutch--pass-profile-params)
-             (lambda (_entry &optional _default-backend) nil))
-            ((symbol-function 'auth-source-search)
-             (lambda (&rest _args)
-               (list (list :host "mysql/bad"
-                           :backend "mysql"
-                           :db-host "db.example.com"
-                           :port "bad")))))
-    (let ((err (should-error
-                (clutch--canonicalize-connection-params
-                 '(:profile-entry "mysql/bad"))
-                :type 'user-error)))
-      (should (equal
-               (cadr err)
-               "Connection profile field :port must be a non-negative integer, got \"bad\"")))))
-
-(ert-deftest clutch-test-profile-entry-explicit-fields-win ()
-  "Saved connection fields should override profile defaults."
-  (cl-letf (((symbol-function 'clutch--profile-entry-params)
-             (lambda (_entry &optional _default-backend)
-               '(:backend pg
-                 :host "db.example.com"
-                 :port 3306
-                 :user "profile_user"
-                 :database "profile_db"
-                 :password "profile-secret"
-                 :ssh-host "arch"))))
-    (let ((params (clutch--canonicalize-connection-params
-                   '(:backend mysql
-                     :profile-entry "mysql/prod"
-                     :database "readonly"
-                     :pass-entry "override-pass"))))
-      (should (eq (plist-get params :backend) 'mysql))
-      (should (equal (plist-get params :host) "db.example.com"))
-      (should (= (plist-get params :port) 3306))
-      (should (equal (plist-get params :user) "profile_user"))
-      (should (equal (plist-get params :database) "readonly"))
-      (should (equal (plist-get params :pass-entry) "override-pass"))
-      (should (equal (plist-get params :ssh-host) "arch"))
-      (should-not (plist-member params :password))
-      (should-not (plist-member params :profile-entry)))))
-
 (ert-deftest clutch-test-profile-entry-explicit-backend-guides-profile-parsing ()
-  "Explicit backend should guide backend-specific profile value parsing."
+  "Explicit backend should guide backend-specific profile value parsing.
+A pass profile is converted apart from an authinfo one, so each is given
+the backend; `clutch-test-profile-entry-authinfo-contract' covers authinfo."
   (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
              (lambda (entry)
                (and (equal entry "redis/prod")
@@ -1066,39 +915,56 @@ and the ssh -N process has no owner yet at that point."
       (should (= (plist-get params :port) 6379))
       (should (= (plist-get params :database) 0)))))
 
-(ert-deftest clutch-test-profile-entry-is-not-passed-to-backend ()
-  "Profile-entry is a Clutch-level field and should not reach adapters."
-  (let (captured-backend captured-params)
-    (cl-letf (((symbol-function 'clutch--profile-entry-params)
-               (lambda (_entry &optional _default-backend)
-                 '(:backend mysql
-                   :host "db.example.com"
-                   :port 3306
-                   :user "u"
-                   :database "app"
-                   :password "secret")))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (backend params)
-                 (setq captured-backend backend
-                       captured-params params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch--build-conn '(:profile-entry "clutch/app"))
-                  'fake-conn))
-      (should (eq captured-backend 'mysql))
-      (should (equal captured-params
-                     '(:host "db.example.com"
-                       :port 3306
-                       :user "u"
-                       :database "app"
-                       :password "secret"))))))
+(ert-deftest clutch-test-profile-entry-authinfo-contract ()
+  "Authinfo profiles should fill connection fields before backend setup.
+The `machine' is the profile id and `db-host' the database host.  Saved
+connection fields override profile defaults, and an explicit `:pass-entry'
+hides the profile password.  The explicit backend guides backend-specific
+value parsing.  Profile field errors surface as they are, not wrapped as
+lookup failures."
+  (dolist (case
+           '((:label "profile fields fill the connection"
+              :authinfo ("machine mysql/reporting backend mysql db-host db.example.com port 3306 login report_user database reporting ssh-host arch password secret")
+              :params (:profile-entry "mysql/reporting")
+              :expected (:backend mysql :host "db.example.com" :port 3306
+                         :user "report_user" :database "reporting"
+                         :ssh-host "arch" :password "secret"))
+             (:label "explicit fields win"
+              :authinfo ("machine mysql/prod backend pg db-host db.example.com port 3306 login profile_user database profile_db ssh-host arch password profile-secret")
+              :params (:backend mysql
+                       :profile-entry "mysql/prod"
+                       :database "readonly"
+                       :pass-entry "override-pass")
+              :expected (:backend mysql :host "db.example.com" :port 3306
+                         :user "profile_user" :database "readonly"
+                         :pass-entry "override-pass" :ssh-host "arch")
+              :absent (:password))
+             (:label "explicit backend guides value parsing"
+              :authinfo ("machine redis/prod db-host 127.0.0.1 port 6379 database 0")
+              :params (:backend redis :profile-entry "redis/prod")
+              :expected (:backend redis :host "127.0.0.1" :port 6379 :database 0))
+             (:label "field errors surface unwrapped"
+              :authinfo ("machine mysql/bad backend mysql db-host db.example.com port bad password x")
+              :params (:profile-entry "mysql/bad")
+              :error "Connection profile field :port must be a non-negative integer, got \"bad\"")))
+    (ert-info ((plist-get case :label))
+      (clutch-test--with-authinfo (plist-get case :authinfo)
+        (if-let* ((message (plist-get case :error)))
+            (should (equal (cadr (should-error
+                                  (clutch--canonicalize-connection-params
+                                   (plist-get case :params))
+                                  :type 'user-error))
+                           message))
+          (let ((params (clutch--canonicalize-connection-params
+                         (plist-get case :params))))
+            (cl-loop for (key value) on (plist-get case :expected) by #'cddr
+                     do (should (equal (plist-get params key) value)))
+            (dolist (key (cons :profile-entry (plist-get case :absent)))
+              (should-not (plist-member params key)))))))))
 
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
-  (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
-                        (lambda (_suffix) nil))
-                       ((symbol-function 'auth-source-search)
+  (let ((err (cl-letf (((symbol-function 'auth-source-search)
                         (lambda (&rest _args)
                           (list (list :secret (lambda ()
                                                 (error "bad decrypt")))))))
@@ -1110,35 +976,69 @@ and the ssh -N process has no owner yet at that point."
              (cadr err)
              "Database password lookup failed via auth-source for scott@db.example.com:3306: bad decrypt"))))
 
-(ert-deftest clutch-test-build-conn-relays-db-errors-without-duplicate-prefixes ()
-  "User-facing connect errors should not duplicate nested connection-failed wrappers."
-  (let ((err (cl-letf (((symbol-function 'clutch--resolve-password)
-                        (lambda (_params) nil))
-                       ((symbol-function 'clutch-db-connect)
-                        (lambda (&rest _args)
-                          (signal 'clutch-db-error
-                                  '("Connection failed (oracle): Connection attempt timed out")))))
-               (should-error
-                (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
-                :type 'user-error))))
-    (should (string-match-p
-             "Connection failed [(]oracle[)]: Connection attempt timed out"
-             (cadr err)))
-    (should (string-match-p "clutch-debug-mode" (cadr err)))
-    (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                            (cadr err)))))
+(ert-deftest clutch-test-build-conn-failure-guidance ()
+  "Connect failures should surface as `user-error' with the right guidance.
+The backend message appears once, without nested connection-failed
+wrappers.  The debug workflow is offered as enabling `clutch-debug-mode'
+while capture is off and as inspecting the debug buffer while it is on.
+A missing JDBC driver or agent points to its own fix command instead."
+  (dolist (case
+           `((:label "backend message, debug capture off"
+              :message "Connection failed (oracle): Connection attempt timed out"
+              :params (:backend oracle :host "db" :port 1521 :user "u")
+              :mentions ("Connection failed [(]oracle[)]: Connection attempt timed out"
+                         "clutch-debug-mode"
+                         ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "connection refused, debug capture off"
+              :message "Connection refused (host=db.example.com, port=3306)"
+              :params (:backend mysql :host "db.example.com" :port 3306)
+              :mentions ("check host and port"
+                         "clutch-debug-mode"
+                         ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "connection refused, debug capture on"
+              :debug-mode t
+              :message "Connection refused (host=db.example.com, port=3306)"
+              :params (:backend mysql :host "db.example.com" :port 3306)
+              :mentions ("check host and port"
+                         ,(regexp-quote clutch-debug-buffer-name))
+              :omits ("clutch-debug-mode"))
+             (:label "missing JDBC driver"
+              :message "SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL"
+              :params (:backend oracle :driver jdbc :host "db" :port 1521)
+              :mentions ("clutch-jdbc-install-driver RET oracle")
+              :omits ("clutch-debug-mode"
+                      ,(regexp-quote clutch-debug-buffer-name)))
+             (:label "missing JDBC agent"
+              :message "JDBC agent jar not found: /tmp/clutch-jdbc-agent.jar\nRun M-x clutch-jdbc-ensure-agent"
+              :params (:backend oracle :driver jdbc :host "db" :port 1521)
+              :mentions ("Run M-x clutch-jdbc-ensure-agent")
+              :omits ("clutch-debug-mode"
+                      ,(regexp-quote clutch-debug-buffer-name)))))
+    (ert-info ((plist-get case :label))
+      (let* ((clutch-debug-mode (plist-get case :debug-mode))
+             (err (clutch-test--without-credentials
+                    (cl-letf (((symbol-function 'clutch-db-connect)
+                               (lambda (_backend _params)
+                                 (signal 'clutch-db-error
+                                         (list (plist-get case :message))))))
+                      (should-error
+                       (clutch--build-conn (plist-get case :params))
+                       :type 'user-error)))))
+        (dolist (pattern (plist-get case :mentions))
+          (should (string-match-p pattern (cadr err))))
+        (dolist (pattern (plist-get case :omits))
+          (should-not (string-match-p pattern (cadr err))))))))
 
 (ert-deftest clutch-test-build-conn-wraps-ssh-setup-errors-before-user-display ()
   "SSH setup errors should be normalized before they reach the minibuffer."
-  (let ((err (cl-letf (((symbol-function 'clutch--materialize-connection-params)
-                        (lambda (params) params))
-                       ((symbol-function 'clutch--prepare-connect-params)
-                        (lambda (_params)
-                          (signal 'clutch-db-error
-                                  '("SSH tunnel to arch failed: SSH authentication to arch was rejected")))))
-               (should-error
-                (clutch--build-conn '(:backend mysql :host "db" :port 3306 :ssh-host "arch"))
-                :type 'user-error))))
+  (let ((err (clutch-test--without-credentials
+               (cl-letf (((symbol-function 'clutch--prepare-connect-params)
+                          (lambda (_params)
+                            (signal 'clutch-db-error
+                                    '("SSH tunnel to arch failed: SSH authentication to arch was rejected")))))
+                 (should-error
+                  (clutch--build-conn '(:backend mysql :host "db" :port 3306 :ssh-host "arch"))
+                  :type 'user-error)))))
     (should (string-match-p
              "SSH tunnel to arch failed: SSH authentication to arch was rejected"
              (cadr err)))
@@ -1150,39 +1050,39 @@ and the ssh -N process has no owner yet at that point."
   "Connect failures should keep enriched `current-buffer' error details."
   (with-temp-buffer
     (let ((raw-message "Connection refused (host=db.example.com, port=3306)"))
-      (cl-letf (((symbol-function 'clutch--resolve-password)
-                 (lambda (_params) nil))
-                ((symbol-function 'clutch-db-connect)
-                 (lambda (&rest _args)
-                   (signal 'clutch-db-error (list raw-message)))))
-        (let ((signaled
-               (should-error
-                (clutch--build-conn
-                 '(:backend oracle :host "db.example.com" :port 1521
-                   :user "scott" :database "orcl"))
-                :type 'user-error)))
-          (should (equal (cadr signaled)
-                         (clutch--debug-workflow-message
-                          (clutch--humanize-db-error raw-message))))
-          (let* ((details clutch--buffer-error-details)
-                 (diag (plist-get details :diag))
-                 (context (plist-get diag :context)))
-            (should details)
-            (should (eq (plist-get details :backend) 'oracle))
-            (should (equal (plist-get details :summary)
-                           (clutch--humanize-db-error raw-message)))
-            (should (equal (plist-get diag :raw-message) raw-message))
-            (should (equal (plist-get context :host) "db.example.com"))
-            (should (equal (plist-get context :port) 1521))
-            (should (equal (plist-get context :database) "orcl"))
-            (should (eq (plist-get context :backend) 'oracle))))))))
+      (clutch-test--without-credentials
+        (cl-letf (((symbol-function 'clutch-db-connect)
+                   (lambda (&rest _args)
+                     (signal 'clutch-db-error (list raw-message)))))
+          (let ((signaled
+                 (should-error
+                  (clutch--build-conn
+                   '(:backend oracle :host "db.example.com" :port 1521
+                     :user "scott" :database "orcl"))
+                  :type 'user-error)))
+            (should (equal (cadr signaled)
+                           (clutch--debug-workflow-message
+                            (clutch--humanize-db-error raw-message))))
+            (let* ((details clutch--buffer-error-details)
+                   (diag (plist-get details :diag))
+                   (context (plist-get diag :context)))
+              (should details)
+              (should (eq (plist-get details :backend) 'oracle))
+              (should (equal (plist-get details :summary)
+                             (clutch--humanize-db-error raw-message)))
+              (should (equal (plist-get diag :raw-message) raw-message))
+              (should (equal (plist-get context :host) "db.example.com"))
+              (should (equal (plist-get context :port) 1521))
+              (should (equal (plist-get context :database) "orcl"))
+              (should (eq (plist-get context :backend) 'oracle)))))))))
 
 (ert-deftest clutch-test-build-conn-rejects-removed-read-timeout ()
   "Test that removed timeout keys fail fast with a clear error."
-  (should-error
-   (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306
-                         :user "u" :read-timeout 5))
-   :type 'user-error))
+  (clutch-test--without-credentials
+    (should-error
+     (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306
+                           :user "u" :read-timeout 5))
+     :type 'user-error)))
 
 (ert-deftest clutch-test-effective-sql-product-contract ()
   "Connection SQL products should come from explicit or backend metadata."
@@ -1248,54 +1148,6 @@ and the ssh -N process has no owner yet at that point."
       (should (string-match-p ":backend oracle"
                               (error-message-string err))))))
 
-(ert-deftest clutch-test-build-conn-failure-debug-guidance ()
-  "Connect failures should adapt their debug guidance to debug-mode state."
-  (dolist (case '((:label "debug capture off"
-                   :debug-mode nil
-                   :mentions-enable t)
-                  (:label "debug capture on"
-                   :debug-mode t
-                   :mentions-enable nil)))
-    (ert-info ((format "build-conn debug guidance: %s" (plist-get case :label)))
-      (let ((clutch-debug-mode (plist-get case :debug-mode)))
-        (cl-letf (((symbol-function 'clutch-db-connect)
-                   (lambda (_backend _params)
-                     (signal 'clutch-db-error
-                             '("Connection refused (host=db.example.com, port=3306)")))))
-          (let ((err (should-error
-                      (clutch--build-conn
-                       '(:backend mysql :host "db.example.com" :port 3306))
-                      :type 'user-error)))
-            (should (string-match-p "check host and port" (cadr err)))
-            (if (plist-get case :mentions-enable)
-                (should (string-match-p "clutch-debug-mode" (cadr err)))
-              (should-not (string-match-p "clutch-debug-mode" (cadr err))))
-            (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                    (cadr err)))))))))
-
-(ert-deftest clutch-test-build-conn-jdbc-missing-driver-or-agent-points-to-fix-command ()
-  "Missing JDBC driver/agent should point to its own fix, not the debug workflow."
-  (dolist (case
-           (list
-            (list "missing driver"
-                  "SQLException [SQLState=08001]: No suitable driver found for jdbc:oracle:thin:@//db:1521/ORCL"
-                  "clutch-jdbc-install-driver RET oracle")
-            (list "missing agent"
-                  "JDBC agent jar not found: /tmp/clutch-jdbc-agent.jar\nRun M-x clutch-jdbc-ensure-agent"
-                  "Run M-x clutch-jdbc-ensure-agent")))
-    (pcase-let ((`(,label ,signaled-message ,expected-pattern) case))
-      (ert-info ((format "case: %s" label))
-        (let ((err (cl-letf (((symbol-function 'clutch-db-connect)
-                              (lambda (_backend _params)
-                                (signal 'clutch-db-error (list signaled-message)))))
-                     (should-error
-                      (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
-                      :type 'user-error))))
-          (should (string-match-p expected-pattern (cadr err)))
-          (should-not (string-match-p "clutch-debug-mode" (cadr err)))
-          (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                      (cadr err))))))))
-
 (ert-deftest clutch-test-readers-do-not-require-clutch-entrypoint ()
   "Saved-connection readers should consume assembled configuration directly."
   (dolist (case `((clutch--read-connection-params
@@ -1311,10 +1163,9 @@ and the ssh -N process has no owner yet at that point."
                      (lambda (feature &optional filename noerror)
                        (if (eq feature 'clutch)
                            (error "Reader attempted to load the composition root")
-                         (funcall orig-require feature filename noerror))))
-                    ((symbol-function 'completing-read)
-                     (lambda (&rest _args) "alpha")))
-            (should (equal (funcall reader) expected))))))))
+                         (funcall orig-require feature filename noerror)))))
+            (clutch-test--with-minibuffer-answers '("alpha")
+              (should (equal (funcall reader) expected)))))))))
 
 (ert-deftest clutch-test-read-connection-params-no-match-prompts-manual-when-saved ()
   "No-match connect choices should collect temporary connection params."
@@ -1403,32 +1254,31 @@ and the ssh -N process has no owner yet at that point."
       (let ((clutch-connection-alist nil)
             backend-prompt
             port-default)
-        (cl-letf (((symbol-function 'completing-read)
-                   (lambda (prompt _collection &rest _args)
-                     (setq backend-prompt prompt)
-                     (plist-get case :backend)))
-                  ((symbol-function 'read-string)
-                   (lambda (prompt &optional _initial _history
-                                   default-value _inherit)
-                     (pcase prompt
-                       ("Host (127.0.0.1): " (plist-get case :host))
-                       ("User: " (plist-get case :user))
-                       ("SSH host from ~/.ssh/config (optional): "
-                        (plist-get case :ssh-host))
-                       ("Database (optional): " (plist-get case :database))
-                       (_ (or default-value "")))))
-                  ((symbol-function 'read-number)
-                   (lambda (_prompt default)
-                     (setq port-default default)
-                     (plist-get case :port)))
-                  ((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'read-passwd)
-                   (lambda (&rest _args) (plist-get case :password))))
-          (should (equal (clutch--read-connection-params)
-                         (plist-get case :expected)))
-          (should (string-match-p "Backend" backend-prompt))
-          (should (= port-default (plist-get case :default-port))))))))
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt _collection &rest _args)
+                       (setq backend-prompt prompt)
+                       (plist-get case :backend)))
+                    ((symbol-function 'read-string)
+                     (lambda (prompt &optional _initial _history
+                                     default-value _inherit)
+                       (pcase prompt
+                         ("Host (127.0.0.1): " (plist-get case :host))
+                         ("User: " (plist-get case :user))
+                         ("SSH host from ~/.ssh/config (optional): "
+                          (plist-get case :ssh-host))
+                         ("Database (optional): " (plist-get case :database))
+                         (_ (or default-value "")))))
+                    ((symbol-function 'read-number)
+                     (lambda (_prompt default)
+                       (setq port-default default)
+                       (plist-get case :port)))
+                    ((symbol-function 'read-passwd)
+                     (lambda (&rest _args) (plist-get case :password))))
+            (should (equal (clutch--read-connection-params)
+                           (plist-get case :expected)))
+            (should (string-match-p "Backend" backend-prompt))
+            (should (= port-default (plist-get case :default-port)))))))))
 
 (ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-surfaces ()
   "MongoDB connection params should normalize backend aliases and surfaces."
@@ -1451,29 +1301,25 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-connection-header-follows-live-backend-state ()
   "Header evaluation should observe an asynchronously closed connection."
-  (require 'clutch-db-sqlite)
-  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
-    (unwind-protect
-        (with-temp-buffer
-          (clutch-mode)
-          (clutch--bind-connection-context
-           conn '(:backend sqlite :database ":memory:") 'sqlite)
-          (clutch--update-mode-line)
-          (should (equal mode-name "clutch"))
-          (should (eq (caar header-line-format) :eval))
-          (should-not
-           (string-match-p
-            "DISCONNECTED"
-            (substring-no-properties
-             (eval (cadar header-line-format)))))
-          (clutch-db-disconnect conn)
-          (should
-           (string-match-p
-            "DISCONNECTED"
-            (substring-no-properties
-             (eval (cadar header-line-format))))))
-      (when (clutch-db-live-p conn)
-        (clutch-db-disconnect conn)))))
+  (clutch-test--with-sqlite-connection conn
+    (with-temp-buffer
+      (clutch-mode)
+      (clutch--bind-connection-context
+       conn '(:backend sqlite :database ":memory:") 'sqlite)
+      (clutch--update-mode-line)
+      (should (equal mode-name "clutch"))
+      (should (eq (caar header-line-format) :eval))
+      (should-not
+       (string-match-p
+        "DISCONNECTED"
+        (substring-no-properties
+         (eval (cadar header-line-format)))))
+      (clutch-db-disconnect conn)
+      (should
+       (string-match-p
+        "DISCONNECTED"
+        (substring-no-properties
+         (eval (cadar header-line-format))))))))
 
 (ert-deftest clutch-test-update-mode-line-shows-elapsed-when-executing ()
   "Busy buffers should show the running query's elapsed time in `mode-name'."
@@ -1520,27 +1366,13 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
 
 (ert-deftest clutch-test-transaction-refresh-updates-result-footer ()
   "Transaction transitions should rebuild attached and current result footers."
-  (let ((conn (list 'fake-conn))
+  (let ((conn (make-clutch-test-conn :commit-mode 'auto))
         (params '(:backend pg))
-        (live t)
-        (manual nil)
-        (manual-supported t)
         (clutch--tx-state-cache (make-hash-table :test 'eq))
         (owner (generate-new-buffer " *clutch-tx-owner*"))
         (result (generate-new-buffer " *clutch-tx-result*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) live))
-                  ((symbol-function 'clutch-db-manual-commit-supported-p)
-                   (lambda (_conn) manual-supported))
-                  ((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) manual))
-                  ((symbol-function 'clutch-db-set-auto-commit)
-                   (lambda (_conn auto-commit)
-                     (setq manual (not auto-commit))))
-                  ((symbol-function 'clutch-db-disconnect)
-                   (lambda (_conn)
-                     (setq live nil))))
+        (clutch-test--with-isolated-metadata-caches
           (with-current-buffer owner
             (clutch-mode)
             (clutch--bind-connection-context conn params 'postgres))
@@ -1587,7 +1419,7 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
                      "Tx: Manual\\*"
                      (substring-no-properties clutch--footer-base-string))))
           (clutch--set-tx-uncertain conn)
-          (setq manual-supported nil)
+          (setf (clutch-test-conn-commit-mode conn) nil)
           (clutch--refresh-transaction-ui conn)
           (with-current-buffer result
             (should (string-match-p
@@ -1618,37 +1450,35 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
         (should-not clutch--execution-refresh-timer)))))
 
 (ert-deftest clutch-test-run-db-query-updates-manual-commit-dirty-state ()
-  "Query execution should update dirty state from SQL and backend DDL semantics."
-  (dolist (case '((dml "UPDATE demo SET x = 1" nil nil t)
+  "Query execution should update dirty state from SQL and backend DDL semantics.
+Staged statements do not publish it before their batch succeeds."
+  (dolist (case '((dml "UPDATE demo SET x = 1" nil nil dirty)
                   (dml-in-with-clause
                    "WITH i AS (INSERT INTO demo VALUES (1) RETURNING id) SELECT * FROM i"
-                   nil nil t)
-                  (select-into-table "SELECT * INTO demo_copy FROM demo" nil nil t)
+                   nil nil dirty)
+                  (select-into-table "SELECT * INTO demo_copy FROM demo" nil nil dirty)
                   (select-into-variable "SELECT x INTO @x FROM demo" nil nil nil)
                   (data-change-table
                    "SELECT * FROM FINAL TABLE (INSERT INTO demo VALUES (1))"
-                   nil nil t)
-                  (transactional-ddl "CREATE TABLE demo (id int)" dirty nil t)
+                   nil nil dirty)
+                  (transactional-ddl "CREATE TABLE demo (id int)" dirty nil dirty)
                   (autocommit-ddl "CREATE TABLE demo (id int)" clear t nil)
                   (commit "COMMIT" nil t nil)
-                  (unknown-ddl "ALTER TABLE demo ADD x NUMBER" nil t t)))
-    (pcase-let ((`(,label ,sql ,schema-effect ,initial-dirty ,expected-dirty)
+                  (unknown-ddl "ALTER TABLE demo ADD x NUMBER" nil t dirty)
+                  (deferred-dml "UPDATE demo SET x = 1" nil nil nil t)))
+    (pcase-let ((`(,label ,sql ,schema-effect ,initial-dirty ,expected ,defer)
                  case))
       (ert-info ((format "case: %s" label))
         (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              (conn 'fake-conn))
+              (conn (make-clutch-test-conn :commit-mode 'manual)))
           (when initial-dirty
             (puthash conn 'dirty clutch--tx-state-cache))
           (cl-letf (((symbol-function 'clutch-db-query)
                      (lambda (_conn _sql) '(:ok t)))
-                    ((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_conn) t))
                     ((symbol-function 'clutch-db-schema-transaction-effect)
-                     (lambda (_conn _sql) schema-effect))
-                    ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-            (clutch--run-db-query conn sql)
-            (should (eq (not (null (clutch--tx-dirty-p conn)))
-                        expected-dirty))))))))
+                     (lambda (_conn _sql) schema-effect)))
+            (clutch--run-db-query conn sql nil defer)
+            (should (eq (clutch--tx-state conn) expected))))))))
 
 (ert-deftest clutch-test-transaction-state-follows-the-server-report ()
   "Uncommitted work should be known until the server reports no transaction.
@@ -1697,11 +1527,10 @@ report of none open clears it."
     (ert-info (label)
       (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
             (clutch--running-queries (make-hash-table :test 'eq))
+            (conn (make-clutch-test-conn :commit-mode (if manual 'manual 'auto)))
             open
             (remaining steps))
-        (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) manual))
-                  ((symbol-function 'clutch-db-transaction-open-p)
+        (cl-letf (((symbol-function 'clutch-db-transaction-open-p)
                    (lambda (_conn) open))
                   ((symbol-function 'clutch-db-schema-transaction-effect)
                    (lambda (_conn _sql) ddl-effect))
@@ -1710,65 +1539,38 @@ report of none open clears it."
                      (let ((step (pop remaining)))
                        (should (equal sql (car step)))
                        (setq open (cadr step)))
-                     (make-clutch-db-result :affected-rows 1)))
-                  ((symbol-function 'clutch--clear-connection-problem-capture)
-                   #'ignore)
-                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
+                     (make-clutch-db-result :affected-rows 1))))
           (pcase-dolist (`(,sql ,_) steps)
-            (clutch--run-db-query 'tx-conn sql))
-          (should (eq (clutch--tx-state 'tx-conn) state)))))))
-
-(ert-deftest clutch-test-run-db-query-can-defer-transaction-state-to-batch ()
-  "Staged statements should not publish dirty state before their batch succeeds."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (conn 'fake-conn))
-    (cl-letf (((symbol-function 'clutch-db-query)
-               (lambda (_conn _sql) '(:ok t)))
-              ((symbol-function 'clutch-db-manual-commit-p)
-               (lambda (_conn) t))
-              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-      (clutch--run-db-query conn "UPDATE demo SET x = 1" nil t)
-      (should-not (clutch--tx-state conn)))))
+            (clutch--run-db-query conn sql))
+          (should (eq (clutch--tx-state conn) state)))))))
 
 (ert-deftest clutch-test-uncertain-transaction-requires-rollback ()
   "An unknown batch should block work while allowing session recovery."
   (with-temp-buffer
     (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch-connection 'fake-conn)
+          (clutch-connection (make-clutch-test-conn :commit-mode 'auto))
           committed
           marked
           notice
-          queried
-          toggled
           rolled-back)
       (puthash clutch-connection 'uncertain clutch--tx-state-cache)
-      (cl-letf (((symbol-function 'clutch--ensure-transaction-connection) #'ignore)
-                ((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-manual-commit-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (&rest _) (setq queried t)))
-                ((symbol-function 'clutch-db-commit)
+      (cl-letf (((symbol-function 'clutch-db-commit)
                  (lambda (_conn) (setq committed t)))
-                ((symbol-function 'clutch-db-set-auto-commit)
-                 (lambda (&rest _) (setq toggled t)))
                 ((symbol-function 'clutch-db-rollback)
                  (lambda (_conn) (setq rolled-back t)))
                 ((symbol-function 'clutch--mark-dml-results-rolled-back)
                  (lambda (_conn) (setq marked t)))
-                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
                 ((symbol-function 'message)
                  (lambda (format-string &rest args)
                    (setq notice (apply #'format format-string args)))))
+        ;; The shared backend fails the test on any query.
         (should-error
          (clutch--run-db-query clutch-connection "SELECT 1")
          :type 'user-error)
         (should-error (clutch-commit) :type 'user-error)
         (should-error (clutch-toggle-auto-commit) :type 'user-error)
-        (should-not queried)
         (should-not committed)
-        (should-not toggled)
+        (should-not (clutch-db-manual-commit-p clutch-connection))
         (clutch-rollback)
         (should rolled-back)
         (should-not marked)
@@ -1778,17 +1580,14 @@ report of none open clears it."
 (ert-deftest clutch-test-disconnect-confirmation-describes-transaction-state ()
   "Closing prompts should not present an uncertain commit as known-lost work.
 Work of a transaction begun with BEGIN in Auto mode is asked about too."
-  (dolist (case '((dirty t "Uncommitted changes")
-                  (uncertain nil "outcome is unknown")
-                  (dirty nil "Uncommitted changes")
-                  (nil t nil)))
-    (pcase-let ((`(,state ,manual ,expected-pattern) case))
+  (dolist (case '((dirty "Uncommitted changes")
+                  (uncertain "outcome is unknown")
+                  (nil nil)))
+    (pcase-let ((`(,state ,expected-pattern) case))
       (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
             prompt)
         (puthash 'fake-conn state clutch--tx-state-cache)
-        (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) manual))
-                  ((symbol-function 'yes-or-no-p)
+        (cl-letf (((symbol-function 'yes-or-no-p)
                    (lambda (text)
                      (setq prompt text)
                      t)))
@@ -1800,90 +1599,53 @@ Work of a transaction begun with BEGIN in Auto mode is asked about too."
                 (should (string-suffix-p "Disconnect? " prompt)))
             (should-not prompt)))))))
 
-(ert-deftest clutch-test-transaction-commands-error-in-autocommit-mode ()
-  "Commit and rollback should error when the connection is not in manual mode."
-  (dolist (command '(clutch-commit clutch-rollback))
-    (ert-info ((format "command: %s" command))
-      (let ((clutch-connection 'fake-conn))
-        (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                  ((symbol-function 'clutch-db-manual-commit-supported-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) nil)))
-          (should-error (funcall command) :type 'user-error))))))
-
-(ert-deftest clutch-test-commit-failure-marks-outcome-uncertain ()
-  "A failed COMMIT response must not leave the transaction merely dirty."
-  (with-temp-buffer
-    (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch-connection 'fake-conn))
-      (puthash clutch-connection 'dirty clutch--tx-state-cache)
-      (cl-letf (((symbol-function 'clutch--ensure-transaction-connection)
-                 #'ignore)
-                ((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-manual-commit-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-commit)
-                 (lambda (_conn)
-                   (signal 'clutch-db-error '("commit response lost"))))
-                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-        (let ((err (should-error (clutch-commit) :type 'user-error)))
-          (should (string-match-p "outcome is uncertain"
-                                  (error-message-string err))))
-        (should (clutch--tx-uncertain-p clutch-connection))))))
-
-(ert-deftest clutch-test-transaction-commands-call-rpc-and-clear-dirty ()
-  "Commit and rollback should fire their RPC and clear the dirty cache."
-  (dolist (case '((commit clutch-commit clutch-db-commit)
-                  (rollback clutch-rollback clutch-db-rollback)))
-    (pcase-let ((`(,label ,command ,rpc) case))
-      (ert-info ((format "case: %s" label))
-        (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              (clutch-connection 'fake-conn)
-              called)
-          (puthash clutch-connection 'dirty clutch--tx-state-cache)
-          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_conn) t))
-                    ((symbol-function rpc)
-                     (lambda (_conn) (setq called t)))
-                    ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-            (funcall command)
-            (should called)
-            (should-not (clutch--tx-dirty-p clutch-connection))))))))
-
-(ert-deftest clutch-test-commit-reports-backend-rollback ()
-  "A failed backend transaction should be reported as rolled back, not committed."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection 'fake-conn)
-        committed
-        rolled-back)
-    (puthash clutch-connection 'dirty clutch--tx-state-cache)
-    (cl-letf (((symbol-function 'clutch--ensure-transaction-connection) #'ignore)
-              ((symbol-function 'clutch-db-manual-commit-supported-p)
-               (lambda (_conn) t))
-              ((symbol-function 'clutch-db-manual-commit-p)
-               (lambda (_conn) t))
-              ((symbol-function 'clutch-db-commit)
-               (lambda (_conn) 'rolled-back))
-              ((symbol-function 'clutch--mark-dml-results-committed)
-               (lambda (_conn) (setq committed t)))
-              ((symbol-function 'clutch--mark-dml-results-rolled-back)
-               (lambda (_conn) (setq rolled-back t)))
-              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-      (let ((err (should-error (clutch-commit) :type 'user-error)))
-        (should (string-match-p "nothing was committed"
-                                (error-message-string err)))
-        (should-not (string-match-p "outcome is uncertain"
-                                    (error-message-string err))))
-      (should rolled-back)
-      (should-not committed)
-      (should-not (clutch--tx-state clutch-connection)))))
+(ert-deftest clutch-test-transaction-commands-report-the-backend-outcome ()
+  "Commit and rollback should end the transaction as the backend reports.
+In Auto mode they refuse.  A failed COMMIT response must not leave the
+transaction merely dirty, and a failed backend transaction should be
+reported as rolled back, not committed."
+  (pcase-dolist (`(,command ,mode ,answer ,error-pattern ,state ,banner)
+                 '((clutch-commit manual nil nil nil "committed")
+                   (clutch-rollback manual nil nil nil "rolled back")
+                   (clutch-commit manual error "outcome is uncertain" uncertain nil)
+                   (clutch-commit manual rolled-back
+                                  "\\`Transaction had already failed" nil "rolled back")
+                   (clutch-commit auto nil
+                                  "\\`Connection is in autocommit mode\\'" nil nil)
+                   (clutch-rollback auto nil
+                                    "\\`Connection is in autocommit mode\\'" nil nil)))
+    (ert-info ((format "%s in %s mode, backend answer %s" command mode answer))
+      (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+             (conn (make-clutch-test-conn :commit-mode mode))
+             (dml (clutch-test--make-dml-result-buf conn))
+             called)
+        (when (eq mode 'manual)
+          (puthash conn 'dirty clutch--tx-state-cache))
+        (unwind-protect
+            (with-temp-buffer
+              (setq-local clutch-connection conn)
+              (cl-letf (((symbol-function (if (eq command 'clutch-commit)
+                                              'clutch-db-commit
+                                            'clutch-db-rollback))
+                         (lambda (_conn)
+                           (setq called t)
+                           (if (eq answer 'error)
+                               (signal 'clutch-db-error '("commit response lost"))
+                             answer))))
+                (if error-pattern
+                    (should (string-match-p
+                             error-pattern
+                             (error-message-string
+                              (should-error (funcall command)
+                                            :type 'user-error))))
+                  (funcall command)))
+              (should (eq called (eq mode 'manual)))
+              (should (eq (clutch--tx-state conn) state))
+              (let ((header (buffer-local-value 'header-line-format dml)))
+                (if banner
+                    (should (string-match-p banner header))
+                  (should-not header))))
+          (kill-buffer dml))))))
 
 (ert-deftest clutch-test-session-teardown-step-matrix ()
   "Each teardown kind should run exactly the steps it documents.
@@ -1932,180 +1694,133 @@ to one caller instead of the shared transition shows up here."
 The flag is the only record that the server rolled back an open
 transaction; clearing it on preserve let `clutch-commit' reconnect and
 commit an empty transaction instead of reporting the loss."
-  (with-temp-buffer
-    (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-          (rolled-back nil))
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--mark-dml-results-connection-closed)
-                 #'ignore)
-                ((symbol-function 'clutch--mark-dml-results-rolled-back)
-                 (lambda (conn) (setq rolled-back conn)))
-                ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 #'ignore)
-                ((symbol-function 'clutch--release-connection-transport)
-                 #'ignore)
-                ((symbol-function 'clutch--refresh-preserved-connection-buffers)
-                 #'ignore)
-                ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-        (setq-local clutch-connection 'dead-conn)
-        (clutch--set-tx-dirty 'dead-conn)
-        (clutch--preserve-dead-connection-for-reconnect 'dead-conn)
-        ;; The evidence survives retirement.
-        (should (clutch--tx-dirty-p 'dead-conn))
-        (should (clutch--lost-transaction-p 'dead-conn))
-        ;; A transaction command refuses to run on a replacement session,
-        ;; consuming the evidence and marking results rolled back.
-        (should-error (clutch--ensure-transaction-connection)
-                      :type 'user-error)
-        (should (eq rolled-back 'dead-conn))
-        (should-not (clutch--tx-dirty-p 'dead-conn))))))
+  (clutch-test--with-isolated-metadata-caches
+    (with-temp-buffer
+      (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+             (conn (make-clutch-test-conn :live nil))
+             (dml (clutch-test--make-dml-result-buf conn)))
+        (unwind-protect
+            (progn
+              (setq-local clutch-connection conn)
+              (clutch--set-tx-dirty conn)
+              (clutch--preserve-dead-connection-for-reconnect conn)
+              ;; The evidence survives retirement.
+              (should (clutch--tx-dirty-p conn))
+              (should (clutch--lost-transaction-p conn))
+              (should (string-match-p
+                       "closed" (buffer-local-value 'header-line-format dml)))
+              ;; A transaction command refuses to run on a replacement
+              ;; session, consuming the evidence and marking results
+              ;; rolled back.
+              (should-error (clutch--ensure-transaction-connection)
+                            :type 'user-error)
+              (should (string-match-p
+                       "rolled back"
+                       (buffer-local-value 'header-line-format dml)))
+              (should-not (clutch--tx-dirty-p conn)))
+          (kill-buffer dml))))))
 
 (ert-deftest clutch-test-session-teardown-releases-transport-when-close-fails ()
   "A failing backend disconnect must still release the transport."
-  (let (released)
-    (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed)
-               #'ignore)
-              ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
-              ((symbol-function 'clutch--clear-tx-state) #'ignore)
-              ((symbol-function 'clutch--clear-connection-metadata-caches)
-               #'ignore)
-              ((symbol-function 'clutch--record-disconnect-debug-event)
-               #'ignore)
-              ((symbol-function 'clutch--forget-problem-record) #'ignore)
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (signal 'clutch-db-error '("close failed"))))
-              ((symbol-function 'clutch--release-connection-transport)
-               (lambda (_conn) (setq released t))))
-      (should-error (clutch--do-disconnect 'fake-conn) :type 'clutch-db-error)
-      (should released))))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn))
+          (clutch--connection-transport-cache (make-hash-table :test 'eq)))
+      (puthash conn '(:host "db" :port 1) clutch--connection-transport-cache)
+      (cl-letf (((symbol-function 'clutch-db-disconnect)
+                 (lambda (_conn) (signal 'clutch-db-error '("close failed")))))
+        (should-error (clutch--do-disconnect conn) :type 'clutch-db-error)
+        (should-not (gethash conn clutch--connection-transport-cache))))))
 
-(ert-deftest clutch-test-transaction-commands-refuse-lost-transaction ()
-  "Commit and rollback must not report success after the session was replaced.
+(ert-deftest clutch-test-transaction-commands-refuse-a-dead-session ()
+  "Transaction commands must not run on a replacement of a dead session.
 A dead manual-commit session was already rolled back by the server, so a
-replacement connection would run the statement against an empty transaction."
-  (dolist (command '(clutch-commit clutch-rollback clutch-toggle-auto-commit))
-    (ert-info ((format "command: %s" command))
-      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-            (clutch-connection 'dead-conn)
-            reconnected
-            rpc-called)
-        (puthash clutch-connection 'dirty clutch--tx-state-cache)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) nil))
-                  ((symbol-function 'clutch--try-reconnect)
-                   (lambda () (setq reconnected t)))
-                  ((symbol-function 'clutch-db-manual-commit-supported-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch-db-manual-commit-p)
-                   (lambda (_conn) t))
-                  ((symbol-function 'clutch-db-commit)
-                   (lambda (_conn) (setq rpc-called t)))
-                  ((symbol-function 'clutch-db-rollback)
-                   (lambda (_conn) (setq rpc-called t)))
-                  ((symbol-function 'clutch-db-set-auto-commit)
-                   (lambda (&rest _) (setq rpc-called t)))
-                  ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-          (should-error (funcall command) :type 'user-error)
-          (should-not rpc-called)
-          (should-not reconnected)
-          ;; The loss is reported once; the session is then clean so the next
-          ;; command reconnects normally.
-          (should-not (clutch--tx-dirty-p 'dead-conn)))))))
-
-(ert-deftest clutch-test-transaction-commands-preserve-dead-uncertain-outcome ()
-  "A dead uncertain session must not be replaced and reported as rolled back."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection 'dead-conn)
-        marked
-        reconnected)
-    (puthash clutch-connection 'uncertain clutch--tx-state-cache)
-    (cl-letf (((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch--try-reconnect)
-               (lambda () (setq reconnected t)))
-              ((symbol-function 'clutch--mark-dml-results-rolled-back)
-               (lambda (_conn) (setq marked t))))
-      (let ((err
-             (should-error
-              (clutch--ensure-transaction-connection)
-              :type 'user-error)))
-        (should (string-match-p "verify" (error-message-string err))))
-      (should-not marked)
-      (should-not reconnected)
-      (should (clutch--tx-uncertain-p 'dead-conn)))))
+replacement connection would run the statement against an empty
+transaction.  A dead uncertain session must not be replaced and reported
+as rolled back either."
+  (pcase-dolist (`(,state ,error-pattern ,banner ,state-after)
+                 '((dirty "uncommitted changes were lost" "rolled back" nil)
+                   (uncertain "verify" nil uncertain)))
+    (dolist (command '(clutch-commit clutch-rollback clutch-toggle-auto-commit))
+      (ert-info ((format "%s with %s state" command state))
+        (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+               (conn (make-clutch-test-conn :live nil :commit-mode 'manual))
+               (dml (clutch-test--make-dml-result-buf conn))
+               rpc-called)
+          (puthash conn state clutch--tx-state-cache)
+          (unwind-protect
+              (with-temp-buffer
+                (setq-local clutch-connection conn)
+                (cl-letf (((symbol-function 'clutch-db-commit)
+                           (lambda (_conn) (setq rpc-called t)))
+                          ((symbol-function 'clutch-db-rollback)
+                           (lambda (_conn) (setq rpc-called t)))
+                          ((symbol-function 'clutch-db-set-auto-commit)
+                           (lambda (&rest _) (setq rpc-called t))))
+                  ;; A reconnect attempt would fail with "Not connected".
+                  (should (string-match-p
+                           error-pattern
+                           (error-message-string
+                            (should-error (funcall command)
+                                          :type 'user-error)))))
+                (should-not rpc-called)
+                (let ((header (buffer-local-value 'header-line-format dml)))
+                  (if banner
+                      (should (string-match-p banner header))
+                    (should-not header)))
+                ;; A loss is reported once; the session is then clean so the
+                ;; next command reconnects normally.
+                (should (eq (clutch--tx-state conn) state-after)))
+            (kill-buffer dml)))))))
 
 (ert-deftest clutch-test-reconnect-reports-prior-transaction-state-accurately ()
-  "Reconnect should distinguish lost work from an unknown submission outcome."
-  (dolist (case '((dirty dead-conn "uncommitted")
-                  (uncertain nil "outcome is unknown")))
-    (pcase-let ((`(,state ,expected-mark ,message-pattern) case))
-      (ert-info ((format "state: %s" state))
-        (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              marked
-              messages)
-          (with-temp-buffer
-            (setq-local clutch-connection 'dead-conn
-                        clutch--connection-params
-                        '(:backend pg :host "db.internal")
-                        clutch--conn-sql-product 'pg)
-            (puthash 'dead-conn state clutch--tx-state-cache)
-            (cl-letf (((symbol-function 'clutch--build-conn)
-                       (lambda (_params) 'new-conn))
-                      ((symbol-function 'clutch--connection-alive-p)
-                       (lambda (conn) (eq conn 'new-conn)))
-                      ((symbol-function 'clutch--release-connection-transport)
-                       #'ignore)
-                      ((symbol-function 'clutch--clear-connection-problem-capture)
-                       #'ignore)
-                      ((symbol-function 'clutch--clear-connection-metadata-caches)
-                       #'ignore)
-                      ((symbol-function 'clutch--rebind-connection-buffers)
-                       #'ignore)
-                      ((symbol-function 'clutch--finalize-rebound-connection)
-                       #'ignore)
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (_conn) "pg:db.internal"))
-                      ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                      ((symbol-function 'clutch--mark-dml-results-rolled-back)
-                       (lambda (conn) (setq marked conn)))
-                      ((symbol-function 'message)
-                       (lambda (format-string &rest args)
-                         (push (apply #'format format-string args) messages))))
-              (should (clutch--try-reconnect))
-              (should (eq marked expected-mark))
-              (should-not (clutch--tx-state 'dead-conn))
-              (should
-               (seq-find
-                (lambda (text)
-                  (string-match-p message-pattern text))
-                messages)))))))))
-(ert-deftest clutch-test-try-reconnect-without-sql-product ()
-  "Backends without a SQL product, such as Redis, should still reconnect."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        rebound)
-    (with-temp-buffer
-      (setq-local clutch-connection 'dead-conn
-                  clutch--connection-params '(:backend redis :host "cache.internal")
-                  clutch--conn-sql-product nil)
-      (cl-letf (((symbol-function 'clutch--build-conn)
-                 (lambda (_params) 'new-conn))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'clutch--release-connection-transport) #'ignore)
-                ((symbol-function 'clutch--clear-connection-problem-capture)
-                 #'ignore)
-                ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 #'ignore)
-                ((symbol-function 'clutch--rebind-connection-buffers)
-                 (lambda (old-conn new-conn _params product)
-                   (setq rebound (list old-conn new-conn product))))
-                ((symbol-function 'clutch--finalize-rebound-connection) #'ignore)
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "redis:cache.internal"))
-                ((symbol-function 'message) #'ignore))
-        (should (clutch--try-reconnect))
-        (should (equal rebound '(dead-conn new-conn nil)))))))
+  "Reconnect should distinguish lost work from an unknown submission outcome.
+Backends without a SQL product, such as Redis, reconnect too."
+  (pcase-dolist (`(,state ,params ,product ,banner ,message-pattern)
+                 '((dirty (:backend pg :host "db.internal") pg
+                          "rolled back" "uncommitted")
+                   (uncertain (:backend pg :host "db.internal") pg
+                              nil "outcome is unknown")
+                   (nil (:backend redis :host "cache.internal") nil
+                        nil "Reconnected to")))
+    (ert-info ((format "state: %s" state))
+      (clutch-test--with-isolated-metadata-caches
+        (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+               (old (make-clutch-test-conn :live nil))
+               (new (make-clutch-test-conn))
+               (dml (clutch-test--make-dml-result-buf old))
+               messages)
+          (unwind-protect
+              (with-temp-buffer
+                (setq-local clutch-connection old
+                            clutch--connection-params params
+                            clutch--conn-sql-product product)
+                (when state
+                  (puthash old state clutch--tx-state-cache))
+                (cl-letf (((symbol-function 'clutch--build-conn)
+                           (lambda (_params) new))
+                          ;; The shared backend has no schema to prime and
+                          ;; no endpoint to name.
+                          ((symbol-function 'clutch--finalize-rebound-connection)
+                           #'ignore)
+                          ((symbol-function 'clutch--connection-key)
+                           (lambda (_conn) "test-key"))
+                          ((symbol-function 'message)
+                           (lambda (format-string &rest args)
+                             (push (apply #'format format-string args)
+                                   messages))))
+                  (should (eq (clutch--try-reconnect) new)))
+                (should (eq clutch-connection new))
+                (should (eq clutch--conn-sql-product product))
+                (should (eq (buffer-local-value 'clutch-connection dml) new))
+                (let ((header (buffer-local-value 'header-line-format dml)))
+                  (if banner
+                      (should (string-match-p banner header))
+                    (should-not header)))
+                (should-not (clutch--tx-state old))
+                (should (seq-find (lambda (text)
+                                    (string-match-p message-pattern text))
+                                  messages)))
+            (kill-buffer dml)))))))
 
 (ert-deftest clutch-test-try-reconnect-refuses-a-namespace-it-cannot-reach ()
   "The automatic reconnect should refuse when it cannot return to the namespace.
@@ -2138,13 +1853,10 @@ connecting again, but it came before the console was shown."
           (with-current-buffer existing
             (clutch-mode)
             (setq-local clutch--console-name "alpha")
-            (setq-local clutch-connection 'dead-conn))
+            (setq-local clutch-connection (make-clutch-test-conn :live nil)))
           (with-temp-buffer
             (switch-to-buffer (current-buffer))
-            (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                       (lambda (&rest _args) existing))
-                      ((symbol-function 'clutch--connection-alive-p) #'ignore)
-                      ((symbol-function 'clutch--try-reconnect)
+            (cl-letf (((symbol-function 'clutch--try-reconnect)
                        (lambda () (user-error "The session was in att.main"))))
               (should-error (clutch-query-console "alpha") :type 'user-error)
               (should (eq (window-buffer (selected-window)) existing)))))
@@ -2167,108 +1879,49 @@ connecting again, but it came before the console was shown."
                   (disconnect "closed")))
     (pcase-let ((`(,action ,banner) case))
       (ert-info ((format "action: %s" action))
-        (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
-               (clutch-connection 'fake-conn)
-               (buf (clutch-test--make-dml-result-buf 'fake-conn)))
-          (when (eq action 'rollback)
-            (puthash clutch-connection 'dirty clutch--tx-state-cache))
-          (unwind-protect
-              (progn
-                (pcase action
-                  ('rollback
-                   (cl-letf (((symbol-function 'clutch--ensure-connection)
-                              #'ignore)
-                             ((symbol-function 'clutch--connection-alive-p)
-                              (lambda (_conn) t))
-                             ((symbol-function
-                               'clutch-db-manual-commit-supported-p)
-                              (lambda (_conn) t))
-                             ((symbol-function 'clutch-db-manual-commit-p)
-                              (lambda (_conn) t))
-                             ((symbol-function 'clutch-db-rollback) #'ignore)
-                             ((symbol-function 'clutch--refresh-transaction-ui)
-                              #'ignore))
-                     (clutch-rollback)))
-                  ('commit
-                   (cl-letf (((symbol-function 'clutch--ensure-connection)
-                              #'ignore)
-                             ((symbol-function 'clutch--connection-alive-p)
-                              (lambda (_conn) t))
-                             ((symbol-function
-                               'clutch-db-manual-commit-supported-p)
-                              (lambda (_conn) t))
-                             ((symbol-function 'clutch-db-manual-commit-p)
-                              (lambda (_conn) t))
-                             ((symbol-function 'clutch-db-commit) #'ignore)
-                             ((symbol-function 'clutch--refresh-transaction-ui)
-                              #'ignore))
-                     (clutch-commit)))
-                  ('disconnect
-                   (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                              (lambda (_c) t))
-                             ((symbol-function
-                               'clutch--confirm-session-close)
-                              #'ignore)
-                             ((symbol-function 'clutch-db-disconnect) #'ignore)
-                             ((symbol-function 'clutch--refresh-transaction-ui)
-                              #'ignore)
-                             ((symbol-function
-                               'clutch--clear-connection-metadata-caches)
-                              #'ignore)
-                             ((symbol-function
-                               'clutch--update-console-buffer-name)
-                              #'ignore)
-                             ((symbol-function 'clutch--update-mode-line)
-                              #'ignore))
-                     (clutch-disconnect))))
-                (with-current-buffer buf
-                  (should
-                   (string-match-p
-                    banner (substring-no-properties header-line-format)))
-                  (clutch--refresh-result-status-line)
-                  (should
-                   (string-match-p
-                    banner (substring-no-properties header-line-format)))))
-            (kill-buffer buf)))))))
+        (clutch-test--with-isolated-metadata-caches
+          (let* ((clutch--tx-state-cache (make-hash-table :test 'eq))
+                 (conn (make-clutch-test-conn :commit-mode 'manual))
+                 (buf (clutch-test--make-dml-result-buf conn)))
+            (when (eq action 'rollback)
+              (puthash conn 'dirty clutch--tx-state-cache))
+            (unwind-protect
+                (progn
+                  (with-temp-buffer
+                    (setq-local clutch-connection conn)
+                    (pcase action
+                      ('rollback (clutch-rollback))
+                      ('commit (clutch-commit))
+                      ('disconnect (clutch-disconnect))))
+                  (with-current-buffer buf
+                    (should
+                     (string-match-p
+                      banner (substring-no-properties header-line-format)))
+                    (clutch--refresh-result-status-line)
+                    (should
+                     (string-match-p
+                      banner (substring-no-properties header-line-format)))))
+              (kill-buffer buf))))))))
 
 (ert-deftest clutch-test-toggle-auto-commit-contract ()
   "Auto-commit toggle should switch clean states and reject unsafe states."
-  (dolist (case '((manual-to-auto t t nil t nil)
-                  (auto-to-manual t nil nil nil nil)
-                  (dirty-manual t t t error t)
-                  (unsupported nil nil nil error nil)))
-    (pcase-let ((`(,label ,supported ,manual ,dirty ,expected ,dirty-after)
-                 case))
+  (dolist (case '((manual-to-auto manual nil auto nil)
+                  (auto-to-manual auto nil manual nil)
+                  (dirty-manual manual t manual t)
+                  (unsupported nil nil nil nil)))
+    (pcase-let ((`(,label ,mode ,dirty ,mode-after ,dirty-after) case))
       (ert-info ((format "case: %s" label))
         (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-              (clutch-connection 'fake-conn)
-              captured-auto-commit
-              transaction-ui-refreshed)
+              (clutch-connection (make-clutch-test-conn :commit-mode mode)))
           (when dirty
             (puthash clutch-connection 'dirty clutch--tx-state-cache))
-          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (_conn) supported))
-                    ((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_conn) manual))
-                    ((symbol-function 'clutch-db-set-auto-commit)
-                     (lambda (_conn value)
-                       (setq captured-auto-commit value)))
-                    ((symbol-function 'clutch--refresh-transaction-ui)
-                     (lambda (conn)
-                       (setq transaction-ui-refreshed conn))))
-            (if (eq expected 'error)
-                (should-error (clutch-toggle-auto-commit) :type 'user-error)
-              (clutch-toggle-auto-commit)
-              (should (eq captured-auto-commit expected))
-              (should (eq transaction-ui-refreshed clutch-connection)))
-            (when (eq expected 'error)
-              (should-not captured-auto-commit)
-              (should-not transaction-ui-refreshed))
-            (should (eq (not (null (clutch--tx-dirty-p clutch-connection)))
-                        dirty-after))))))))
+          (if (eq mode-after mode)
+              (should-error (clutch-toggle-auto-commit) :type 'user-error)
+            (clutch-toggle-auto-commit))
+          (should (eq (clutch-test-conn-commit-mode clutch-connection)
+                      mode-after))
+          (should (eq (not (null (clutch--tx-dirty-p clutch-connection)))
+                      dirty-after)))))))
 
 (ert-deftest clutch-test-transaction-shortcuts-follow-attached-result-context ()
   "Result and Record views should dispatch transaction keys for supported SQL."
@@ -2277,96 +1930,58 @@ connecting again, but it came before the console was shown."
     (dolist (mode '(clutch-result-mode clutch-record-mode))
       (with-temp-buffer
         (funcall mode)
-        (let (committed)
-          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch--ensure-connection) #'ignore)
-                    ((symbol-function 'clutch-db-commit)
-                     (lambda (conn) (setq committed conn)))
-                    ((symbol-function 'clutch--mark-dml-results-committed)
-                     #'ignore)
-                    ((symbol-function 'clutch--clear-tx-state) #'ignore))
-            (clutch--bind-connection-context
-             'fake-conn '(:backend oracle) 'oracle)
-            (should clutch--transaction-shortcuts-mode)
-            (dolist (binding '(("C-c C-m" . clutch-commit)
-                               ("C-c C-u" . clutch-rollback)
-                               ("C-c C-a" . clutch-toggle-auto-commit)))
-              (should (eq (key-binding (kbd (car binding)))
-                          (cdr binding))))
-            (call-interactively (key-binding (kbd "C-c C-m")))
-            (should (eq committed 'fake-conn))
-            (when (eq mode 'clutch-result-mode)
-              (should (eq (key-binding (kbd "C-c C-c"))
-                          #'clutch-result-submit)))))))
+        (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+              (conn (make-clutch-test-conn :commit-mode 'manual)))
+          (clutch--bind-connection-context conn '(:backend oracle) 'oracle)
+          (should clutch--transaction-shortcuts-mode)
+          (dolist (binding '(("C-c C-m" . clutch-commit)
+                             ("C-c C-u" . clutch-rollback)
+                             ("C-c C-a" . clutch-toggle-auto-commit)))
+            (should (eq (key-binding (kbd (car binding)))
+                        (cdr binding))))
+          (puthash conn 'dirty clutch--tx-state-cache)
+          (call-interactively (key-binding (kbd "C-c C-m")))
+          (should-not (clutch--tx-dirty-p conn))
+          (when (eq mode 'clutch-result-mode)
+            (should (eq (key-binding (kbd "C-c C-c"))
+                        #'clutch-result-submit))))))
     (dolist (case '((clutch-result-mode nil)
-                    (special-mode t)))
-      (pcase-let ((`(,mode ,supported) case))
+                    (special-mode manual)))
+      (pcase-let ((`(,mode ,commit-mode) case))
         (with-temp-buffer
           (funcall mode)
-          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (_conn) supported)))
-            (clutch--bind-connection-context
-             'fake-conn '(:backend oracle) 'oracle))
+          (clutch--bind-connection-context
+           (make-clutch-test-conn :commit-mode commit-mode)
+           '(:backend oracle) 'oracle)
           (should-not clutch--transaction-shortcuts-mode)
           (should-not (key-binding (kbd "C-c C-m"))))))))
 
-(ert-deftest clutch-test-transaction-shortcuts-disable-on-derived-invalidation ()
-  "Invalidated Result and Record views should drop transaction shortcuts."
+(ert-deftest clutch-test-transaction-shortcuts-leave-with-the-connection ()
+  "Result and Record views should drop transaction shortcuts with their connection.
+The owner invalidating them and disconnecting from them both end it."
   (let ((overriding-local-map nil)
         (overriding-terminal-local-map nil))
-    (dolist (mode '(clutch-result-mode clutch-record-mode))
-      (let ((owner (generate-new-buffer " *clutch-shortcuts-owner*"))
-            (view (generate-new-buffer " *clutch-shortcuts-view*")))
-        (unwind-protect
-            (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                       (lambda (conn) (eq conn 'fake-conn))))
-              (with-current-buffer view
-                (funcall mode)
-                (clutch--bind-connection-context
-                 'fake-conn '(:backend oracle) 'oracle)
-                (should clutch--transaction-shortcuts-mode)
-                (should (eq (key-binding (kbd "C-c C-m"))
-                            #'clutch-commit)))
-              (with-current-buffer owner
-                (clutch--invalidate-derived-buffers 'fake-conn))
-              (with-current-buffer view
-                (should-not clutch-connection)
-                (should-not clutch--transaction-shortcuts-mode)
-                (should-not (key-binding (kbd "C-c C-m")))))
-          (when (buffer-live-p owner)
-            (kill-buffer owner))
-          (when (buffer-live-p view)
-            (kill-buffer view)))))))
-
-(ert-deftest clutch-test-transaction-shortcuts-disable-on-current-disconnect ()
-  "Disconnecting from a Result view should drop transaction shortcuts."
-  (let ((overriding-local-map nil)
-        (overriding-terminal-local-map nil))
-    (with-temp-buffer
-      (clutch-result-mode)
-      (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (conn) (eq conn 'fake-conn)))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--confirm-session-close)
-                 #'ignore)
-                ((symbol-function 'clutch--do-disconnect) #'ignore))
-        (clutch--bind-connection-context
-         'fake-conn '(:backend oracle) 'oracle)
-        (should clutch--transaction-shortcuts-mode)
-        (should (eq (key-binding (kbd "C-c C-m"))
-                    #'clutch-commit))
-        (clutch-disconnect)
-        (should-not clutch-connection)
-        (should-not clutch--transaction-shortcuts-mode)
-        (should-not (key-binding (kbd "C-c C-m")))))))
+    (pcase-dolist (`(,mode ,trigger) '((clutch-result-mode invalidate)
+                                       (clutch-record-mode invalidate)
+                                       (clutch-result-mode disconnect)))
+      (ert-info ((format "%s: %s" mode trigger))
+        (clutch-test--with-isolated-metadata-caches
+          (let ((conn (make-clutch-test-conn :commit-mode 'manual)))
+            (with-temp-buffer
+              (funcall mode)
+              (clutch--bind-connection-context conn '(:backend oracle) 'oracle)
+              (should clutch--transaction-shortcuts-mode)
+              (should (eq (key-binding (kbd "C-c C-m")) #'clutch-commit))
+              (if (eq trigger 'disconnect)
+                  (clutch-disconnect)
+                (with-temp-buffer
+                  (clutch--invalidate-derived-buffers conn)))
+              (should-not clutch-connection)
+              (should-not clutch--transaction-shortcuts-mode)
+              (should-not (key-binding (kbd "C-c C-m"))))))))))
 
 (ert-deftest clutch-test-sqlite-omits-manual-commit-ui ()
   "SQLite should not advertise Clutch manual-commit controls."
-  (require 'clutch-db-sqlite)
   (let ((conn (make-clutch-db-sqlite-conn :database "/tmp/bookmarks.db")))
     (should-not (clutch-db-manual-commit-supported-p conn))))
 
@@ -2408,49 +2023,84 @@ connecting again, but it came before the console was shown."
                      "fallback"))
       (should (= calls 1)))))
 
-(ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
-  "MongoDB completion should offer shell methods and cached collections."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "users" nil schema)
-    (puthash "orders" nil schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
+(ert-deftest clutch-test-mongodb-completion-contexts ()
+  "MongoDB completion should offer what the text before point calls for.
+After `db.' it offers cached collections and shell methods; after a
+collection, its helper methods and templates; after a chainable query,
+the cursor helpers that may still follow; MQL operators after `$';
+sampled field names as document keys and `$' field paths; and
+collections inside `from:' and `into:' strings.  Completing inserts the
+candidate, and a finished key completion adds its colon."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn))
+          (schema (make-hash-table :test 'equal)))
+      (puthash "users" nil schema)
+      (puthash "orders" '("status" "userId" "items.productId") schema)
+      (puthash "products" '("sku" "category") schema)
+      (puthash conn schema clutch--schema-cache)
       (with-temp-buffer
         (clutch-mongodb-mode)
-        (should (derived-mode-p 'prog-mode))
-        (should-not (derived-mode-p 'js-mode))
-        (should (eq indent-line-function #'clutch-mongodb-indent-line))
-        (should (equal comment-start "// "))
-        (insert "db.")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "" (nth 2 capf))))
-          (should (equal (car capf) (point)))
-          (should (equal (cadr capf) (point)))
-          (should (member "users" candidates))
-          (should (member "orders" candidates))
-          (should (member "runCommand()" candidates))
-          (should-not (member "getSiblingDB()" candidates)))
-        (erase-buffer)
-        (insert "db.users.")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "" (nth 2 capf))))
-          (should (member "find()" candidates))
-          (should (member "aggregate()" candidates))
-          (should (member "find({}).limit(20)" candidates))
-          (should (member "aggregate([{ $match: {} }, { $limit: 20 }])"
-                          candidates))
-          (should (member "countDocuments()" candidates))
-          (should-not (member "estimatedDocumentCount()" candidates)))
-        (erase-buffer)
-        (insert "db.users.fi")
-        (cl-letf (((symbol-function 'completion-in-region)
-                   (lambda (beg end collection &optional _predicate)
-                     (delete-region beg end)
-                     (insert (car (all-completions
-                                   "fi" collection)))
-                     t)))
-          (clutch-mongodb-complete-at-point)
-          (should (equal (buffer-string) "db.users.find()")))))))
+        (setq-local clutch-connection conn)
+        (pcase-dolist (`(,text ,prefix ,offered ,withheld)
+                       '(("db." ""
+                          ("users" "orders" "runCommand()") ("getSiblingDB()"))
+                         ("db.users." ""
+                          ("find()" "aggregate()" "countDocuments()"
+                           "find({}).limit(20)"
+                           "aggregate([{ $match: {} }, { $limit: 20 }])")
+                          ("estimatedDocumentCount()"))
+                         ("db.users.find({})." ""
+                          ("limit()" "sort()" "explain()") ("batchSize()" "find()"))
+                         ("db.users.find({}).sort({createdAt: -1})." ""
+                          ("limit()" "skip()") nil)
+                         ("db.users.aggregate([])." ""
+                          ("allowDiskUse()" "maxTimeMS()" "explain()") ("limit()"))
+                         ("db.orders.aggregate([{$" "$"
+                          ("$match" "$lookup" "$sum" "$dateTrunc") ("$vectorSearch"))
+                         ("db.orders.find({st" "st" ("status") ("find()"))
+                         ("db.orders.aggregate([{$group:{_id:\"$u" "$u"
+                          ("$userId") nil)
+                         ("db.orders.aggregate([{$lookup:{from:\"pro" "pro"
+                          ("products") nil)
+                         ("db.orders.aggregate([{$merge:{into:\"pro" "pro"
+                          ("products") nil)))
+          (ert-info ((format "candidates after %S" text))
+            (erase-buffer)
+            (insert text)
+            (let* ((capf (clutch-mongodb-completion-at-point))
+                   (candidates (all-completions prefix (nth 2 capf))))
+              (should (= (cadr capf) (point)))
+              (should (= (- (cadr capf) (car capf)) (length prefix)))
+              (dolist (candidate offered)
+                (should (member candidate candidates)))
+              (dolist (candidate withheld)
+                (should-not (member candidate candidates))))))
+        (pcase-dolist (`(,text ,prefix ,completed)
+                       '(("db.users.fi" "fi" "db.users.find()")
+                         ("db.users.find({}).li" "li" "db.users.find({}).limit()")))
+          (ert-info ((format "completing after %S" text))
+            (erase-buffer)
+            (insert text)
+            (cl-letf (((symbol-function 'completion-in-region)
+                       (lambda (beg end collection &optional _predicate)
+                         (delete-region beg end)
+                         (insert (car (all-completions prefix collection)))
+                         t)))
+              (clutch-mongodb-complete-at-point)
+              (should (equal (buffer-string) completed)))))
+        (pcase-dolist (`(,text ,key ,completed)
+                       '(("db.orders.find({st" "status" "db.orders.find({status: ")
+                         ("db.orders.aggregate([{$m" "$match"
+                          "db.orders.aggregate([{$match: ")))
+          (ert-info ((format "finishing key %S" key))
+            (erase-buffer)
+            (insert text)
+            (pcase-let ((`(,beg ,end ,_collection . ,plist)
+                         (clutch-mongodb-completion-at-point)))
+              (delete-region beg end)
+              (insert key)
+              (funcall (plist-get plist :exit-function) key 'finished)
+              (should (equal (buffer-string) completed)))))))))
 
 (ert-deftest clutch-test-mongodb-completion-defers-uncached-field-sampling ()
   "Installed MongoDB CAPF should defer uncached field metadata sampling."
@@ -2523,132 +2173,36 @@ connecting again, but it came before the console was shown."
 
 (ert-deftest clutch-test-mongodb-explain-query-at-point-uses-current-helper ()
   "MongoDB explain command should explain the current helper at point."
-  (let (captured displayed)
+  (let ((conn (make-clutch-test-conn))
+        captured)
     (with-temp-buffer
       (clutch-mongodb-mode)
-      (setq-local clutch-connection 'mongo-conn)
+      (setq-local clutch-connection conn)
       (insert "db.users.find({active: true}).limit(5)")
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 #'ignore)
-                ((symbol-function 'clutch-db-explain-query)
+      (cl-letf (((symbol-function 'clutch-db-explain-query)
                  (lambda (conn query)
                    (setq captured (list conn query))
-                   "{\"summary\":{\"winningStage\":\"IXSCAN\"}}"))
-                ((symbol-function 'clutch--show-json-text-buffer)
-                 (lambda (buffer-name text)
-                   (setq displayed (list buffer-name text)))))
-        (clutch-mongodb-explain-query-at-point)))
-    (should (equal captured
-                   '(mongo-conn "db.users.find({active: true}).limit(5)")))
-    (should (equal displayed
-                   '("*clutch mongodb: explain*"
-                     "{\"summary\":{\"winningStage\":\"IXSCAN\"}}")))))
+                   "{\"summary\":{\"winningStage\":\"IXSCAN\"}}")))
+        (clutch-test--with-pop-to-buffer-capture shown
+          (clutch-mongodb-explain-query-at-point)
+          (should (equal captured
+                         (list conn "db.users.find({active: true}).limit(5)")))
+          (should (equal (buffer-name shown) "*clutch mongodb: explain*"))
+          (should (string-match-p "IXSCAN"
+                                  (with-current-buffer shown
+                                    (buffer-string)))))))))
 
-(ert-deftest clutch-test-mongodb-completion-uses-cursor-chain-candidates ()
-  "MongoDB completion should offer cursor helpers after chainable queries."
+(ert-deftest clutch-test-mongodb-mode-setup ()
+  "MongoDB query buffers should be set up for MQL without SQL transaction keys.
+The mode is a `prog-mode', not a `js-mode', with its own indentation and
+`//' comments, and does not expose the SQL commit, rollback and
+auto-commit keys."
   (with-temp-buffer
     (clutch-mongodb-mode)
-    (insert "db.users.find({}).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "limit()" candidates))
-      (should (member "sort()" candidates))
-      (should (member "explain()" candidates))
-      (should-not (member "batchSize()" candidates))
-      (should-not (member "find()" candidates)))
-    (erase-buffer)
-    (insert "db.users.find({}).sort({createdAt: -1}).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "limit()" candidates))
-      (should (member "skip()" candidates)))
-    (erase-buffer)
-    (insert "db.users.aggregate([]).")
-    (let* ((capf (clutch-mongodb-completion-at-point))
-           (candidates (all-completions "" (nth 2 capf))))
-      (should (member "allowDiskUse()" candidates))
-      (should (member "maxTimeMS()" candidates))
-      (should (member "explain()" candidates))
-      (should-not (member "limit()" candidates)))
-    (erase-buffer)
-    (insert "db.users.find({}).li")
-    (cl-letf (((symbol-function 'completion-in-region)
-               (lambda (beg end collection &optional _predicate)
-                 (delete-region beg end)
-                 (insert (car (all-completions
-                               "li" collection)))
-                 t)))
-      (clutch-mongodb-complete-at-point)
-      (should (equal (buffer-string) "db.users.find({}).limit()")))))
-
-(ert-deftest clutch-test-mongodb-completion-offers-mql-operators-and-fields ()
-  "MongoDB completion should offer MQL operators and sampled field names."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "orders" '("status" "userId" "items.productId") schema)
-    (puthash "products" '("sku" "category") schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
-      (with-temp-buffer
-        (clutch-mongodb-mode)
-        (insert "db.orders.aggregate([{$")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "$" (nth 2 capf))))
-          (should (member "$match" candidates))
-          (should (member "$lookup" candidates))
-          (should (member "$sum" candidates))
-          (should (member "$dateTrunc" candidates))
-          (should-not (member "$vectorSearch" candidates)))
-        (erase-buffer)
-        (insert "db.orders.find({st")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "st" (nth 2 capf))))
-          (should (member "status" candidates))
-          (should-not (member "find()" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$group:{_id:\"$u")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "$u" (nth 2 capf))))
-          (should (member "$userId" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$lookup:{from:\"pro")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "pro" (nth 2 capf))))
-          (should (member "products" candidates)))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$merge:{into:\"pro")
-        (let* ((capf (clutch-mongodb-completion-at-point))
-               (candidates (all-completions "pro" (nth 2 capf))))
-          (should (member "products" candidates)))))))
-
-(ert-deftest clutch-test-mongodb-completion-inserts-key-colon ()
-  "MongoDB field and operator completion should add a key separator."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "orders" '("status" "userId") schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
-      (with-temp-buffer
-        (clutch-mongodb-mode)
-        (insert "db.orders.find({st")
-        (pcase-let ((`(,beg ,end ,collection . ,plist)
-                     (clutch-mongodb-completion-at-point)))
-          (delete-region beg end)
-          (insert "status")
-          (funcall (plist-get plist :exit-function) "status" 'finished)
-          (should (equal (buffer-string) "db.orders.find({status: ")))
-        (erase-buffer)
-        (insert "db.orders.aggregate([{$m")
-        (pcase-let ((`(,beg ,end ,collection . ,plist)
-                     (clutch-mongodb-completion-at-point)))
-          (delete-region beg end)
-          (insert "$match")
-          (funcall (plist-get plist :exit-function) "$match" 'finished)
-          (should (equal (buffer-string)
-                         "db.orders.aggregate([{$match: ")))))))
-
-(ert-deftest clutch-test-mongodb-mode-keymap-keeps-document-actions-only ()
-  "MongoDB query buffers should not expose SQL transaction keys."
-  (with-temp-buffer
-    (clutch-mongodb-mode)
+    (should (derived-mode-p 'prog-mode))
+    (should-not (derived-mode-p 'js-mode))
+    (should (eq indent-line-function #'clutch-mongodb-indent-line))
+    (should (equal comment-start "// "))
     (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a"))
       (should-not (lookup-key clutch-mongodb-mode-map (kbd key))))))
 
@@ -2686,46 +2240,16 @@ connecting again, but it came before the console was shown."
 
 (ert-deftest clutch-test-object-browse-query-uses-backend-specific-query ()
   "Object browsing should use a backend-specific query before SQL formatting."
-  (cl-letf (((symbol-function 'clutch-db-object-browse-query)
-             (lambda (conn entry)
-               (should (eq conn 'document-conn))
-               (should (equal entry '(:name "users")))
-               "doc.browse(\"users\");"))
-            ((symbol-function 'clutch--object-sql-name)
-             (lambda (&rest _args)
-               (ert-fail "SQL formatter should not run when backend handles browsing"))))
-    (should (equal (clutch--object-browse-query 'document-conn '(:name "users"))
-                   "doc.browse(\"users\");"))))
-
-(ert-deftest clutch-test-object-browse-query-errors-for-document-backend-without-query ()
-  "Native document backends should not silently fall back to SQL browsing."
-  (cl-letf (((symbol-function 'clutch-db-backend-key)
-             (lambda (_conn) 'mongodb))
-            ((symbol-function 'clutch-backend-data-model)
-             (lambda (_backend) 'document))
-            ((symbol-function 'clutch-db-object-browse-query)
-             (lambda (&rest _args) nil))
-            ((symbol-function 'clutch--object-sql-name)
-             (lambda (&rest _args)
-               (ert-fail "SQL formatter should not run for document browsing"))))
-    (should-error
-     (clutch--object-browse-query 'document-conn '(:name "users"))
-     :type 'user-error)))
+  (let ((conn (make-clutch-mongodb-conn :database "app")))
+    (should (equal (clutch--object-browse-query conn '(:name "users"))
+                   "db.getCollection(\"users\").find({}).limit(20);"))))
 
 (ert-deftest clutch-test-object-browse-query-uses-sql-for-sql-interface-mongodb ()
   "MongoDB SQL Interface object browsing should insert SELECT SQL."
   (require 'clutch-db-jdbc)
   (let ((conn (make-clutch-jdbc-conn :params '(:driver mongodb))))
-    (cl-letf (((symbol-function 'clutch-db-backend-key)
-               (lambda (_conn) 'mongodb))
-              ((symbol-function 'clutch-db-object-browse-query)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--object-sql-name)
-               (lambda (_conn entry)
-                 (plist-get entry :name))))
-      (should (equal (clutch--object-browse-query
-                      conn '(:name "users") '(:surface sql-interface))
-                     "SELECT * FROM users;")))))
+    (should (equal (clutch--object-browse-query conn '(:name "users"))
+                   "SELECT * FROM \"users\";"))))
 
 (ert-deftest clutch-test-connection-display-key-derives-generic-jdbc-endpoint ()
   "Generic JDBC connections should show endpoint details derived from :url."
@@ -2740,48 +2264,33 @@ connecting again, but it came before the console was shown."
 
 ;;;; Connection — reconnect and disconnect
 
-(ert-deftest clutch-test-disconnect-blocks-dirty-manual-commit-connection ()
-  "Disconnect should warn before dropping uncommitted manual-commit work."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection 'fake-conn)
-        disconnected)
-    (puthash clutch-connection 'dirty clutch--tx-state-cache)
-    (cl-letf (((symbol-function 'clutch-db-manual-commit-p) (lambda (_conn) t))
-              ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-              ((symbol-function 'yes-or-no-p) (lambda (_prompt) nil))
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (setq disconnected t))))
-      (should-error (clutch-disconnect) :type 'user-error)
-      (should-not disconnected)
-      (should clutch-connection)
-      (should (clutch--tx-dirty-p clutch-connection)))))
-
-(ert-deftest clutch-test-disconnect-asks-for-auto-mode-uncommitted-work ()
-  "Disconnect should ask before dropping work of a transaction begun in Auto mode.
-Only Manual mode asked, so the work of a typed BEGIN and INSERT was lost
-without a question.  `clutch-commit' and `clutch-rollback' stay Manual
-mode commands and say how to end such a transaction."
-  (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection 'fake-conn)
-        prompts disconnected)
-    (puthash clutch-connection 'dirty clutch--tx-state-cache)
-    (cl-letf (((symbol-function 'clutch-db-manual-commit-p) #'ignore)
-              ((symbol-function 'clutch-db-manual-commit-supported-p) #'always)
-              ((symbol-function 'clutch--connection-alive-p) #'always)
-              ((symbol-function 'yes-or-no-p)
-               (lambda (prompt) (push prompt prompts) nil))
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (setq disconnected t))))
-      (should-error (clutch-disconnect) :type 'user-error)
-      (should (string-match-p "Uncommitted changes will be lost" (car prompts)))
-      (should-not disconnected)
-      (should (clutch--tx-dirty-p clutch-connection))
-      (dolist (command '(clutch-commit clutch-rollback))
-        (should (string-match-p
-                 "COMMIT or ROLLBACK"
-                 (error-message-string
-                  (should-error (funcall command) :type 'user-error)))))
-      (should (clutch--tx-dirty-p clutch-connection)))))
+(ert-deftest clutch-test-disconnect-asks-before-dropping-uncommitted-work ()
+  "Disconnect should ask before dropping uncommitted work in either commit mode.
+Only Manual mode asked, so the work of a typed BEGIN and INSERT in Auto
+mode was lost without a question.  `clutch-commit' and `clutch-rollback'
+stay Manual mode commands and say how to end such a transaction."
+  (dolist (mode '(manual auto))
+    (ert-info ((format "commit mode: %s" mode))
+      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+            (conn (make-clutch-test-conn :commit-mode mode))
+            prompts)
+        (with-temp-buffer
+          (setq-local clutch-connection conn)
+          (puthash conn 'dirty clutch--tx-state-cache)
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (push prompt prompts) nil)))
+            (should-error (clutch-disconnect) :type 'user-error)
+            (should (string-match-p "Uncommitted changes will be lost" (car prompts)))
+            (should (clutch-db-live-p conn))
+            (should (eq clutch-connection conn))
+            (should (clutch--tx-dirty-p conn))
+            (when (eq mode 'auto)
+              (dolist (command '(clutch-commit clutch-rollback))
+                (should (string-match-p
+                         "COMMIT or ROLLBACK"
+                         (error-message-string
+                          (should-error (funcall command) :type 'user-error)))))
+              (should (clutch--tx-dirty-p conn)))))))))
 
 (ert-deftest clutch-test-toggle-to-manual-adopts-a-transaction-begun-with-sql ()
   "Switching to Manual mode should keep the work of a transaction begun in Auto.
@@ -2789,46 +2298,34 @@ Refusing it left a staged batch, which Auto mode refuses inside such a
 transaction, nowhere to go.  Leaving Manual mode with work, or either
 way with an uncertain outcome, is still refused."
   (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
-        (clutch-connection 'fake-conn)
-        (manual nil)
-        modes)
-    (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p) #'always)
-              ((symbol-function 'clutch-db-manual-commit-p)
-               (lambda (_conn) manual))
-              ((symbol-function 'clutch-db-set-auto-commit)
-               (lambda (_conn auto-commit)
-                 (push auto-commit modes)
-                 (setq manual (not auto-commit))))
-              ((symbol-function 'clutch--connection-alive-p) #'always)
-              ((symbol-function 'clutch--refresh-transaction-ui) #'ignore))
-      (puthash clutch-connection 'dirty clutch--tx-state-cache)
+        (conn (make-clutch-test-conn :commit-mode 'auto)))
+    (with-temp-buffer
+      (setq-local clutch-connection conn)
+      (puthash conn 'dirty clutch--tx-state-cache)
       (clutch-toggle-auto-commit)
-      (should manual)
-      (should (clutch--tx-dirty-p clutch-connection))
+      (should (eq (clutch-test-conn-commit-mode conn) 'manual))
+      (should (clutch--tx-dirty-p conn))
       (should-error (clutch-toggle-auto-commit) :type 'user-error)
-      (should manual)
-      (setq manual nil)
-      (puthash clutch-connection 'uncertain clutch--tx-state-cache)
+      (should (eq (clutch-test-conn-commit-mode conn) 'manual))
+      (setf (clutch-test-conn-commit-mode conn) 'auto)
+      (puthash conn 'uncertain clutch--tx-state-cache)
       (should-error (clutch-toggle-auto-commit) :type 'user-error)
-      (should (equal modes '(nil))))))
+      (should (eq (clutch-test-conn-commit-mode conn) 'auto)))))
 
 (ert-deftest clutch-test-connect-refuses-while-a-query-runs ()
   "Connecting elsewhere should wait for the statement running on the buffer.
 The server finished a statement whose connection was closed under it."
-  (let ((clutch-connection 'fake-conn)
-        (clutch--running-queries (make-hash-table :test 'eq))
-        prompted disconnected)
-    (puthash clutch-connection (list :buffer (current-buffer))
-             clutch--running-queries)
-    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-              ((symbol-function 'clutch--connect-params-for-current-buffer)
-               (lambda () (setq prompted t) nil))
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (setq disconnected t))))
-      (should-error (clutch-connect) :type 'user-error)
-      (should-not prompted)
-      (should-not disconnected)
-      (should (eq clutch-connection 'fake-conn)))))
+  (clutch-test--with-sqlite-connection conn
+    (let ((clutch--running-queries (make-hash-table :test 'eq))
+          (clutch-connection-alist nil))
+      (with-temp-buffer
+        (setq-local clutch-connection conn)
+        (puthash conn (list :buffer (current-buffer)) clutch--running-queries)
+        ;; A prompt would run out of answers and fail the test.
+        (clutch-test--with-minibuffer-answers nil
+          (should-error (clutch-connect) :type 'user-error))
+        (should (clutch-db-live-p conn))
+        (should (eq clutch-connection conn))))))
 
 (ert-deftest clutch-test-switch-schema-refuses-while-a-query-runs ()
   "Switching schema should wait for the statement running on the connection.
@@ -2850,7 +2347,6 @@ the statement, and a switch that reconnects closed the connection under it."
   "A statement whose connection is closed under it should not report failure.
 The server may still finish it, so its outcome is unknown; an error that
 arrived before the disconnect, waiting to be shown, keeps its message."
-  (require 'clutch-db-sqlite)
   (let ((clutch--running-queries (make-hash-table :test 'eq))
         reply errors)
     (cl-letf (((symbol-function 'clutch-db-query-async)
@@ -2877,124 +2373,93 @@ arrived before the disconnect, waiting to be shown, keeps its message."
 
 (ert-deftest clutch-test-disconnect-refreshes-derived-result-footer ()
   "Disconnect should refresh result chrome without replacing its table header."
-  (require 'clutch-db-sqlite)
-  (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-        (params '(:backend sqlite :database ":memory:"))
-        (result (generate-new-buffer " *clutch-disconnect-result*")))
-    (unwind-protect
-        (with-temp-buffer
-          (clutch-mode)
-          (clutch--bind-connection-context conn params 'sqlite)
-          (with-current-buffer result
-            (clutch-result-mode)
+  (clutch-test--with-sqlite-connection conn
+    (let ((params '(:backend sqlite :database ":memory:"))
+          (result (generate-new-buffer " *clutch-disconnect-result*")))
+      (unwind-protect
+          (with-temp-buffer
+            (clutch-mode)
             (clutch--bind-connection-context conn params 'sqlite)
-            (setq-local clutch--result-rows '((1))
-                        clutch--filtered-rows nil
-                        clutch--page-current 0
-                        clutch--page-total-rows 1
-                        clutch-result-max-rows 100
-                        header-line-format "TABLE")
-            (clutch--refresh-footer-line)
-            (should-not
-             (string-match-p
-              "DISCONNECTED"
-              (substring-no-properties
-               (clutch--footer-mode-line-display)))))
-          (with-current-buffer result
-            (clutch-disconnect))
-          (should-not (clutch-db-live-p conn))
-          (with-current-buffer result
-            (should-not clutch-connection)
-            (should (equal header-line-format "TABLE"))
-            (should
-             (string-match-p
-              "DISCONNECTED"
-              (substring-no-properties
-               (clutch--footer-mode-line-display))))))
-      (when (clutch-db-live-p conn)
-        (clutch-db-disconnect conn))
-      (when (buffer-live-p result)
-        (kill-buffer result)))))
+            (with-current-buffer result
+              (clutch-result-mode)
+              (clutch--bind-connection-context conn params 'sqlite)
+              (setq-local clutch--result-rows '((1))
+                          clutch--filtered-rows nil
+                          clutch--page-current 0
+                          clutch--page-total-rows 1
+                          clutch-result-max-rows 100
+                          header-line-format "TABLE")
+              (clutch--refresh-footer-line)
+              (should-not
+               (string-match-p
+                "DISCONNECTED"
+                (substring-no-properties
+                 (clutch--footer-mode-line-display)))))
+            (with-current-buffer result
+              (clutch-disconnect))
+            (should-not (clutch-db-live-p conn))
+            (with-current-buffer result
+              (should-not clutch-connection)
+              (should (equal header-line-format "TABLE"))
+              (should
+               (string-match-p
+                "DISCONNECTED"
+                (substring-no-properties
+                 (clutch--footer-mode-line-display))))))
+        (when (buffer-live-p result)
+          (kill-buffer result))))))
 
 (ert-deftest clutch-test-do-disconnect-stops-ssh-tunnel ()
   "Disconnect should stop any SSH tunnel associated with the connection."
-  (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
-        disconnected
-        stopped)
-    (puthash 'fake-conn '(:kind ssh :process fake-proc) clutch--connection-transport-cache)
-    (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
-              ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
-              ((symbol-function 'clutch--clear-tx-state) #'ignore)
-              ((symbol-function 'clutch--forget-problem-record) #'ignore)
-              ((symbol-function 'clutch--clear-connection-metadata-caches) #'ignore)
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (setq disconnected t)))
-              ((symbol-function 'process-live-p)
-               (lambda (proc) (eq proc 'fake-proc)))
-              ((symbol-function 'delete-process)
-               (lambda (proc) (setq stopped proc))))
-      (clutch--do-disconnect 'fake-conn)
-      (should disconnected)
-      (should (eq stopped 'fake-proc))
-      (should-not (gethash 'fake-conn clutch--connection-transport-cache)))))
-
-(ert-deftest clutch-test-do-disconnect-clears-schema-metadata-state ()
-  "Disconnect should clear schema refresh state for the connection object."
-  (clutch-test--with-isolated-metadata-caches
-    (let ((conn (list 'fake-conn))
-          (other-conn (list 'fake-conn))
-          (clutch--schema-cache (make-hash-table :test 'eq))
-          (clutch--schema-status-cache (make-hash-table :test 'eq))
-          (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
-          (clutch--schema-cache-updated-hook nil))
-      (puthash conn '(:state refreshing) clutch--schema-status-cache)
-      (puthash conn 7 clutch--schema-refresh-tickets)
-      (puthash conn (make-hash-table :test 'equal) clutch--schema-cache)
-      (puthash other-conn '(:state ready) clutch--schema-status-cache)
-      (should (equal conn other-conn))
-      (should-not (eq conn other-conn))
-      (cl-letf (((symbol-function 'clutch--mark-dml-results-connection-closed) #'ignore)
-                ((symbol-function 'clutch--invalidate-derived-buffers) #'ignore)
-                ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                ((symbol-function 'clutch--forget-problem-record) #'ignore)
-                ((symbol-function 'clutch-db-disconnect) #'ignore))
-        (clutch--do-disconnect conn)
-        (should-not (gethash conn clutch--schema-status-cache))
-        (should-not (gethash conn clutch--schema-refresh-tickets))
-        (should-not (gethash conn clutch--schema-cache))
-        (should (equal (gethash other-conn clutch--schema-status-cache)
-                       '(:state ready)))))))
-
-(ert-deftest clutch-test-kill-dead-console-clears-schema-metadata-state ()
-  "Killing a console with a dead connection should clear schema state."
-  (clutch-test--with-isolated-metadata-caches
-    (let ((conn (list 'dead-conn))
-          (console (generate-new-buffer " *clutch-dead-console*"))
-          (clutch--schema-status-cache (make-hash-table :test 'eq))
-          (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
-          (clutch--schema-cache-updated-hook nil)
-          disconnected)
-      (puthash conn '(:state refreshing) clutch--schema-status-cache)
-      (puthash conn 7 clutch--schema-refresh-tickets)
+  (skip-unless (executable-find "sleep"))
+  (clutch-test--with-sqlite-connection conn
+    (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
+          (proc (start-process "clutch-test-tunnel" nil "sleep" "60")))
       (unwind-protect
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                    (lambda (_conn) nil))
-                   ((symbol-function 'clutch--mark-dml-results-connection-closed)
-                    #'ignore)
-                   ((symbol-function 'clutch--invalidate-derived-buffers)
-                    #'ignore)
-                   ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                   ((symbol-function 'clutch--forget-problem-record) #'ignore)
-                   ((symbol-function 'clutch-db-disconnect)
-                    (lambda (_conn) (setq disconnected t))))
-          (with-current-buffer console
-            (clutch-mode)
-            (setq-local clutch-connection conn))
-          (kill-buffer console)
-          (should-not disconnected)
-          (should-not (gethash conn clutch--schema-status-cache))
-          (should-not (gethash conn clutch--schema-refresh-tickets)))
-        (when (buffer-live-p console) (kill-buffer console))))))
+          (progn
+            (puthash conn (list :kind 'ssh :process proc)
+                     clutch--connection-transport-cache)
+            (clutch--do-disconnect conn)
+            (should-not (clutch-db-live-p conn))
+            (should-not (process-live-p proc))
+            (should-not (gethash conn clutch--connection-transport-cache)))
+        (when (process-live-p proc) (delete-process proc))))))
+
+(ert-deftest clutch-test-teardown-clears-the-connections-schema-metadata-state ()
+  "Ending a session should clear schema refresh state for its connection object.
+That holds for disconnecting a live connection and for killing a console
+whose connection is already dead, which is not closed again; an equal but
+distinct connection keeps its state."
+  (pcase-dolist (`(,label ,live)
+                 '(("disconnecting a live connection" t)
+                   ("killing a console whose connection is dead" nil)))
+    (ert-info (label)
+      (clutch-test--with-isolated-metadata-caches
+        (let ((conn (make-clutch-test-conn :live live))
+              (other-conn (make-clutch-test-conn :live live))
+              (console (generate-new-buffer " *clutch-dead-console*")))
+          (should (equal conn other-conn))
+          (should-not (eq conn other-conn))
+          (puthash conn '(:state refreshing) clutch--schema-status-cache)
+          (puthash conn 7 clutch--schema-refresh-tickets)
+          (puthash conn (make-hash-table :test 'equal) clutch--schema-cache)
+          (puthash other-conn '(:state ready) clutch--schema-status-cache)
+          (unwind-protect
+              (progn
+                (if live
+                    (clutch--do-disconnect conn)
+                  (with-current-buffer console
+                    (clutch-mode)
+                    (setq-local clutch-connection conn))
+                  (cl-letf (((symbol-function 'clutch-db-disconnect)
+                             (lambda (_conn) (ert-fail "closed a dead connection"))))
+                    (kill-buffer console)))
+                (should-not (gethash conn clutch--schema-status-cache))
+                (should-not (gethash conn clutch--schema-refresh-tickets))
+                (should-not (gethash conn clutch--schema-cache))
+                (should (equal (gethash other-conn clutch--schema-status-cache)
+                               '(:state ready))))
+            (when (buffer-live-p console) (kill-buffer console))))))))
 
 (ert-deftest clutch-test-refresh-schema-status-ui-matches-connection-identity ()
   "Schema status refresh should update only buffers attached to the same object."
@@ -3036,285 +2501,206 @@ arrived before the disconnect, waiting to be shown, keeps its message."
 
 (ert-deftest clutch-test-refresh-schema-status-ui-skips-inherited-default-revert ()
   "Schema status refresh should not revert an unrelated attached buffer."
-  (let ((conn (list 'attached-conn))
-        (attached (generate-new-buffer " *clutch-schema-status-attached*"))
-        (original-default (default-value 'revert-buffer-function))
-        default-reverted)
-    (unwind-protect
-        (progn
-          (set-default 'revert-buffer-function
-                       (lambda (&rest _args)
-                         (setq default-reverted t)))
-          (with-current-buffer attached
-            (kill-local-variable 'revert-buffer-function)
-            (setq-local clutch-connection conn)
-            (should-not (local-variable-p 'revert-buffer-function)))
-          (cl-letf (((symbol-function 'clutch--refresh-connection-render-state)
-                     #'ignore))
-            (clutch--refresh-schema-status-ui conn))
-          (should-not default-reverted))
-      (set-default 'revert-buffer-function original-default)
-      (when (buffer-live-p attached)
-        (kill-buffer attached)))))
+  (clutch-test--with-sqlite-connection conn
+    (let ((attached (generate-new-buffer " *clutch-schema-status-attached*"))
+          (original-default (default-value 'revert-buffer-function))
+          default-reverted)
+      (unwind-protect
+          (progn
+            (set-default 'revert-buffer-function
+                         (lambda (&rest _args)
+                           (setq default-reverted t)))
+            (with-current-buffer attached
+              (kill-local-variable 'revert-buffer-function)
+              (setq-local clutch-connection conn)
+              (should-not (local-variable-p 'revert-buffer-function)))
+            (clutch--refresh-schema-status-ui conn)
+            (should-not default-reverted))
+        (set-default 'revert-buffer-function original-default)
+        (when (buffer-live-p attached)
+          (kill-buffer attached))))))
 
-(ert-deftest clutch-test-kill-non-owner-buffers-does-not-disconnect ()
-  "Killing indirect SQL or derived result buffers should not disconnect."
-  (dolist (case '((indirect " *clutch-indirect*")
-                  (result " *clutch-result-kill*")))
-    (pcase-let ((`(,kind ,name) case))
-      (ert-info ((format "kind: %s" kind))
-        (let ((disconnected nil)
-              (buf (generate-new-buffer name)))
+(ert-deftest clutch-test-kill-buffer-ends-the-session-only-from-its-owner ()
+  "Killing a buffer should end its session only when the buffer owns it.
+Killing a plain SQL buffer or a REPL disconnects and invalidates derived
+buffers; killing an indirect SQL edit or a derived result buffer does not
+disconnect."
+  (pcase-dolist (`(,label ,kind ,owner)
+                 '(("plain SQL buffer" clutch-mode t)
+                   ("REPL" clutch-repl-mode t)
+                   ("indirect SQL edit" indirect nil)
+                   ("derived result buffer" clutch-result-mode nil)))
+    (ert-info (label)
+      (clutch-test--with-sqlite-connection conn
+        (let ((buf (generate-new-buffer " *clutch-killed*"))
+              (result (generate-new-buffer " *clutch-derived-result*")))
           (unwind-protect
-              (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                         (lambda (_c) t))
-                        ((symbol-function 'clutch-db-disconnect)
-                         (lambda (_c) (setq disconnected t)))
-                        ((symbol-function 'clutch--save-console) #'ignore)
-                        ((symbol-function 'clutch--result-buffer-cleanup)
-                         #'ignore))
+              (progn
+                (with-current-buffer result
+                  (setq-local clutch-connection conn))
                 (with-current-buffer buf
                   (pcase kind
                     ('indirect
                      (clutch-mode)
                      (clutch--indirect-mode 1))
-                    ('result
-                     (clutch-result-mode)))
-                  (setq clutch-connection 'fake-conn))
-                (kill-buffer buf))
-            (when (buffer-live-p buf) (kill-buffer buf)))
-          (should-not disconnected))))))
-
-(ert-deftest clutch-test-kill-owner-buffers-disconnect ()
-  "Killing an owner buffer disconnects and invalidates derived buffers."
-  (dolist (case '((plain-sql " *clutch-plain-sql*" clutch-mode)
-                  (repl " *clutch-repl-kill*" clutch-repl-mode)))
-    (pcase-let ((`(,kind ,name ,mode-fn) case))
-      (ert-info ((format "kind: %s" kind))
-        (let ((disconnected nil)
-              (buf (generate-new-buffer name))
-              (result (generate-new-buffer " *clutch-derived-result*")))
-          (unwind-protect
-              (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                         (lambda (_c) t))
-                        ((symbol-function 'clutch-db-disconnect)
-                         (lambda (_c) (setq disconnected t)))
-                        ((symbol-function
-                          'clutch--confirm-session-close)
-                         #'ignore)
-                        ((symbol-function
-                          'clutch--mark-dml-results-connection-closed)
-                         #'ignore)
-                        ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                        ((symbol-function 'clutch--clear-connection-metadata-caches)
-                         #'ignore)
-                        ((symbol-function 'clutch--save-console) #'ignore))
-                (with-current-buffer result
-                  (setq-local clutch-connection 'fake-conn))
-                (with-current-buffer buf
-                  (funcall mode-fn)
-                  (setq clutch-connection 'fake-conn))
+                    (_ (funcall kind)))
+                  (setq clutch-connection conn))
                 (kill-buffer buf)
-                (should disconnected)
-                ;; Buffers derived from the dead session lose their binding.
-                (should-not (buffer-local-value 'clutch-connection result)))
+                (if owner
+                    (progn
+                      (should-not (clutch-db-live-p conn))
+                      ;; Buffers derived from the dead session lose their binding.
+                      (should-not (buffer-local-value 'clutch-connection result)))
+                  (should (clutch-db-live-p conn))
+                  (should (eq (buffer-local-value 'clutch-connection result) conn))))
             (when (buffer-live-p buf) (kill-buffer buf))
             (when (buffer-live-p result) (kill-buffer result))))))))
 
 (ert-deftest clutch-test-reconnect-invalidates-derived-buffers ()
   "Explicit reconnect should invalidate old attachments before priming metadata."
   (clutch-test--with-isolated-metadata-caches
-    (let ((old-conn (list 'old))
-          (new-conn (list 'new))
-          (other-conn (list 'other))
-          (result (generate-new-buffer " *clutch-result-reconnect*"))
-          prime-called
-          status-before-prime)
+    (let* ((db-file (make-temp-file "clutch-reconnect-" nil ".db"))
+           (old-conn (clutch-db-sqlite-connect '(:database ":memory:")))
+           (other-conn (clutch-db-sqlite-connect '(:database ":memory:")))
+           (result (generate-new-buffer " *clutch-result-reconnect*"))
+           (clutch-connection-alist nil)
+           (prime (symbol-function 'clutch--prime-schema-cache))
+           new prime-called status-before-prime)
       (puthash old-conn '(:state refreshing) clutch--schema-status-cache)
       (puthash old-conn 7 clutch--schema-refresh-tickets)
       (puthash other-conn '(:state ready) clutch--schema-status-cache)
       (unwind-protect
           (with-temp-buffer
+            (clutch-mode)
             (setq-local clutch-connection old-conn)
             (with-current-buffer result
               (setq-local clutch-connection old-conn))
-            (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                       (lambda (conn) (memq conn (list old-conn new-conn))))
-                      ((symbol-function 'clutch-db-disconnect) #'ignore)
-                      ((symbol-function 'clutch--confirm-session-close)
-                       #'ignore)
-                      ((symbol-function 'clutch--mark-dml-results-connection-closed)
-                       #'ignore)
-                      ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                      ((symbol-function 'clutch--read-connection-params)
-                       (lambda () '(:backend mysql :host "localhost")))
-                      ((symbol-function 'clutch--effective-sql-product)
-                       (lambda (_params) 'mysql))
-                      ((symbol-function 'clutch--build-conn)
-                       (lambda (_params) new-conn))
-                      ((symbol-function 'clutch--bind-connection-context)
-                       (lambda (conn &optional _params _product)
-                         (setq-local clutch-connection conn)))
-                      ((symbol-function 'clutch--prime-schema-cache)
-                       (lambda (_conn)
-                         (setq prime-called t)
-                         (setq status-before-prime
-                               (gethash old-conn clutch--schema-status-cache))))
-                      ((symbol-function 'clutch--update-mode-line) #'ignore)
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (_conn) "test")))
-              (clutch-connect)
-              (should (eq clutch-connection new-conn))
-              (should-not (buffer-local-value 'clutch-connection result))
-              (should prime-called)
-              (should-not status-before-prime)
-              (should-not (gethash old-conn clutch--schema-status-cache))
-              (should-not (gethash old-conn clutch--schema-refresh-tickets))
-              (should (equal (gethash other-conn clutch--schema-status-cache)
-                             '(:state ready)))))
+            (cl-letf (((symbol-function 'clutch--prime-schema-cache)
+                       (lambda (conn)
+                         (setq prime-called t
+                               status-before-prime
+                               (gethash old-conn clutch--schema-status-cache))
+                         (funcall prime conn))))
+              (clutch-test--with-minibuffer-answers (list "sqlite" db-file)
+                (clutch-connect)))
+            (setq new clutch-connection)
+            (should (clutch-db-live-p new))
+            (should-not (eq new old-conn))
+            (should-not (clutch-db-live-p old-conn))
+            (should-not (buffer-local-value 'clutch-connection result))
+            (should prime-called)
+            (should-not status-before-prime)
+            (should-not (gethash old-conn clutch--schema-status-cache))
+            (should-not (gethash old-conn clutch--schema-refresh-tickets))
+            (should (equal (gethash other-conn clutch--schema-status-cache)
+                           '(:state ready))))
         (when (buffer-live-p result)
-          (kill-buffer result))))))
+          (kill-buffer result))
+        (dolist (conn (list old-conn other-conn new))
+          (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn)))
+        (delete-file db-file)))))
 
 (ert-deftest clutch-test-try-reconnect-releases-old-ssh-transport ()
   "Reconnect should stop the old SSH tunnel after the new connection is ready."
-  (let (released cleared)
-    (with-temp-buffer
-      (setq-local clutch-connection 'old-conn
-                  clutch--connection-params '(:backend pg
-                                              :host "db.internal"
-                                              :port 5432
-                                              :ssh-host "bastion-prod")
-                  clutch--conn-sql-product 'pg)
-      (cl-letf (((symbol-function 'clutch--build-conn)
-                 (lambda (_params) 'new-conn))
-                ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                ((symbol-function 'clutch--release-connection-transport)
-                 (lambda (conn) (setq released conn)))
-                ((symbol-function 'clutch--clear-connection-problem-capture)
-                 (lambda (conn) (setq cleared conn)))
-                ((symbol-function 'clutch--rebind-connection-buffers) #'ignore)
-                ((symbol-function 'clutch--finalize-rebound-connection)
-                 (lambda (_conn) 'done))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "alice@db.internal:5432/appdb"))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'message) #'ignore))
-        (should (clutch--try-reconnect))
-        (should (eq released 'old-conn))
-        (should (eq cleared 'old-conn))))))
+  (skip-unless (executable-find "sleep"))
+  (let* ((db-file (make-temp-file "clutch-tunnel-" nil ".db"))
+         (params (list :backend 'sqlite :database db-file))
+         (old-conn (clutch-db-sqlite-connect params))
+         (proc (start-process "clutch-test-tunnel" nil "sleep" "60"))
+         (clutch--connection-transport-cache (make-hash-table :test 'eq))
+         (clutch--problem-records-by-conn (make-hash-table :test 'eq))
+         new)
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local clutch-connection old-conn
+                      clutch--connection-params params
+                      clutch--conn-sql-product 'sqlite)
+          (puthash old-conn (list :kind 'ssh :process proc)
+                   clutch--connection-transport-cache)
+          (puthash old-conn '(:summary "old") clutch--problem-records-by-conn)
+          (clutch-db-disconnect old-conn)
+          (should (clutch--try-reconnect))
+          (setq new clutch-connection)
+          (should (clutch-db-live-p new))
+          (should-not (process-live-p proc))
+          (should-not (gethash old-conn clutch--connection-transport-cache))
+          (should-not (gethash old-conn clutch--problem-records-by-conn)))
+      (when (process-live-p proc) (delete-process proc))
+      (when (and new (clutch-db-live-p new)) (clutch-db-disconnect new))
+      (delete-file db-file))))
 
-(ert-deftest clutch-test-replace-connection-rejects-dead-candidate-once ()
-  "Replacement should not retry or bind a candidate lost during teardown."
-  (let ((new-live t) released rebound (builds 0))
-    (cl-letf (((symbol-function 'clutch--build-conn)
-               (lambda (_params) (cl-incf builds) 'new-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (conn) (if (eq conn 'new-conn) new-live t)))
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (_conn) (setq new-live nil)))
-              ((symbol-function 'clutch--clear-tx-state) #'ignore)
-              ((symbol-function 'clutch--release-connection-transport)
-               (lambda (conn) (push conn released)))
-              ((symbol-function 'clutch--rebind-connection-buffers)
-               (lambda (&rest _args) (setq rebound t))))
-      (should-error
-       (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
-       :type 'clutch-db-error)
-      (should (= builds 1))
-      (should-not rebound)
-      (should (memq 'new-conn released))
-      (should (memq 'old-conn released)))))
-
-(ert-deftest clutch-test-replace-connection-releases-new-connection-when-old-teardown-signals ()
-  "A failing old-connection teardown must not orphan the new connection."
-  (let (disconnected released rebound)
-    (cl-letf (((symbol-function 'clutch--build-conn)
-               (lambda (_params) 'new-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (conn) (memq conn '(old-conn new-conn))))
-              ((symbol-function 'clutch--clear-tx-state) #'ignore)
-              ((symbol-function 'clutch-db-disconnect)
-               (lambda (conn)
-                 (if (eq conn 'old-conn)
-                     (signal 'clutch-db-error '("old teardown failed"))
-                   (setq disconnected conn))))
-              ((symbol-function 'clutch--release-connection-transport)
-               (lambda (conn) (push conn released)))
-              ((symbol-function 'clutch--rebind-connection-buffers)
-               (lambda (&rest _args) (setq rebound t))))
-      (should-error
-       (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
-       :type 'clutch-db-error)
-      (should-not rebound)
-      (should (eq disconnected 'new-conn))
-      (should (memq 'new-conn released)))))
-
-(ert-deftest clutch-test-replace-connection-releases-new-transport-on-failed-handover ()
-  "The new connection's transport is released however the handover fails.
-That includes a new connection that died meanwhile and a quit while
-disconnecting it."
-  (dolist (case '((:label new-died :new-disconnect nil)
-                  (:label cleanup-quit :new-disconnect quit)))
-    (ert-info ((format "case: %s" (plist-get case :label)))
+(ert-deftest clutch-test-replace-connection-discards-a-candidate-it-cannot-hand-over ()
+  "Replacement should discard a candidate it cannot hand over, without retrying.
+A candidate lost during the old teardown is neither retried nor bound.  A
+failing old-connection teardown must not orphan the new connection.  The
+new connection's transport is released however the handover fails,
+including when the new connection died meanwhile and when disconnecting
+it is quit."
+  (pcase-dolist (`(,label ,old-teardown ,new-teardown ,error ,new-closed)
+                 '(("the candidate dies during the old teardown"
+                    kill-new nil clutch-db-error nil)
+                   ("the old teardown signals"
+                    signal nil clutch-db-error t)
+                   ("the old teardown signals and the candidate died meanwhile"
+                    kill-all-and-signal nil clutch-db-error nil)
+                   ("quit while disconnecting the orphan"
+                    signal quit quit t)))
+    (ert-info (label)
       (let ((alive '(old-conn new-conn))
-            released)
+            (builds 0)
+            released rebound disconnected)
         (cl-letf (((symbol-function 'clutch--build-conn)
-                   (lambda (_params) 'new-conn))
+                   (lambda (_params) (cl-incf builds) 'new-conn))
                   ((symbol-function 'clutch--connection-alive-p)
                    (lambda (conn) (memq conn alive)))
                   ((symbol-function 'clutch--clear-tx-state) #'ignore)
                   ((symbol-function 'clutch-db-disconnect)
                    (lambda (conn)
                      (if (eq conn 'old-conn)
-                         (progn
-                           (when (eq (plist-get case :label) 'new-died)
-                             (setq alive nil))
-                           (signal 'clutch-db-error '("old teardown failed")))
-                       (when (plist-get case :new-disconnect)
+                         (pcase old-teardown
+                           ('kill-new (setq alive '(old-conn)))
+                           ('signal
+                            (signal 'clutch-db-error '("old teardown failed")))
+                           ('kill-all-and-signal
+                            (setq alive nil)
+                            (signal 'clutch-db-error '("old teardown failed"))))
+                       (setq disconnected conn)
+                       (when (eq new-teardown 'quit)
                          (signal 'quit nil)))))
                   ((symbol-function 'clutch--release-connection-transport)
                    (lambda (conn) (push conn released)))
-                  ((symbol-function 'clutch--rebind-connection-buffers) #'ignore))
-          (condition-case nil
-              (clutch--replace-connection 'old-conn '(:backend pg) 'pg)
-            ((error quit) nil))
-          (should (memq 'new-conn released)))))))
+                  ((symbol-function 'clutch--rebind-connection-buffers)
+                   (lambda (&rest _args) (setq rebound t))))
+          (should (eq (car (condition-case err
+                               (progn (clutch--replace-connection
+                                       'old-conn '(:backend pg) 'pg)
+                                      nil)
+                             ((error quit) err)))
+                      error))
+          (should (= builds 1))
+          (should-not rebound)
+          (should (eq disconnected (and new-closed 'new-conn)))
+          (should (memq 'new-conn released))
+          (should (memq 'old-conn released)))))))
 
 (ert-deftest clutch-test-derived-buffers-reconnect-using-inherited-context ()
   "Derived buffers reconnect their logical session without losing local state."
   (dolist (kind '(result object))
     (ert-info ((format "derived buffer: %s" kind))
-      (let* ((old-conn (list 'connection))
-             (new-conn (list 'new-connection))
-             (params '(:backend mysql :database "db"))
+      (let* ((db-file (make-temp-file "clutch-derived-" nil ".db"))
+             (params (list :backend 'sqlite :database db-file))
+             (old-conn (clutch-db-sqlite-connect params))
              (pending-deletes (list (vector 'delete)))
              (pending-edits (list (cons '(0 . 0) 'edit)))
              (pending-inserts (list (list (cons "name" "insert"))))
-             derived-buf
-             built)
+             new)
+        (clutch-db-query old-conn "CREATE TABLE demo (id INT)")
         (unwind-protect
             (with-temp-buffer
               (let ((source-buf (current-buffer)))
-                (setq-local clutch-connection old-conn
-                            clutch--connection-params params
-                            clutch--conn-sql-product 'mysql)
-                (cl-letf (((symbol-function 'clutch-db-live-p)
-                           (lambda (_conn) t))
-                          ((symbol-function 'clutch--connection-key)
-                           (lambda (_conn) "test"))
-                          ((symbol-function 'clutch-result--display-dml) #'ignore)
-                          ((symbol-function 'clutch-result--show-buffer)
-                           (lambda (buf) (setq derived-buf buf) buf))
-                          ((symbol-function 'clutch-db-object-definition)
-                           (lambda (_conn _entry)
-                             "CREATE TABLE demo (id INT)"))
-                          ((symbol-function 'sql-mode) #'ignore)
-                          ((symbol-function 'font-lock-ensure) #'ignore)
-                          ((symbol-function 'pop-to-buffer)
-                           (lambda (buf &rest _args)
-                             (setq derived-buf buf)
-                             buf)))
+                (clutch-mode)
+                (clutch--bind-connection-context old-conn params 'sqlite)
+                (clutch-test--with-pop-to-buffer-capture derived-buf
                   (pcase kind
                     ('result
                      (clutch-result--display
@@ -3323,43 +2709,30 @@ disconnecting it."
                       "UPDATE demo SET x = 1" 0.1))
                     ('object
                      (clutch-object-show-ddl-or-source
-                      '(:name "demo" :type "TABLE")))))
-                (with-current-buffer derived-buf
-                  (should (eq clutch-connection old-conn))
-                  (should (equal clutch--connection-params params))
-                  (should (eq clutch--conn-sql-product 'mysql))
-                  (when (eq kind 'result)
-                    (setq-local clutch--pending-deletes pending-deletes
-                                clutch--pending-edits pending-edits
-                                clutch--pending-inserts pending-inserts))
-                  (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                             (lambda (conn) (eq conn new-conn)))
-                            ((symbol-function 'clutch--build-conn)
-                             (lambda (reconnect-params)
-                               (setq built reconnect-params)
-                               new-conn))
-                            ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                            ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                            ((symbol-function 'clutch--refresh-schema-status-ui)
-                             #'ignore)
-                            ((symbol-function 'clutch--refresh-transaction-ui)
-                             #'ignore)
-                            ((symbol-function 'clutch--refresh-result-status-line)
-                             #'ignore)
-                            ((symbol-function 'clutch--connection-key)
-                             (lambda (_conn) "test"))
-                            ((symbol-function 'message) #'ignore))
-                    (clutch--ensure-connection))
-                  (should (eq clutch-connection new-conn))
-                  (should (equal built params))
-                  (when (eq kind 'result)
-                    (should (eq clutch--pending-deletes pending-deletes))
-                    (should (eq clutch--pending-edits pending-edits))
-                    (should (eq clutch--pending-inserts pending-inserts))))
-                (with-current-buffer source-buf
-                  (should (eq clutch-connection new-conn)))))
-          (when (buffer-live-p derived-buf)
-            (kill-buffer derived-buf)))))))
+                      '(:name "demo" :type "TABLE"))))
+                  (clutch-db-disconnect old-conn)
+                  (with-current-buffer derived-buf
+                    (should (eq clutch-connection old-conn))
+                    (should (equal clutch--connection-params params))
+                    (should (eq clutch--conn-sql-product 'sqlite))
+                    (when (eq kind 'result)
+                      (setq-local clutch--pending-deletes pending-deletes
+                                  clutch--pending-edits pending-edits
+                                  clutch--pending-inserts pending-inserts))
+                    (clutch--ensure-connection)
+                    (setq new clutch-connection)
+                    (should (clutch-db-live-p new))
+                    (should-not (eq new old-conn))
+                    (should (equal (clutch-db-database new) db-file))
+                    (when (eq kind 'result)
+                      (should (eq clutch--pending-deletes pending-deletes))
+                      (should (eq clutch--pending-edits pending-edits))
+                      (should (eq clutch--pending-inserts pending-inserts))))
+                  (with-current-buffer source-buf
+                    (should (eq clutch-connection new))))))
+          (dolist (conn (list old-conn new))
+            (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn)))
+          (delete-file db-file))))))
 
 (ert-deftest clutch-test-connect-failure-preserves-old-live-connection ()
   "Interactive connect should not drop the old live session on failure."
@@ -3382,67 +2755,42 @@ disconnecting it."
         (should (eq clutch-connection 'old-conn))
         (should-not disconnected)))))
 
-(ert-deftest clutch-test-connect-rejects-connection-that-dies-during-disconnect ()
-  "Reconnect should not retry or activate a new connection that became dead."
-  (let ((built nil)
-        (activated nil))
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch-connection 'old-conn)
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn)
-                   (pcase conn
-                     ('old-conn t)
-                     ('new-conn-1 nil)
-                     (_ t))))
-                ((symbol-function 'clutch--confirm-session-close)
-                 #'ignore)
-                ((symbol-function 'clutch--connect-params-for-current-buffer)
-                 (lambda () '(:backend jdbc :database "newdb")))
-                ((symbol-function 'clutch--effective-sql-product)
-                 (lambda (_params) 'jdbc))
-                ((symbol-function 'clutch--build-conn)
-                 (lambda (params)
-                   (push params built)
-                   'new-conn-1))
-                ((symbol-function 'clutch--do-disconnect)
-                 #'ignore)
-                ((symbol-function 'clutch--activate-current-buffer-connection)
-                 (lambda (conn params product)
-                   (setq activated (list conn params product))))
-                ((symbol-function 'message) #'ignore))
-        (should-error (clutch-connect) :type 'clutch-db-error)
-        (should (equal built '((:backend jdbc :database "newdb"))))
-        (should-not activated)))))
-
-(ert-deftest clutch-test-connect-releases-new-connection-when-old-teardown-signals ()
-  "A failing old-connection teardown must not orphan the new connection."
-  (let (disconnected released activated)
-    (with-temp-buffer
-      (setq-local clutch-connection 'old-conn)
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (memq conn '(old-conn new-conn))))
-                ((symbol-function 'clutch--confirm-session-close)
-                 #'ignore)
-                ((symbol-function 'clutch--connect-params-for-current-buffer)
-                 (lambda () '(:backend jdbc :database "newdb")))
-                ((symbol-function 'clutch--effective-sql-product)
-                 (lambda (_params) 'jdbc))
-                ((symbol-function 'clutch--build-conn)
-                 (lambda (_params) 'new-conn))
-                ((symbol-function 'clutch--do-disconnect)
-                 (lambda (_conn) (signal 'clutch-db-error '("old teardown failed"))))
-                ((symbol-function 'clutch-db-disconnect)
-                 (lambda (conn) (setq disconnected conn)))
-                ((symbol-function 'clutch--release-connection-transport)
-                 (lambda (conn) (setq released conn)))
-                ((symbol-function 'clutch--activate-current-buffer-connection)
-                 (lambda (conn params product)
-                   (setq activated (list conn params product)))))
-        (should-error (clutch-connect) :type 'clutch-db-error)
-        (should (eq disconnected 'new-conn))
-        (should (eq released 'new-conn))
-        (should-not activated)))))
+(ert-deftest clutch-test-connect-discards-a-candidate-it-cannot-activate ()
+  "`clutch-connect' should discard a candidate it cannot activate, without retrying.
+A new connection that became dead during the old teardown is neither
+retried nor activated, and a failing old-connection teardown must not
+orphan the new connection."
+  (pcase-dolist (`(,label ,new-alive ,old-teardown-signals)
+                 '(("the candidate died during the old teardown" nil nil)
+                   ("the old teardown signals" t t)))
+    (ert-info (label)
+      (let (built released disconnected activated)
+        (with-temp-buffer
+          (setq-local clutch-connection 'old-conn)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (if (eq conn 'new-conn) new-alive t)))
+                    ((symbol-function 'clutch--connect-params-for-current-buffer)
+                     (lambda () '(:backend jdbc :database "newdb")))
+                    ((symbol-function 'clutch--effective-sql-product)
+                     (lambda (_params) 'jdbc))
+                    ((symbol-function 'clutch--build-conn)
+                     (lambda (params) (push params built) 'new-conn))
+                    ((symbol-function 'clutch--do-disconnect)
+                     (lambda (_conn)
+                       (when old-teardown-signals
+                         (signal 'clutch-db-error '("old teardown failed")))))
+                    ((symbol-function 'clutch-db-disconnect)
+                     (lambda (conn) (setq disconnected conn)))
+                    ((symbol-function 'clutch--release-connection-transport)
+                     (lambda (conn) (push conn released)))
+                    ((symbol-function 'clutch--activate-current-buffer-connection)
+                     (lambda (conn params product)
+                       (setq activated (list conn params product)))))
+            (should-error (clutch-connect) :type 'clutch-db-error)
+            (should (equal built '((:backend jdbc :database "newdb"))))
+            (should-not activated)
+            (should (eq disconnected (and new-alive 'new-conn)))
+            (should (memq 'new-conn released))))))))
 
 (defmacro clutch-test--with-connect-build-stubs (spec &rest body)
   "Run BODY with connection construction recorded.
@@ -3479,61 +2827,65 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                    ((symbol-function 'message) #'ignore))
            ,@body)))))
 
-(ert-deftest clutch-test-connect-in-query-console-reuses-saved-connection ()
-  "Query console reconnect should reuse that console's saved connection."
-  (with-temp-buffer
-    (let ((clutch-connection-alist
-           '(("alpha" . (:backend mysql :database "app_a"))
-             ("beta" . (:backend mysql :database "app_b"))))
-          built
-          read-called)
-      (setq-local clutch--console-name "alpha")
-      (cl-letf (((symbol-function 'clutch--read-connection-params)
-                 (lambda ()
-                   (setq read-called t)
-                   '(:backend mysql :database "should-not-be-used"))))
-        (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-          (clutch-connect)
-          (should-not read-called)
-          (should (equal built
-                         '(:backend mysql :database "app_a"
-                           :pass-entry "alpha"))))))))
+(ert-deftest clutch-test-connect-takes-the-params-of-the-buffer-it-runs-in ()
+  "`C-c C-e' should connect with the params of the buffer it runs in.
+A saved query console reconnects with that console's saved connection and
+an ad hoc SQLite console with its file params, without reopening the
+picker.  A console whose saved connection no longer exists errors instead
+of silently connecting elsewhere.  A non-console buffer keeps the generic
+interactive connect flow, and every buffer records its session target."
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (alpha-file (expand-file-name "alpha.db" dir))
+         (ad-hoc-file (expand-file-name "ad-hoc.db" dir))
+         (clutch-connection-alist
+          `(("alpha" . (:backend sqlite :database ,alpha-file)))))
+    (unwind-protect
+        (pcase-dolist (`(,label ,console-name ,ad-hoc ,answers ,expected)
+                       `(("saved console" "alpha" nil nil ,alpha-file)
+                         ("ad hoc SQLite console" "SQLite: ad hoc" t nil ,ad-hoc-file)
+                         ("console whose saved connection vanished" "gone" nil nil error)
+                         ("plain buffer" nil nil ("alpha") ,alpha-file)))
+          (ert-info (label)
+            (let (conn)
+              (unwind-protect
+                  (with-temp-buffer
+                    (clutch-mode)
+                    (when console-name
+                      (setq-local clutch--console-name console-name))
+                    (when ad-hoc
+                      (setq-local clutch--console-ad-hoc-params
+                                  (list :backend 'sqlite :database ad-hoc-file)))
+                    ;; A prompt beyond ANSWERS runs out of them and fails the test.
+                    (clutch-test--without-credentials
+                      (clutch-test--with-minibuffer-answers answers
+                        (if (eq expected 'error)
+                            (should-error (clutch-connect) :type 'user-error)
+                          (clutch-connect))))
+                    (setq conn clutch-connection)
+                    (if (eq expected 'error)
+                        (should-not conn)
+                      (should (clutch-db-live-p conn))
+                      (should (equal (clutch-db-database conn) expected))
+                      (should (equal clutch--session-target
+                                     (clutch--connection-target
+                                      (clutch-prepare-connection-params
+                                       (or clutch--console-ad-hoc-params
+                                           (clutch--saved-connection-params
+                                            "alpha"))))))))
+                (when (and conn (clutch-db-live-p conn))
+                  (clutch-db-disconnect conn))))))
+      (delete-directory dir t))))
 
-(ert-deftest clutch-test-connect-in-query-console-preserves-tramp-origin ()
-  "Query console reconnect should keep its stored TRAMP origin."
-  (with-temp-buffer
-    (let ((clutch-connection-alist
-           '(("alpha" . (:backend pg
-                         :host "db"
-                         :port 5432
-                         :database "appdb"))))
-          (clutch-tramp-context-policy 'ask)
-          built)
-      (setq-local clutch--console-name "alpha"
-                  clutch--connection-params
-                  '(:backend pg
-                    :host "db"
-                    :port 5432
-                    :database "appdb"
-                    :pass-entry "alpha"
-                    :tramp-default-directory "/ssh:devbox:/workspace/"))
-      (cl-letf (((symbol-function 'y-or-n-p)
-                 (lambda (_prompt)
-                   (ert-fail "stored TRAMP origin should not prompt again"))))
-        (clutch-test--with-connect-build-stubs (built 'postgres 'new-conn)
-          (clutch-connect)
-          (should (equal built
-                         '(:backend pg
-                           :host "db"
-                           :port 5432
-                           :database "appdb"
-                           :pass-entry "alpha"
-                           :tramp-default-directory
-                           "/ssh:devbox:/workspace/"))))))))
-
-(ert-deftest clutch-test-connect-in-query-console-skips-stale-tramp-origin-for-unforwardable-profile ()
-  "Reconnect should not carry old TRAMP origin onto non-TCP profiles."
-  (dolist (case '((:saved (:backend sqlite :database "/tmp/app.db")
+(ert-deftest clutch-test-connect-in-query-console-keeps-tramp-origin-only-for-forwardable-profiles ()
+  "Query console reconnect should keep its stored TRAMP origin only where it forwards.
+A saved host and port profile keeps the origin its session was opened from.
+A SQLite or `:url' profile cannot be forwarded, so an old origin is not
+carried onto it."
+  (dolist (case '((:saved (:backend pg :host "db" :port 5432 :database "appdb")
+                   :expected (:backend pg :host "db" :port 5432 :database "appdb"
+                              :pass-entry "alpha"
+                              :tramp-default-directory "/ssh:devbox:/workspace/"))
+                  (:saved (:backend sqlite :database "/tmp/app.db")
                    :expected (:backend sqlite :database "/tmp/app.db"
                               :pass-entry "alpha"))
                   (:saved (:backend oracle
@@ -3544,29 +2896,30 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
                               :password "secret"))))
     (let* ((saved (plist-get case :saved))
            (expected (plist-get case :expected)))
-      (let ((clutch-connection-alist `(("alpha" . ,saved)))
-            (clutch-tramp-context-policy 'ask)
-            built)
-        (with-temp-buffer
-          (setq-local clutch--console-name "alpha"
-                      clutch--connection-params
-                      '(:backend pg
-                        :host "db"
-                        :port 5432
-                        :database "appdb"
-                        :pass-entry "alpha"
-                        :tramp-default-directory "/ssh:devbox:/workspace/"))
-          (cl-letf (((symbol-function 'y-or-n-p)
-                     (lambda (_prompt)
-                       (ert-fail "unforwardable profile should not prompt for TRAMP")))
-                    ((symbol-function 'clutch--resolve-password)
-                     (lambda (params)
-                       (when (clutch-backend-jdbc-transport-p
-                              (plist-get params :backend) params)
-                         "secret"))))
-            (clutch-test--with-connect-build-stubs (built 'generic 'new-conn)
-              (clutch-connect)
-              (should (equal built expected)))))))))
+      (ert-info ((format "saved: %s" (plist-get saved :backend)))
+        (let ((clutch-connection-alist `(("alpha" . ,saved)))
+              (clutch-tramp-context-policy 'ask)
+              built)
+          (with-temp-buffer
+            (setq-local clutch--console-name "alpha"
+                        clutch--connection-params
+                        '(:backend pg
+                          :host "db"
+                          :port 5432
+                          :database "appdb"
+                          :pass-entry "alpha"
+                          :tramp-default-directory "/ssh:devbox:/workspace/"))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (_prompt)
+                         (ert-fail "a stored TRAMP origin should not prompt again")))
+                      ((symbol-function 'clutch--resolve-password)
+                       (lambda (params)
+                         (when (clutch-backend-jdbc-transport-p
+                                (plist-get params :backend) params)
+                           "secret"))))
+              (clutch-test--with-connect-build-stubs (built 'generic 'new-conn)
+                (clutch-connect)
+                (should (equal built expected))))))))))
 
 (ert-deftest clutch-test-connect-stores-resolved-password-in-connection-context ()
   "Connect should retain resolved credentials for reconnects."
@@ -3613,60 +2966,48 @@ passed to `clutch--build-conn'; ACTIVATED, when non-nil, records the final
         (should (= resolve-count 1))
         (should (equal (plist-get captured-params :password) "secret"))))))
 
-(ert-deftest clutch-test-connect-in-query-console-errors-when-saved-connection-missing ()
-  "Query console reconnect should error when its saved connection no longer exists."
-  (with-temp-buffer
-    (let ((clutch-connection-alist '(("beta" . (:backend mysql :database "app_b"))))
-          read-called)
-      (setq-local clutch--console-name "alpha")
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'clutch--read-connection-params)
-                 (lambda ()
-                   (setq read-called t)
-                   '(:backend mysql :database "fallback"))))
-        (should-error (clutch-connect) :type 'user-error)
-        (should-not read-called)))))
-
 (ert-deftest clutch-test-query-console-does-not-create-buffer-on-connect-failure ()
   "Query console should not create a visible buffer before connect succeeds."
-  (let* ((name "alpha")
-         (buffers-before (buffer-list))
+  (let* ((dir (make-temp-file "clutch-console-" t))
          (clutch-connection-alist
-          '(("alpha" . (:backend mysql :database "app_a")))))
+          `(("alpha" . (:backend sqlite
+                        :database ,(expand-file-name "missing/app.db" dir)))))
+         (buffers-before (buffer-list)))
     (unwind-protect
-        (cl-letf (((symbol-function 'clutch--effective-sql-product)
-                   (lambda (_params) 'mysql))
-                  ((symbol-function 'clutch--build-conn)
-                   (lambda (_params)
-                     (user-error "Connection refused"))))
-          (should-error (clutch-query-console name) :type 'user-error)
-          (should-not (cl-set-difference (buffer-list) buffers-before)))
+        ;; The failed connect records its problem in the current buffer.
+        (with-temp-buffer
+          (clutch-test--without-credentials
+            (should-error (clutch-query-console "alpha") :type 'user-error))
+          (should-not (cl-set-difference (buffer-list)
+                                         (cons (current-buffer) buffers-before))))
       (dolist (buffer (cl-set-difference (buffer-list) buffers-before))
         (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+          (kill-buffer buffer)))
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-console-opens-ad-hoc-sqlite-file ()
   "Query console should open a SQL workspace for an ad hoc SQLite file."
-  (let* ((db-file "/tmp/clutch-direct-console.db")
-         (name (format "SQLite: %s" (abbreviate-file-name db-file)))
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-console-directory (expand-file-name "consoles" dir))
+         (db-file (expand-file-name "direct.db" dir))
          (params (list :backend 'sqlite :database db-file))
-         built
-         opened)
+         conn opened)
     (unwind-protect
-        (cl-letf (((symbol-function 'read-file-name)
-                   (lambda (&rest _args) db-file)))
-          (clutch-test--with-connect-build-stubs (built 'sqlite 'sqlite-conn)
-            (clutch-query-sqlite-file db-file)
-            (setq opened (current-buffer))
-            (should (equal built params))
-            (should (eq clutch-connection 'sqlite-conn))
-            (should (equal clutch--connection-params params))
-            (should (eq clutch--conn-sql-product 'sqlite))
-            (should (equal clutch--console-name name))
-            (should (equal clutch--console-ad-hoc-params params))))
+        (progn
+          (clutch-query-sqlite-file db-file)
+          (setq opened (current-buffer)
+                conn clutch-connection)
+          (should (clutch-db-live-p conn))
+          (should (equal (clutch-db-database conn) db-file))
+          (should (equal clutch--connection-params params))
+          (should (eq clutch--conn-sql-product 'sqlite))
+          (should (equal clutch--console-name
+                         (format "SQLite: %s" (abbreviate-file-name db-file))))
+          (should (equal clutch--console-ad-hoc-params params)))
       (when (buffer-live-p opened)
-        (kill-buffer opened)))))
+        (kill-buffer opened))
+      (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn))
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-console-mongodb-surfaces-use-registered-modes ()
   "MongoDB consoles should select editing mode from their backend surface."
@@ -3849,20 +3190,24 @@ The line is picked at point, so it flashes as SQL picked at point does."
 
 (ert-deftest clutch-test-query-console-picker-switches-to-open-ad-hoc-console ()
   "The public picker should merge saved consoles and reuse an open ad hoc one."
-  (let* ((name "PostgreSQL: alice@db.example.com:5432/app")
-         (params '(:backend pg
-                   :host "db.example.com"
-                   :port 5432
-                   :user "alice"
-                   :database "app"))
-         (saved-params '(:backend mysql :host "new.example" :database "app"))
-         (old-params '(:backend mysql :host "old.example" :database "app"))
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-console-directory (expand-file-name "consoles" dir))
+         (params (list :backend 'sqlite :database (expand-file-name "ad-hoc.db" dir)))
+         (saved-params (list :backend 'sqlite :database (expand-file-name "new.db" dir)))
+         (old-params (list :backend 'sqlite :database (expand-file-name "old.db" dir)))
+         (name (clutch--ad-hoc-console-name params))
          (ad-hoc (generate-new-buffer " *clutch-open-ad-hoc*"))
          (matching (generate-new-buffer " *clutch-open-saved*"))
          (collision (generate-new-buffer " *clutch-open-collision*"))
+         (ad-hoc-conn (clutch-db-sqlite-connect params))
+         (matching-conn (clutch-db-sqlite-connect saved-params))
+         (collision-conn (clutch-db-sqlite-connect old-params))
          (clutch-connection-alist `(("alpha" . ,saved-params)))
-         candidates
-         built)
+         ;; The pick renames the ad hoc console; its candidate is the name before.
+         (ad-hoc-name (buffer-name ad-hoc))
+         (matching-name (buffer-name matching))
+         (collision-name (buffer-name collision))
+         candidates)
     (unwind-protect
         (progn
           (with-current-buffer ad-hoc
@@ -3872,9 +3217,10 @@ The line is picked at point, so it flashes as SQL picked at point does."
                         (clutch--console-persistence-name name params)
                         clutch--console-ad-hoc-params params
                         clutch--connection-params params
-                        clutch-connection 'live-conn))
-          (dolist (spec `((,matching ,saved-params) (,collision ,old-params)))
-            (pcase-let ((`(,buffer ,console-params) spec))
+                        clutch-connection ad-hoc-conn))
+          (dolist (spec `((,matching ,saved-params ,matching-conn)
+                          (,collision ,old-params ,collision-conn)))
+            (pcase-let ((`(,buffer ,console-params ,conn) spec))
               (with-current-buffer buffer
                 (clutch-mode)
                 (setq-local clutch--console-name "alpha"
@@ -3882,44 +3228,42 @@ The line is picked at point, so it flashes as SQL picked at point does."
                             (clutch--console-persistence-name
                              "alpha" console-params)
                             clutch--connection-params console-params
-                            clutch-connection (list 'live console-params)))))
+                            clutch-connection conn))))
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (prompt collection &rest _args)
                        (should (equal prompt "Console: "))
                        (setq candidates collection)
-                       (buffer-name ad-hoc)))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (eq conn 'live-conn)))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (_params)
-                       (setq built t)
-                       'unexpected-conn))
-                    ((symbol-function 'clutch--update-console-buffer-name)
-                     #'ignore))
-            (call-interactively #'clutch-query-console)
-            (should (member (buffer-name ad-hoc) candidates))
-            (should (= (cl-count "alpha" candidates :test #'equal) 1))
-            (should-not (member (buffer-name matching) candidates))
-            (should (member (buffer-name collision) candidates))
-            (should-not built)
-            (should (eq (current-buffer) ad-hoc))))
+                       ad-hoc-name)))
+            (call-interactively #'clutch-query-console))
+          (should (member ad-hoc-name candidates))
+          (should (= (cl-count "alpha" candidates :test #'equal) 1))
+          (should-not (member matching-name candidates))
+          (should (member collision-name candidates))
+          (should (eq (current-buffer) ad-hoc))
+          (should (eq clutch-connection ad-hoc-conn)))
       (dolist (buffer (list ad-hoc matching collision))
         (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+          (kill-buffer buffer)))
+      (dolist (conn (list ad-hoc-conn matching-conn collision-conn))
+        (when (clutch-db-live-p conn) (clutch-db-disconnect conn)))
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-console-picker-returns-to-a-moved-ad-hoc-console ()
   "Picking an ad hoc console that followed a namespace switch should return there.
 The picker named it by the parameters that followed the switch, so it
 opened a second console on a second connection, and returning to it
 replaced the parameters `C-c C-e' connects with by those."
-  (let* ((name "MySQL: app@db:3306/app")
-         (opened-with '(:backend mysql :host "db" :port 3306 :user "app"
-                        :database "app"))
-         (moved '(:backend mysql :host "db" :port 3306 :user "app"
-                  :database "other"))
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-console-directory (expand-file-name "consoles" dir))
+         (opened-with (list :backend 'sqlite
+                            :database (expand-file-name "app.db" dir)))
+         (moved (list :backend 'sqlite
+                      :database (expand-file-name "other.db" dir)))
+         (name (clutch--ad-hoc-console-name opened-with))
          (console (generate-new-buffer " *clutch-moved-ad-hoc*"))
-         (clutch-connection-alist nil)
-         built)
+         (console-name (buffer-name console))
+         (conn (clutch-db-sqlite-connect opened-with))
+         (clutch-connection-alist nil))
     (unwind-protect
         (progn
           (with-current-buffer console
@@ -3929,24 +3273,18 @@ replaced the parameters `C-c C-e' connects with by those."
                         (clutch--console-persistence-name name opened-with)
                         clutch--console-ad-hoc-params opened-with
                         clutch--connection-params moved
-                        clutch-connection 'live-conn))
+                        clutch-connection conn))
           (cl-letf (((symbol-function 'completing-read)
-                     (lambda (_prompt _collection &rest _args)
-                       (buffer-name console)))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (eq conn 'live-conn)))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (_params)
-                       (setq built t)
-                       'unexpected-conn))
-                    ((symbol-function 'clutch--update-console-buffer-name)
-                     #'ignore))
-            (call-interactively #'clutch-query-console)
-            (should-not built)
-            (should (eq (current-buffer) console))
-            (should (equal clutch--console-ad-hoc-params opened-with))
-            (should (equal clutch--connection-params moved))))
-      (kill-buffer console))))
+                     (lambda (&rest _args) console-name)))
+            (call-interactively #'clutch-query-console))
+          (should (eq (current-buffer) console))
+          (should (eq clutch-connection conn))
+          (should (equal clutch--console-ad-hoc-params opened-with))
+          (should (equal clutch--connection-params moved)))
+      (when (buffer-live-p console)
+        (kill-buffer console))
+      (when (clutch-db-live-p conn) (clutch-db-disconnect conn))
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-query-console-tramp-origin-contract ()
   "Query console connection origin should come from the command source buffer."
@@ -4013,24 +3351,6 @@ replaced the parameters `C-c C-e' connects with by those."
           (when (buffer-live-p opened)
             (kill-buffer opened)))))))
 
-(ert-deftest clutch-test-connect-in-ad-hoc-sqlite-console-reuses-file-params ()
-  "Ad hoc SQLite consoles should reconnect using their file params."
-  (with-temp-buffer
-    (let ((params '(:backend sqlite :database "/tmp/ad-hoc.db"))
-          built
-          read-called)
-      (clutch-mode)
-      (setq-local clutch--console-name "SQLite: /tmp/ad-hoc.db"
-                  clutch--console-ad-hoc-params params)
-      (cl-letf (((symbol-function 'clutch--read-connection-params)
-                 (lambda ()
-                   (setq read-called t)
-                   '(:backend mysql :database "should-not-be-used"))))
-        (clutch-test--with-connect-build-stubs (built 'sqlite 'new-conn)
-          (clutch-connect)
-          (should-not read-called)
-          (should (equal built params)))))))
-
 (ert-deftest clutch-test-connect-in-a-console-moves-its-session ()
   "`C-c C-e' in a console should move its whole session to a new connection.
 It bound only the console: over a lost session its results reconnected
@@ -4045,7 +3365,9 @@ and uncommitted work lost with the old one went unreported."
       (let ((result (generate-new-buffer " *clutch-connect-result*"))
             (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
             (clutch--tx-state-cache (make-hash-table :test 'eq))
-            built disconnected auto-commit marked messages)
+            (old-conn (make-clutch-test-conn :commit-mode 'manual :live old-live))
+            (new-conn (make-clutch-test-conn :commit-mode 'auto))
+            built messages)
         (unwind-protect
             (with-temp-buffer
               (clutch-mode)
@@ -4054,50 +3376,37 @@ and uncommitted work lost with the old one went unreported."
                           (clutch--connection-target
                            (clutch-prepare-connection-params
                             (clutch--saved-connection-params "alpha")))
-                          clutch-connection 'old-conn)
+                          clutch-connection old-conn)
               (with-current-buffer result
-                (setq-local clutch-connection 'old-conn))
+                (clutch-result-mode)
+                (setq-local clutch-connection old-conn
+                            clutch--dml-result t))
               (when tx-state
-                (puthash 'old-conn tx-state clutch--tx-state-cache))
-              (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-                (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                           (lambda (conn)
-                             (or (eq conn 'new-conn)
-                                 (and old-live (eq conn 'old-conn)))))
-                          ((symbol-function 'clutch--confirm-session-close) #'ignore)
-                          ((symbol-function 'clutch-db-disconnect)
-                           (lambda (conn) (push conn disconnected)))
-                          ((symbol-function 'clutch--release-connection-transport)
-                           #'ignore)
-                          ((symbol-function 'clutch-db-manual-commit-supported-p)
-                           #'always)
-                          ((symbol-function 'clutch-db-manual-commit-p)
-                           (lambda (conn) (eq conn 'old-conn)))
-                          ((symbol-function 'clutch-db-set-auto-commit)
-                           (lambda (conn enabled)
-                             (push (list conn enabled) auto-commit)))
-                          ((symbol-function 'clutch--mark-dml-results-rolled-back)
-                           (lambda (conn) (push conn marked)))
-                          ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                          ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                          ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                          ((symbol-function 'clutch--refresh-connection-render-state)
-                           #'ignore)
-                          ((symbol-function 'clutch--update-mode-line) #'ignore)
-                          ((symbol-function 'message)
-                           (lambda (format-string &rest args)
-                             (push (apply #'format format-string args) messages))))
-                  (clutch-connect)
-                  (should (equal built '(:backend mysql :database "app_a"
-                                         :pass-entry "alpha")))
-                  (should (eq clutch-connection 'new-conn))
-                  (should (eq (buffer-local-value 'clutch-connection result)
-                              'new-conn))
-                  (should (equal auto-commit '((new-conn nil))))
-                  (should (equal disconnected (and old-live '(old-conn))))
-                  (should (equal marked (and tx-state '(old-conn))))
-                  (should-not (clutch--tx-state 'old-conn))
-                  (should (member expected-message messages)))))
+                (puthash old-conn tx-state clutch--tx-state-cache))
+              ;; The test backend has no schema or connection key to render.
+              (cl-letf (((symbol-function 'clutch--build-conn)
+                         (lambda (params) (setq built params) new-conn))
+                        ((symbol-function 'clutch--connection-key)
+                         (lambda (_conn) "test-conn"))
+                        ((symbol-function 'clutch--prime-schema-cache) #'ignore)
+                        ((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (push (apply #'format format-string args) messages))))
+                (clutch-test--without-credentials
+                  (clutch-connect)))
+              (should (equal built '(:backend mysql :database "app_a"
+                                     :pass-entry "alpha")))
+              (should (eq clutch-connection new-conn))
+              (should (eq (buffer-local-value 'clutch-connection result) new-conn))
+              (should (eq (clutch-test-conn-commit-mode new-conn) 'manual))
+              (should-not (clutch-db-live-p old-conn))
+              (let ((banner (buffer-local-value 'header-line-format result)))
+                (should (eq (and tx-state t)
+                            (and (stringp banner)
+                                 (string-match-p "rolled back" banner)
+                                 t))))
+              (should-not (clutch--tx-state old-conn))
+              (should (member expected-message messages)))
           (kill-buffer result))))))
 
 (ert-deftest clutch-test-connect-in-a-console-whose-entry-moved-connects-it-alone ()
@@ -4152,121 +3461,88 @@ server was written to another.  Once connected there, the console's next
                   (should replaced))))
           (kill-buffer result))))))
 
-(ert-deftest clutch-test-connect-in-a-console-moves-its-session-after-new-credentials ()
-  "`C-c C-e' should move a console's session when only its credentials changed.
+(ert-deftest clutch-test-connect-in-a-console-moves-its-session-when-its-entry-still-leads-there ()
+  "`C-c C-e' should move a console's session when its entry still leads there.
 A new password or password entry in the saved entry leads to the same
-server, so the session and its results move as they do otherwise."
-  (let ((clutch-connection-alist
-         '(("alpha" . (:backend mysql :host "db1" :database "app"))))
-        built replaced)
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch--console-name "alpha"
-                  clutch--session-target
-                  (clutch--connection-target
-                   (clutch-prepare-connection-params
-                    (clutch--saved-connection-params "alpha")))
-                  clutch-connection 'old-conn)
-      (setq clutch-connection-alist
-            '(("alpha" . (:backend mysql :host "db1" :database "app"
-                          :password "rotated" :pass-entry "vault/alpha"))))
-      (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (memq conn '(old-conn new-conn))))
-                  ((symbol-function 'clutch--confirm-session-close) #'ignore)
-                  ((symbol-function 'clutch--replace-connection)
-                   (lambda (&rest _) (setq replaced t))))
-          (clutch-connect)
-          (should replaced))))))
-
-(ert-deftest clutch-test-connect-in-a-saved-sqlite-console-moves-its-session ()
-  "`C-c C-e' should move the session of a saved SQLite console.
-Its file named with `~' was compared as written when the console
+server, so the session and its results move as they do otherwise.  A
+SQLite file named with `~' was compared as written when the console
 connected and resolved by `C-c C-e', so the session never moved."
-  (let ((clutch-connection-alist
-         '(("lite" . (:backend sqlite :database "~/clutch-test-lite.db"))))
-        (clutch-console-directory (make-temp-file "clutch-console-" t))
-        built replaced opened)
-    (unwind-protect
-        (clutch-test--with-connect-build-stubs (built 'sqlite 'lite-conn)
-          (clutch-query-console "lite")
-          (setq opened (current-buffer))
-          (cl-letf (((symbol-function 'clutch--confirm-session-close) #'ignore)
-                    ((symbol-function 'clutch--replace-connection)
-                     (lambda (&rest _) (setq replaced t))))
-            (clutch-connect))
-          (should replaced))
-      (when (buffer-live-p opened)
-        (kill-buffer opened))
-      (delete-directory clutch-console-directory t))))
+  (pcase-dolist (`(,label ,opened-with ,connects-with)
+                 '(("credentials rotated"
+                    (:backend sqlite :database "~/app.db")
+                    (:backend sqlite :database "~/app.db"
+                     :password "rotated" :pass-entry "vault/alpha"))
+                   ("file named with ~"
+                    (:backend sqlite :database "~/clutch-test-lite.db")
+                    (:backend sqlite :database "~/clutch-test-lite.db"))))
+    (ert-info (label)
+      (let* ((home (make-temp-file "clutch-home-" t))
+             (process-environment (cons (format "HOME=%s" home) process-environment))
+             (abbreviated-home-dir nil)
+             (clutch-console-directory (expand-file-name "consoles" home))
+             (clutch-connection-alist (list (cons "alpha" opened-with)))
+             (result (generate-new-buffer " *clutch-connect-result*"))
+             old new opened)
+        (unwind-protect
+            (clutch-test--without-credentials
+              (clutch-query-console "alpha")
+              (setq opened (current-buffer)
+                    old clutch-connection)
+              (with-current-buffer result
+                (setq-local clutch-connection old))
+              (setq clutch-connection-alist (list (cons "alpha" connects-with)))
+              (clutch-connect)
+              (setq new clutch-connection)
+              (should-not (eq new old))
+              (should-not (clutch-db-live-p old))
+              (should (clutch-db-live-p new))
+              (should (eq (buffer-local-value 'clutch-connection result) new)))
+          (when (buffer-live-p opened)
+            (kill-buffer opened))
+          (kill-buffer result)
+          (dolist (conn (list old new))
+            (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn)))
+          (delete-directory home t))))))
 
-(ert-deftest clutch-test-query-console-switches-to-existing-connected-buffer ()
-  "Query console should reuse an existing connected console buffer."
-  (let* ((name "alpha")
-         (existing (get-buffer-create " *clutch-query-console-existing*"))
-         (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
-         built)
-    (unwind-protect
-        (with-current-buffer existing
-          (clutch-mode)
-          (setq-local clutch--console-name name)
-          (setq-local clutch-connection 'live-conn)
-          (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                     (lambda (&rest _args) existing))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (eq conn 'live-conn)))
-                    ((symbol-function 'clutch--update-console-buffer-name)
-                     (lambda () nil))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (_params)
-                       (setq built t)
-                       'unexpected-conn)))
-            (clutch-query-console name)
-            (should-not built)
-            (should (eq (current-buffer) existing))
-            (should (local-variable-p 'sql-product))
-            (should (eq sql-product 'mysql))
-            (should (equal mode-name "clutch"))))
-      (when (buffer-live-p existing)
-        (kill-buffer existing)))))
-
-(ert-deftest clutch-test-query-console-rename-reuses-open-buffer-by-storage-identity ()
-  "Renaming a saved connection should keep using the open console buffer."
-  (let* ((old-name "alpha")
-         (new-name "beta")
-         (params '(:backend mysql
-                   :host "db.internal"
-                   :port 3306
-                   :user "app"
-                   :database "prod"))
-         (storage-name (clutch--console-persistence-name old-name params))
-         (existing (get-buffer-create " *clutch-query-console-renamed*"))
-         (clutch-connection-alist `((,new-name . ,params)))
-         built
-         renamed-to)
-    (unwind-protect
-        (with-current-buffer existing
-          (clutch-mode)
-          (setq-local clutch--console-name old-name)
-          (setq-local clutch--console-storage-name storage-name)
-          (setq-local clutch-connection 'live-conn)
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (eq conn 'live-conn)))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (_params)
-                       (setq built t)
-                       'unexpected-conn))
-                    ((symbol-function 'clutch--update-console-buffer-name)
-                     (lambda ()
-                       (setq renamed-to clutch--console-name))))
-            (clutch-query-console new-name)
-            (should-not built)
-            (should (eq (current-buffer) existing))
-            (should (equal clutch--console-name new-name))
-            (should (equal clutch--console-storage-name storage-name))
-            (should (equal renamed-to new-name))))
-      (when (buffer-live-p existing)
-        (kill-buffer existing)))))
+(ert-deftest clutch-test-query-console-reuses-an-open-connected-console ()
+  "Query console should reuse an open console buffer whose connection is live.
+It is found by its alias and legacy params, and by its storage identity
+once the saved connection was renamed, which then renames the console."
+  (pcase-dolist (`(,label ,alias ,by-storage)
+                 '(("found by its alias and legacy params" "alpha" nil)
+                   ("found by its storage identity after a rename" "beta" t)))
+    (ert-info (label)
+      (clutch-test--with-isolated-metadata-caches
+        (let* ((dir (make-temp-file "clutch-console-" t))
+               (clutch-console-directory (expand-file-name "consoles" dir))
+               (params (list :backend 'sqlite
+                             :database (expand-file-name "prod.db" dir)))
+               (storage-name (clutch--console-persistence-name "alpha" params))
+               (conn (clutch-db-sqlite-connect params))
+               (existing (generate-new-buffer " *clutch-query-console-existing*"))
+               (clutch-connection-alist `((,alias . ,params))))
+          (unwind-protect
+              (progn
+                (with-current-buffer existing
+                  (clutch-mode)
+                  (setq-local clutch--console-name "alpha"
+                              clutch-connection conn)
+                  (if by-storage
+                      (setq-local clutch--console-storage-name storage-name)
+                    (setq-local clutch--connection-params params)))
+                (clutch-query-console alias)
+                (should (eq (current-buffer) existing))
+                (should (eq clutch-connection conn))
+                (should (equal clutch--console-name alias))
+                (should (equal clutch--console-storage-name storage-name))
+                (should (equal (buffer-name existing) (format "*clutch: %s*" alias)))
+                (should (local-variable-p 'sql-product))
+                (should (eq sql-product 'sqlite))
+                (should (equal mode-name "clutch")))
+            (when (buffer-live-p existing)
+              (kill-buffer existing))
+            (when (clutch-db-live-p conn) (clutch-db-disconnect conn))
+            (delete-directory dir t)))))))
 
 (ert-deftest clutch-test-find-console-buffer-identity-contract ()
   "Console lookup should resolve storage identity and legacy params."
@@ -4333,136 +3609,109 @@ connected and resolved by `C-c C-e', so the session never moved."
 
 (ert-deftest clutch-test-open-query-console-keeps-same-name-identities-separate ()
   "Opening a same-name console should not overwrite a different identity."
-  (let* ((name "same-name-identity")
-         (old-params '(:backend mysql :host "old.example" :database "app"))
-         (new-params '(:backend mysql :host "new.example" :database "app"))
-         (old-storage (clutch--console-persistence-name name old-params))
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-console-directory (expand-file-name "consoles" dir))
+         (name "same-name-identity")
+         (old-params (list :backend 'sqlite
+                           :database (expand-file-name "old.db" dir)))
+         (new-params (list :backend 'sqlite
+                           :database (expand-file-name "new.db" dir)))
+         (old-conn (clutch-db-sqlite-connect old-params))
          (old-buffer (generate-new-buffer " *clutch-old-console*"))
-         (clutch-console-directory (make-temp-file "clutch-console-" t))
-         opened)
+         new opened)
     (unwind-protect
         (progn
           (with-current-buffer old-buffer
             (clutch-mode)
             (setq-local clutch--console-name name
-                        clutch--console-storage-name old-storage
+                        clutch--console-storage-name
+                        (clutch--console-persistence-name name old-params)
                         clutch--connection-params old-params
-                        clutch-connection 'old-conn))
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (eq conn 'old-conn)))
-                    ((symbol-function 'clutch--effective-sql-product)
-                     (lambda (_params) 'mysql))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (_params) 'new-conn))
-                    ((symbol-function 'clutch--activate-current-buffer-connection)
-                     (lambda (conn params _product)
-                       (setq-local clutch-connection conn
-                                   clutch--connection-params params)))
-                    ((symbol-function 'clutch--update-console-buffer-name)
+                        clutch-connection old-conn))
+          ;; The console is renamed once connected; the name it was created
+          ;; with is the one global font lock saw during mode initialization.
+          (cl-letf (((symbol-function 'clutch--update-console-buffer-name)
                      #'ignore))
-            (clutch--open-query-console name new-params new-params)
-            (setq opened (current-buffer)))
+            (clutch--open-query-console name new-params new-params))
+          (setq opened (current-buffer)
+                new clutch-connection)
           (should-not (eq opened old-buffer))
           ;; Global font lock skips buffers hidden during mode initialization.
           (should-not (string-prefix-p " " (buffer-name opened)))
+          (should (clutch-db-live-p new))
+          (should (equal (clutch-db-database new) (plist-get new-params :database)))
           (with-current-buffer old-buffer
-            (should (eq clutch-connection 'old-conn))
+            (should (eq clutch-connection old-conn))
             (should (equal clutch--connection-params old-params))))
       (dolist (buffer (delete-dups (list opened old-buffer)))
         (when (buffer-live-p buffer)
           (kill-buffer buffer)))
-      (delete-directory clutch-console-directory t))))
+      (dolist (conn (list old-conn new))
+        (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn)))
+      (delete-directory dir t))))
 
-(ert-deftest clutch-test-query-console-reconnects-dead-existing-buffer ()
+(ert-deftest clutch-test-query-console-reopens-a-dead-console-in-place ()
   "Reopening a dead console should reconnect it as the automatic reconnect does.
 It built a connection from the saved entry and bound only the console, so
 its results stayed on the dead connection and reconnected to sessions of
 their own, its uncommitted work was not reported lost, and the database it
-had moved to gave way to the saved one."
-  (let* ((name "alpha")
-         (existing (get-buffer-create " *clutch-query-console-dead*"))
-         (attached (get-buffer-create " *clutch-query-console-dead-result*"))
-         (session '(:backend mysql :database "used_since" :pass-entry "alpha"))
-         (clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
-         (clutch--tx-state-cache (make-hash-table :test 'eq))
-         messages
-         built)
-    (unwind-protect
-        (progn
-          (with-current-buffer attached
-            (setq-local clutch-connection 'dead-conn))
-          (with-current-buffer existing
-            (clutch-mode)
-            (setq-local clutch--console-name name)
-            (setq-local clutch-connection 'dead-conn)
-            (setq-local clutch--connection-params session)
-            (setq-local clutch--conn-sql-product 'postgres)
-            (puthash 'dead-conn 'dirty clutch--tx-state-cache)
-            (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                       (lambda (&rest _args) existing)))
-              (clutch-test--with-connect-build-stubs
-                  (built 'mysql 'new-conn)
-                (cl-letf (((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                          ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                          ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                          ((symbol-function 'clutch--refresh-connection-render-state)
-                           #'ignore)
-                          ((symbol-function 'clutch--update-mode-line) #'ignore)
-                          ((symbol-function 'message)
-                           (lambda (format-string &rest args)
-                             (push (apply #'format format-string args) messages))))
-                  (clutch-query-console name))
-                (should (equal built session))
-                (should (eq (current-buffer) existing))
-                (dolist (buffer (list existing attached))
-                  (should (eq (buffer-local-value 'clutch-connection buffer)
-                              'new-conn))
-                  (should (equal (buffer-local-value 'clutch--connection-params
-                                                     buffer)
-                                 session)))
-                (should (eq (buffer-local-value 'clutch--conn-sql-product existing)
-                            'postgres))
-                (should-not (clutch--tx-state 'dead-conn))
-                (should (member "Reconnected to test-conn; uncommitted changes were lost"
-                                messages))))))
-      (dolist (buffer (list existing attached))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
-
-(ert-deftest clutch-test-query-console-reconnect-keeps-the-console-mode ()
-  "Reopening a dead console should leave it in the mode of its own session.
-Once reconnected, it was put in the mode of the saved entry, which a
-changed :surface makes another, and the mode change dropped the new
-connection from the console."
-  (let* ((name "docs")
-         (existing (get-buffer-create " *clutch-query-console-dead-mongo*"))
-         (session '(:backend mongodb :database "app"))
-         (clutch-connection-alist
-          '(("docs" . (:backend mongodb :database "app" :surface sql-interface))))
-         built)
-    (unwind-protect
-        (with-current-buffer existing
-          (clutch-mongodb-mode)
-          (setq-local clutch--console-name name)
-          (setq-local clutch-connection 'dead-conn)
-          (setq-local clutch--connection-params session)
-          (cl-letf (((symbol-function 'clutch--find-console-buffer)
-                     (lambda (&rest _args) existing)))
-            (clutch-test--with-connect-build-stubs
-                (built 'mongodb 'new-conn)
-              (cl-letf (((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                        ((symbol-function 'clutch--refresh-schema-status-ui) #'ignore)
-                        ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                        ((symbol-function 'clutch--update-mode-line) #'ignore)
-                        ((symbol-function 'message) #'ignore))
-                (clutch-query-console name))
-              (should (equal built session))
+had moved to gave way to the saved one.  Once reconnected, it was also put
+in the mode of the saved entry, which a changed `:surface' makes another,
+and the mode change dropped the new connection from the console."
+  (dolist (mode '(clutch-mode clutch-mongodb-mode))
+    (ert-info ((format "console mode: %s" mode))
+      (let* ((dir (make-temp-file "clutch-console-" t))
+             (clutch-console-directory (expand-file-name "consoles" dir))
+             (session-file (expand-file-name "used_since.db" dir))
+             (session (list :backend 'sqlite :database session-file :pass-entry "alpha"))
+             (clutch-connection-alist
+              `(("alpha" . (:backend sqlite
+                            :database ,(expand-file-name "app_a.db" dir)))))
+             (clutch--tx-state-cache (make-hash-table :test 'eq))
+             (existing (generate-new-buffer " *clutch-query-console-dead*"))
+             (attached (generate-new-buffer " *clutch-query-console-dead-result*"))
+             (dead (clutch-db-sqlite-connect session))
+             new messages)
+        (unwind-protect
+            (progn
+              (clutch-db-disconnect dead)
+              (puthash dead 'dirty clutch--tx-state-cache)
+              (with-current-buffer attached
+                (setq-local clutch-connection dead))
+              (with-current-buffer existing
+                (funcall mode)
+                (setq-local clutch--console-name "alpha"
+                            clutch--console-storage-name
+                            (clutch--console-persistence-name
+                             "alpha" (clutch--saved-connection-params "alpha"))
+                            clutch-connection dead
+                            clutch--connection-params session
+                            clutch--conn-sql-product 'postgres))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (push (apply #'format format-string args) messages))))
+                (clutch-test--without-credentials
+                  (clutch-query-console "alpha")))
+              (setq new clutch-connection)
               (should (eq (current-buffer) existing))
-              (should (eq major-mode 'clutch-mongodb-mode))
-              (should (eq clutch-connection 'new-conn))
-              (should (equal clutch--connection-params session)))))
-      (when (buffer-live-p existing)
-        (kill-buffer existing)))))
+              (should (eq major-mode mode))
+              (should (clutch-db-live-p new))
+              (should (equal (clutch-db-database new) session-file))
+              (dolist (buffer (list existing attached))
+                (should (eq (buffer-local-value 'clutch-connection buffer) new))
+                (should (equal (buffer-local-value 'clutch--connection-params buffer)
+                               session)))
+              (should (eq (buffer-local-value 'clutch--conn-sql-product existing)
+                          'postgres))
+              (should-not (clutch--tx-state dead))
+              (should (member (format "Reconnected to sqlite:%s; uncommitted changes were lost"
+                                      session-file)
+                              messages)))
+          (dolist (buffer (list existing attached))
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer)))
+          (when (and new (clutch-db-live-p new)) (clutch-db-disconnect new))
+          (delete-directory dir t))))))
 
 (ert-deftest clutch-test-query-console-persistence-file-precedence ()
   "Query console should read identity files before legacy alias files."
@@ -4470,230 +3719,200 @@ connection from the console."
                   ("identity wins" "SELECT stable;" "SELECT stable;")))
     (pcase-let ((`(,label ,identity-content ,expected) case))
       (ert-info ((format "case: %s" label))
-        (let* ((name "alpha")
-               (dir (make-temp-file "clutch-console-" t))
-               (params '(:backend mysql
-                         :host "db.internal"
-                         :port 3306
-                         :user "app"
-                         :database "prod"))
-               (storage-name (clutch--console-persistence-name name params))
-               (clutch-console-directory dir)
-               (clutch-connection-alist `((,name . ,params)))
-               built
-               opened)
+        (let* ((dir (make-temp-file "clutch-console-" t))
+               (clutch-console-directory (expand-file-name "consoles" dir))
+               (params (list :backend 'sqlite
+                             :database (expand-file-name "prod.db" dir)))
+               (storage-name (clutch--console-persistence-name "alpha" params))
+               (clutch-connection-alist `(("alpha" . ,params)))
+               conn opened)
           (unwind-protect
               (progn
-                (with-temp-file (expand-file-name "alpha.sql" dir)
+                (make-directory clutch-console-directory t)
+                (with-temp-file (clutch--console-file "alpha")
                   (insert "SELECT legacy;"))
                 (when identity-content
                   (with-temp-file (clutch--console-file storage-name)
                     (insert identity-content)))
-                (clutch-test--with-connect-build-stubs
-                    (built 'mysql 'conn)
-                  (clutch-query-console name)
-                  (setq opened (current-buffer))
-                  (should (equal built (append params '(:pass-entry "alpha"))))
-                  (should (equal (buffer-string) expected))
-                  (should-not (equal clutch--console-storage-name name))))
+                (clutch-test--without-credentials
+                  (clutch-query-console "alpha"))
+                (setq opened (current-buffer)
+                      conn clutch-connection)
+                (should (clutch-db-live-p conn))
+                (should (equal (buffer-string) expected))
+                (should-not (equal clutch--console-storage-name "alpha")))
             (when (buffer-live-p opened)
               (kill-buffer opened))
+            (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn))
             (delete-directory dir t)))))))
-
-(ert-deftest clutch-test-connect-outside-console-still-uses-generic-read-flow ()
-  "Non-console buffers should keep the generic interactive connect flow."
-  (with-temp-buffer
-    (let ((clutch-connection-alist '(("alpha" . (:backend mysql :database "app_a"))))
-          built)
-      (cl-letf (((symbol-function 'clutch--read-connection-params)
-                 (lambda () '(:backend mysql :database "manual_db"))))
-        (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-          (clutch-connect)
-          (should (equal built '(:backend mysql :database "manual_db")))
-          (should (equal clutch--session-target
-                         (clutch--connection-target
-                          (clutch-prepare-connection-params
-                           '(:backend mysql :database "manual_db"))))))))))
 
 (ert-deftest clutch-test-connect-outside-a-console-follows-the-picked-target ()
   "`C-c C-e' outside a console should move a session picked again.
 Picking the connection the session was on started a new session in the
 mode that connection starts in and left the buffer's results without a
 connection.  Picking another connects the buffer alone."
-  (let ((clutch-connection-alist
-         '(("alpha" . (:backend mysql :host "db1" :database "app"))
-           ("beta" . (:backend mysql :host "db2" :database "app"))))
-        picked built replaced)
-    (with-temp-buffer
-      (clutch-mode)
-      (setq-local clutch-connection 'old-conn
-                  clutch--session-target
-                  (clutch--connection-target
-                   (clutch-prepare-connection-params
-                    (clutch--saved-connection-params "alpha"))))
-      (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (memq conn '(old-conn new-conn))))
-                  ((symbol-function 'clutch--confirm-session-close) #'ignore)
-                  ((symbol-function 'clutch--read-connection-params)
-                   (lambda () (clutch--saved-connection-params picked)))
-                  ((symbol-function 'clutch--replace-connection)
-                   (lambda (&rest _) (setq replaced t)))
-                  ((symbol-function 'clutch--do-disconnect) #'ignore))
-          (setq picked "alpha")
-          (clutch-connect)
-          (should replaced)
-          (setq replaced nil
-                picked "beta")
-          (clutch-connect)
-          (should-not replaced)
-          (should (equal (plist-get built :host) "db2"))
-          (should (equal clutch--session-target
-                         (clutch--connection-target
-                          (clutch-prepare-connection-params
-                           (clutch--saved-connection-params "beta"))))))))))
-
-(ert-deftest clutch-test-connect-in-an-indirect-edit-leaves-its-console-session ()
-  "`C-c C-e' in an indirect edit should leave the session of its console.
-Connecting the edit elsewhere asked to close and then disconnected the
-console's session, which the edit only borrows."
-  (let ((console (generate-new-buffer " *clutch-test-console*"))
-        (clutch-connection-alist
-         '(("alpha" . (:backend mysql :host "db1"))
-           ("beta" . (:backend mysql :host "db2"))))
-        built ended asked)
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-connection-alist
+          `(("alpha" . (:backend sqlite :database ,(expand-file-name "db1.db" dir)))
+            ("beta" . (:backend sqlite :database ,(expand-file-name "db2.db" dir)))))
+         (result (generate-new-buffer " *clutch-connect-result*"))
+         conns)
     (unwind-protect
-        (let ((target (clutch--connection-target
-                       (clutch-prepare-connection-params
-                        (clutch--saved-connection-params "alpha")))))
+        (with-temp-buffer
+          (clutch-mode)
+          (clutch-test--without-credentials
+            (clutch-test--with-minibuffer-answers '("alpha")
+              (clutch-connect))
+            (push clutch-connection conns)
+            (with-current-buffer result
+              (setq-local clutch-connection (car conns)))
+            ;; Picking the session's own connection moves the session.
+            (clutch-test--with-minibuffer-answers '("alpha")
+              (clutch-connect))
+            (push clutch-connection conns)
+            (should-not (eq (nth 0 conns) (nth 1 conns)))
+            (should-not (clutch-db-live-p (nth 1 conns)))
+            (should (eq (buffer-local-value 'clutch-connection result) (nth 0 conns)))
+            ;; Picking another connects the buffer alone.
+            (clutch-test--with-minibuffer-answers '("beta")
+              (clutch-connect))
+            (push clutch-connection conns)
+            (should-not (eq (nth 0 conns) (nth 1 conns)))
+            (should-not (clutch-db-live-p (nth 1 conns)))
+            (should-not (buffer-local-value 'clutch-connection result))
+            (should (equal (clutch-db-database (nth 0 conns))
+                           (expand-file-name "db2.db" dir)))
+            (should (equal clutch--session-target
+                           (clutch--connection-target
+                            (clutch-prepare-connection-params
+                             (clutch--saved-connection-params "beta")))))))
+      (kill-buffer result)
+      (dolist (conn conns)
+        (when (clutch-db-live-p conn) (clutch-db-disconnect conn)))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-test-connect-in-an-indirect-edit-ends-only-its-own-session ()
+  "`C-c C-e' in an indirect edit should leave its console's session and end its own.
+Connecting the edit elsewhere asked to close and then disconnected the
+console's session, which the edit only borrows.  Connecting the edit
+elsewhere a second time left the session it had connected open and asked
+nothing about its uncommitted work, as if that session were still its
+console's."
+  (let* ((dir (make-temp-file "clutch-console-" t))
+         (clutch-connection-alist
+          `(("alpha" . (:backend sqlite :database ,(expand-file-name "db1.db" dir)))
+            ("beta" . (:backend sqlite :database ,(expand-file-name "db2.db" dir)))
+            ("gamma" . (:backend sqlite :database ,(expand-file-name "db3.db" dir)))))
+         (clutch--tx-state-cache (make-hash-table :test 'eq))
+         (clutch--connection-transport-cache (make-hash-table :test 'eq))
+         (console (generate-new-buffer " *clutch-test-console*"))
+         (console-conn (clutch-db-sqlite-connect
+                        (clutch--saved-connection-params "alpha")))
+         (target (clutch--connection-target
+                  (clutch-prepare-connection-params
+                   (clutch--saved-connection-params "alpha"))))
+         beta-conn gamma-conn prompts)
+    (unwind-protect
+        (clutch-test--with-isolated-metadata-caches
           (with-current-buffer console
-            (setq-local clutch-connection 'old-conn
+            (setq-local clutch-connection console-conn
                         clutch--session-target target))
+          ;; Closing the console's session would ask about this work, and
+          ;; ending it would drop its metadata and transport.
+          (puthash console-conn 'dirty clutch--tx-state-cache)
+          (puthash console-conn (make-hash-table :test 'equal) clutch--schema-cache)
+          (puthash console-conn '(:host "db1") clutch--connection-transport-cache)
           (with-temp-buffer
             (clutch-mode)
             (clutch--indirect-mode 1)
-            (setq-local clutch-connection 'old-conn
+            (setq-local clutch-connection console-conn
                         clutch--session-target target)
-            (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-              (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                         (lambda (conn) (memq conn '(old-conn new-conn))))
-                        ((symbol-function 'clutch--confirm-session-close)
-                         (lambda (&rest _) (setq asked t)))
-                        ((symbol-function 'clutch--read-connection-params)
-                         (lambda () (clutch--saved-connection-params "beta")))
-                        ((symbol-function 'clutch--do-disconnect)
-                         (lambda (conn) (push conn ended)))
-                        ((symbol-function 'clutch--release-connection-transport)
-                         (lambda (conn) (push conn ended)))
-                        ((symbol-function 'clutch--clear-connection-metadata-caches)
-                         (lambda (conn) (push conn ended))))
-                (clutch-connect)
-                (should (eq clutch-connection 'new-conn))
-                (should-not ended)
-                (should-not asked)
-                (should (eq (buffer-local-value 'clutch-connection console)
-                            'old-conn))))))
-      (kill-buffer console))))
-
-(ert-deftest clutch-test-connect-in-an-indirect-edit-ends-its-own-session ()
-  "`C-c C-e' in an indirect edit should end a session the edit connected.
-Connecting the edit elsewhere a second time left the session it had
-connected open and asked nothing about its uncommitted work, as if that
-session were still its console's."
-  (let ((clutch-connection-alist
-         '(("beta" . (:backend mysql :host "db2"))
-           ("gamma" . (:backend mysql :host "db3"))))
-        (conns '(beta-conn gamma-conn))
-        picked ended asked)
-    (with-temp-buffer
-      (clutch-mode)
-      (clutch--indirect-mode 1)
-      (setq-local clutch-connection 'console-conn)
-      (cl-letf (((symbol-function 'clutch--build-conn)
-                 (lambda (_params) (pop conns)))
-                ((symbol-function 'clutch--effective-sql-product)
-                 (lambda (_params) 'mysql))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (and conn (not (memq conn ended)))))
-                ((symbol-function 'clutch--confirm-session-close)
-                 (lambda (conn _action) (push conn asked)))
-                ((symbol-function 'clutch--read-connection-params)
-                 (lambda () (clutch--saved-connection-params picked)))
-                ((symbol-function 'clutch--do-disconnect)
-                 (lambda (conn) (push conn ended)))
-                ((symbol-function 'clutch--release-connection-transport)
-                 #'ignore)
-                ((symbol-function 'clutch--clear-connection-metadata-caches)
-                 #'ignore)
-                ((symbol-function 'clutch--activate-current-buffer-connection)
-                 (lambda (conn params _product)
-                   (setq-local clutch-connection conn
-                               clutch--connection-params params)))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "test-conn"))
-                ((symbol-function 'message) #'ignore))
-        (setq picked "beta")
-        (clutch-connect)
-        (should (eq clutch-connection 'beta-conn))
-        (should-not ended)
-        (should-not asked)
-        (setq picked "gamma")
-        (clutch-connect)
-        (should (eq clutch-connection 'gamma-conn))
-        (should (equal ended '(beta-conn)))
-        (should (equal asked '(beta-conn)))))))
+            (clutch-test--without-credentials
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (_prompt)
+                           (ert-fail "the console session must not be closed"))))
+                (clutch-test--with-minibuffer-answers '("beta")
+                  (clutch-connect)))
+              (setq beta-conn clutch-connection)
+              (should (equal (clutch-db-database beta-conn)
+                             (expand-file-name "db2.db" dir)))
+              (should (clutch-db-live-p console-conn))
+              (should (eq (buffer-local-value 'clutch-connection console)
+                          console-conn))
+              (should (clutch--tx-dirty-p console-conn))
+              (should (gethash console-conn clutch--schema-cache))
+              (should (gethash console-conn clutch--connection-transport-cache))
+              ;; The session the edit connected is its own.
+              (puthash beta-conn 'dirty clutch--tx-state-cache)
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (prompt) (push prompt prompts) t)))
+                (clutch-test--with-minibuffer-answers '("gamma")
+                  (clutch-connect)))
+              (setq gamma-conn clutch-connection)
+              (should (equal (clutch-db-database gamma-conn)
+                             (expand-file-name "db3.db" dir)))
+              (should-not (clutch-db-live-p beta-conn))
+              (should (= (length prompts) 1))
+              (should (string-match-p "Uncommitted changes will be lost" (car prompts)))
+              (should (clutch-db-live-p console-conn)))))
+      (kill-buffer console)
+      (dolist (conn (list console-conn beta-conn gamma-conn))
+        (when (and conn (clutch-db-live-p conn)) (clutch-db-disconnect conn)))
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-connect-over-dead-connection-releases-only-its-transport ()
   "Connecting over a dead connection should release its transport only.
 Other buffers keep the dead connection so their next command can reconnect
 them in place."
-  (let ((other (generate-new-buffer " *clutch-other*")))
+  (skip-unless (executable-find "sleep"))
+  (let* ((db-file (make-temp-file "clutch-manual-" nil ".db"))
+         (old-conn (clutch-db-sqlite-connect (list :backend 'sqlite :database db-file)))
+         (proc (start-process "clutch-test-tunnel" nil "sleep" "60"))
+         (other (generate-new-buffer " *clutch-other*"))
+         (clutch-connection-alist nil)
+         (clutch--connection-transport-cache (make-hash-table :test 'eq))
+         new)
     (unwind-protect
         (with-temp-buffer
-          (setq-local clutch-connection 'old-conn)
+          (clutch-mode)
+          (setq-local clutch-connection old-conn)
           (with-current-buffer other
-            (setq-local clutch-connection 'old-conn))
-          (let (built released)
-            (cl-letf (((symbol-function 'clutch--read-connection-params)
-                       (lambda () '(:backend mysql :database "manual_db")))
-                      ((symbol-function 'clutch--release-connection-transport)
-                       (lambda (conn) (push conn released))))
-              (clutch-test--with-connect-build-stubs (built 'mysql 'new-conn)
-                (clutch-connect)
-                (should (memq 'old-conn released))
-                (should (eq clutch-connection 'new-conn))
-                (should (eq (buffer-local-value 'clutch-connection other)
-                            'old-conn))))))
-      (kill-buffer other))))
+            (setq-local clutch-connection old-conn))
+          (puthash old-conn (list :kind 'ssh :process proc)
+                   clutch--connection-transport-cache)
+          (clutch-db-disconnect old-conn)
+          (clutch-test--with-minibuffer-answers (list "sqlite" db-file)
+            (clutch-connect))
+          (setq new clutch-connection)
+          (should-not (process-live-p proc))
+          (should-not (gethash old-conn clutch--connection-transport-cache))
+          (should (clutch-db-live-p new))
+          (should-not (eq new old-conn))
+          (should (eq (buffer-local-value 'clutch-connection other) old-conn)))
+      (kill-buffer other)
+      (when (process-live-p proc) (delete-process proc))
+      (when (and new (clutch-db-live-p new)) (clutch-db-disconnect new))
+      (delete-file db-file))))
 
 (ert-deftest clutch-test-connect-keeps-bound-connection-when-schema-priming-quits ()
   "A quit while priming the schema must not disconnect the bound connection."
-  (let (disconnected released)
-    (with-temp-buffer
-      (setq-local clutch-connection nil)
-      (cl-letf (((symbol-function 'clutch--connect-params-for-current-buffer)
-                 (lambda () '(:backend sqlite :database "x.db")))
-                ((symbol-function 'clutch-prepare-connection-params)
-                 (lambda (params _directory) params))
-                ((symbol-function 'clutch--materialize-connection-params) #'identity)
-                ((symbol-function 'clutch--effective-sql-product)
-                 (lambda (_params) 'sqlite))
-                ((symbol-function 'clutch--build-conn) (lambda (_params) 'new-conn))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'clutch--clear-connection-metadata-caches) #'ignore)
-                ((symbol-function 'clutch--bind-connection-context)
-                 (lambda (conn &rest _) (setq-local clutch-connection conn)))
-                ((symbol-function 'clutch--prime-schema-cache)
-                 (lambda (_conn) (signal 'quit nil)))
-                ((symbol-function 'clutch-db-disconnect)
-                 (lambda (conn) (setq disconnected conn)))
-                ((symbol-function 'clutch--release-connection-transport)
-                 (lambda (conn) (push conn released))))
-        (condition-case nil (clutch-connect) (quit nil))
-        (should (eq clutch-connection 'new-conn))
-        (should-not disconnected)
-        (should-not (memq 'new-conn released))))))
+  (let* ((db-file (make-temp-file "clutch-quit-" nil ".db"))
+         (params (list :backend 'sqlite :database db-file))
+         (clutch--connection-transport-cache (make-hash-table :test 'eq))
+         new)
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local clutch--console-name "SQLite: quit"
+                      clutch--console-ad-hoc-params params)
+          (cl-letf (((symbol-function 'clutch--prime-schema-cache)
+                     (lambda (_conn) (signal 'quit nil))))
+            (condition-case nil (clutch-connect) (quit nil)))
+          (setq new clutch-connection)
+          (should (clutch-db-live-p new))
+          (should (gethash new clutch--connection-transport-cache))
+          (should (equal clutch--session-target (clutch--connection-target params))))
+      (when (and new (clutch-db-live-p new)) (clutch-db-disconnect new))
+      (delete-file db-file))))
 
 ;;;; Schema and database switching
 
@@ -4716,45 +3935,43 @@ them in place."
                    (:driver oracle :schema "ALT_LOWER"))))
     (pcase-let ((`(,label ,params ,schemas ,current ,selected ,expected) case))
       (ert-info ((format "backend: %s" label))
-        (let ((conn (list 'fake-conn label))
-              (effective current)
-              switched cleared-conns refresh-quiet message-text)
-          (with-temp-buffer
-            (setq-local clutch-connection conn
-                        clutch--connection-params (copy-sequence params))
-            (cl-letf (((symbol-function 'clutch-db-list-schemas)
-                       (lambda (_conn) schemas))
-                      ((symbol-function 'clutch-db-current-schema)
-                       (lambda (_conn) effective))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _args) selected))
-                      ((symbol-function 'clutch-db-set-current-schema)
-                       (lambda (_conn schema)
-                         (setq switched schema
-                               effective schema)
-                         schema))
-                      ((symbol-function 'clutch-db-update-namespace-params)
-                       (lambda (actual-conn _actual-params)
-                         (should (eq actual-conn conn))
-                         (copy-sequence expected)))
-                      ((symbol-function 'clutch--clear-connection-metadata-caches)
-                       (lambda (actual-conn)
-                         (push actual-conn cleared-conns)))
-                      ((symbol-function 'clutch--refresh-current-schema)
-                       (lambda (&optional quiet)
-                         (setq refresh-quiet quiet)
-                         t))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq message-text (apply #'format fmt args)))))
-              (clutch-switch-schema)
-              (should (equal switched selected))
-              (should (equal clutch--connection-params expected))
-              (should (equal cleared-conns (list conn)))
-              (should refresh-quiet)
-              (should (equal message-text
-                             (format "Current schema/database: %s"
-                                     selected))))))))))
+        (clutch-test--with-isolated-metadata-caches
+          (let ((conn (list 'fake-conn label))
+                (effective current)
+                switched refresh-quiet message-text)
+            (puthash conn (make-hash-table :test 'equal) clutch--schema-cache)
+            (with-temp-buffer
+              (setq-local clutch-connection conn
+                          clutch--connection-params (copy-sequence params))
+              (cl-letf (((symbol-function 'clutch-db-list-schemas)
+                         (lambda (_conn) schemas))
+                        ((symbol-function 'clutch-db-current-schema)
+                         (lambda (_conn) effective))
+                        ((symbol-function 'clutch-db-set-current-schema)
+                         (lambda (_conn schema)
+                           (setq switched schema
+                                 effective schema)
+                           schema))
+                        ((symbol-function 'clutch-db-update-namespace-params)
+                         (lambda (actual-conn _actual-params)
+                           (should (eq actual-conn conn))
+                           (copy-sequence expected)))
+                        ((symbol-function 'clutch--refresh-current-schema)
+                         (lambda (&optional quiet)
+                           (setq refresh-quiet quiet)
+                           t))
+                        ((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (setq message-text (apply #'format fmt args)))))
+                (clutch-test--with-minibuffer-answers (list selected)
+                  (clutch-switch-schema))
+                (should (equal switched selected))
+                (should (equal clutch--connection-params expected))
+                (should-not (gethash conn clutch--schema-cache))
+                (should refresh-quiet)
+                (should (equal message-text
+                               (format "Current schema/database: %s"
+                                       selected)))))))))))
 
 (ert-deftest clutch-test-switch-schema-failure-populates-problem-record-and-debug-trace ()
   "Schema-switch failures should feed the shared problem/debug workflow."
@@ -4775,14 +3992,14 @@ them in place."
                    (lambda (_conn) '("SALES" "ANALYTICS")))
                   ((symbol-function 'clutch-db-current-schema)
                    (lambda (_conn) "SALES"))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _args) "ANALYTICS"))
                   ((symbol-function 'clutch-db-set-current-schema)
                    (lambda (_conn _schema)
                      (signal 'clutch-db-error
                              (list "ORA-12592: TNS:bad packet" details)))))
-          (let ((error (should-error (clutch-switch-schema)
-                                     :type 'user-error)))
+          (let ((error (should-error
+                        (clutch-test--with-minibuffer-answers '("ANALYTICS")
+                          (clutch-switch-schema))
+                        :type 'user-error)))
             (should (string-match-p "ORA-12592" (cadr error)))
             (should (string-match-p (regexp-quote clutch-debug-buffer-name)
                                     (cadr error))))
@@ -4799,7 +4016,7 @@ them in place."
 
 (ert-deftest clutch-test-switch-schema-clickhouse-replaces-selected-database ()
   "ClickHouse switching should delegate one replacement with selected params."
-  (let ((old-conn (list 'old-conn))
+  (let ((old-conn (make-clutch-test-conn))
         replacement)
     (with-temp-buffer
       (setq-local clutch-connection old-conn
@@ -4815,15 +4032,11 @@ them in place."
                 ((symbol-function 'clutch-db-namespace-reconnect-params)
                  (lambda (_conn params namespace)
                    (plist-put (copy-sequence params) :database namespace)))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) nil))
-                ((symbol-function 'completing-read)
-                 (lambda (&rest _args) "demo"))
                 ((symbol-function 'clutch--replace-connection)
                  (lambda (conn params product)
-                   (setq replacement (list conn params product))))
-                ((symbol-function 'message) #'ignore))
-        (clutch-switch-schema)
+                   (setq replacement (list conn params product)))))
+        (clutch-test--with-minibuffer-answers '("demo")
+          (clutch-switch-schema))
         (should
          (equal replacement
                 (list old-conn
@@ -4885,33 +4098,25 @@ them in place."
             (should (= requests 2))))))))
 
 (ert-deftest clutch-test-mongodb-completion-ignores-collection-text-in-strings ()
-  "Installed field completion should resolve code, not collection-like data."
+  "Field completion should resolve code, not collection-like data."
   (dolist (expression '("db.users.find({note: \"ordinary\", na"
                         "db.users.find({note: \"db.orders.find(\", na"
                         "db.users.find({note: 1 /* db.orders.find( */, na"
                         "db.users.find({note: 1 // db.orders.find(\n, na"
                         "db.getCollection(\"users\").find({note: \"db.orders.find(\", na"))
     (clutch-test--with-isolated-metadata-caches
-      (let* ((conn (make-clutch-mongodb-conn :database "test"))
-             (schema (make-hash-table :test 'equal))
-             captured)
+      (let ((conn (make-clutch-test-conn))
+            (schema (make-hash-table :test 'equal)))
         (puthash "users" '("name" "note") schema)
         (puthash "orders" '("order_id") schema)
         (puthash conn schema clutch--schema-cache)
-        (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t))
-                  ((symbol-function 'completion-in-region)
-                   (lambda (beg end collection &optional predicate)
-                     (setq captured
-                           (all-completions
-                            (buffer-substring-no-properties beg end)
-                            collection predicate))
-                     t)))
-          (with-temp-buffer
-            (clutch-mongodb-mode)
-            (setq-local clutch-connection conn)
-            (insert expression)
-            (completion-at-point)
-            (should (equal captured '("name")))))))))
+        (with-temp-buffer
+          (clutch-mongodb-mode)
+          (setq-local clutch-connection conn)
+          (insert expression)
+          (should (equal (clutch-test--completion-candidates
+                          (clutch-mongodb-completion-at-point))
+                         '("name"))))))))
 
 (provide 'clutch-test-connection)
 
