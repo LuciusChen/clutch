@@ -95,6 +95,12 @@ By default, CSV/TSV copy and export write SQL NULL as an unquoted empty field, a
 
 This writes SQL NULL as =NULL=, empty text as an unquoted empty field, and literal =NULL= text as ="NULL"=.
 
+=clutch-csv-delimiter= sets the CSV field separator, a comma by default, for copying and both file exporters; PostgreSQL's streamed query export passes it to =COPY=. Fields containing it are quoted. TSV always uses tabs. For example, for spreadsheets that expect semicolons:
+
+#+begin_src emacs-lisp
+(setq clutch-csv-delimiter ?\;)
+#+end_src
+
 The =/= filter searches only the loaded page. The footer preserves the unfiltered page range and total, and separately reports how many page rows match. A zero-match page explains how to change or clear the filter. Transaction state and staged counts precede row statistics and sorting so long secondary labels do not hide them first; long sort/filter expressions are shortened with full hover text.
 
 File exports prompt for their destination before fetching rows. CSV, TSV, INSERT and UPDATE output is formatted and written in batches, with one header and one BOM when selected. Symbolic links are preserved and output goes to their final target. Filename-based transformations such as =.gz= compression run once on the complete encoded output and may hold it in memory. The destination is replaced only after success; errors and =C-g= preserve an existing file. Clipboard output and native document =insertMany= helpers still require the complete output in memory. Bounded or nonpageable backend queries may also materialize their result before formatting.
@@ -546,6 +552,7 @@ Customize these through =M-x customize-group RET clutch RET=:
 - =clutch-export-default-directory= sets the offered file export directory; =nil= uses the current buffer's directory.
 - =clutch-export-default-file-name= sets the offered CSV and TSV file name; =nil= uses the format's default.
 - =clutch-export-null-value-text= sets the unquoted CSV/TSV NULL marker (an empty field by default).
+- =clutch-csv-delimiter= sets the CSV field separator for copy and export (a comma by default).
 - =clutch-jdbc-fetch-size= controls JDBC cursor batch size from 1 through 10,000 rows (default 500).
 - =clutch-primary-object-types= chooses which object types =C-c C-j= treats as the primary jump set.
 - =clutch-sql-completion-case-style= controls whether SQL completion preserves, lowercases, or uppercases inserted identifiers/keywords.
