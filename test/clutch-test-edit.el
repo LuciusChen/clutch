@@ -238,13 +238,17 @@ the edit buffer behind it is killed with it."
                            expected-pending))))))))
 
 (ert-deftest clutch-test-edit-cell-rejects-stale-source ()
-  "Finishing an edit should not stage over a changed visible row or cell."
+  "Finishing an edit should not stage over a changed visible row or cell.
+A row that shows the same value under another identity has changed too."
   (dolist (case '((row-identity
                    ((1 "alice") (2 "bob"))
                    ((2 "bob") (1 "alice")))
                   (cell-value
                    ((1 "alice"))
-                   ((1 "remote")))))
+                   ((1 "remote")))
+                  (identity-only
+                   ((1 "alice"))
+                   ((2 "alice")))))
     (pcase-let ((`(,label ,initial-rows ,updated-rows) case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-open-edit-cell (buf result-buf)
@@ -712,10 +716,11 @@ field metadata without changing parsed names."
 
 (ert-deftest clutch-test-insert-import-delimited-prefills-or-stages-rows ()
   "Delimited import should prefill the form from one row and stage several.
-Single-row CSV import should prefill the current insert form, and
-multi-row delimited import should stage inserts by header names.
-Importing rows should be refused while a statement runs, as staging is:
-the page that statement brings would replace the staged rows."
+Single-row CSV import should prefill the current insert form over what
+was typed in it, and multi-row delimited import should stage inserts by
+header names and empty the form.  Importing rows should be refused while
+a statement runs, as staging is: the page that statement brings would
+replace the staged rows."
   (pcase-dolist (`(,label ,text ,running ,form ,staged)
                  '(("one CSV row" "owner,severity\n\"Bob, Jr.\",high\n" nil
                     ("^owner[ ]*: Bob, Jr\\.$"
@@ -746,6 +751,7 @@ the page that statement brings would replace the staged rows."
               (puthash (buffer-local-value 'clutch-connection result-buf)
                        (list :buffer result-buf) clutch--running-queries))
             (with-current-buffer insert-buf
+              (clutch-test--set-insert-field-value "severity" "low")
               (if running
                   (should-error (clutch-result-insert-import-delimited text)
                                 :type 'user-error)
@@ -982,27 +988,36 @@ for deletion."
 (ert-deftest clutch-test-submit-refuses-while-a-query-runs ()
   "Submitting staged changes should be refused while a statement runs.
 JDBC opens the batch with a synchronous call that waits for the running
-statement, so the refusal has to come before the prompt and the batch."
-  (clutch-test--with-each-kind-staged (conn)
-    (let ((clutch--running-queries (make-hash-table :test 'eq))
-          (pending clutch--pending-edits)
-          prompted batched)
-      (puthash conn (list :buffer (current-buffer)) clutch--running-queries)
-      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t))))
-        (advice-add 'clutch-db-call-with-atomic-batch :before
-                    (lambda (&rest _) (setq batched t)) '((name . test-batch)))
-        (unwind-protect
-            (should (string-match-p
-                     "A query is running"
-                     (error-message-string
-                      (should-error (clutch-result-submit) :type 'user-error))))
-          (advice-remove 'clutch-db-call-with-atomic-batch 'test-batch)))
-      (should-not prompted)
-      (should-not batched)
-      (should (equal (clutch-db-result-rows
-                      (clutch-db-query conn "SELECT id, name FROM t ORDER BY id"))
-                     '((1 "a") (2 "b"))))
-      (should (equal clutch--pending-edits pending)))))
+statement, so the refusal has to come before the prompt and the batch.
+A result with only staged inserts is refused as well."
+  (dolist (inserts-only '(nil t))
+    (ert-info ((if inserts-only "inserts only" "every kind"))
+      (clutch-test--with-each-kind-staged (conn)
+        (when inserts-only
+          (setq-local clutch--pending-edits nil
+                      clutch--pending-deletes nil))
+        (let ((clutch--running-queries (make-hash-table :test 'eq))
+              (pending (list clutch--pending-inserts clutch--pending-edits
+                             clutch--pending-deletes))
+              prompted batched)
+          (puthash conn (list :buffer (current-buffer)) clutch--running-queries)
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) (setq prompted t))))
+            (advice-add 'clutch-db-call-with-atomic-batch :before
+                        (lambda (&rest _) (setq batched t)) '((name . test-batch)))
+            (unwind-protect
+                (should (string-match-p
+                         "A query is running"
+                         (error-message-string
+                          (should-error (clutch-result-submit) :type 'user-error))))
+              (advice-remove 'clutch-db-call-with-atomic-batch 'test-batch)))
+          (should-not prompted)
+          (should-not batched)
+          (should (equal (clutch-db-result-rows
+                          (clutch-db-query conn "SELECT id, name FROM t ORDER BY id"))
+                         '((1 "a") (2 "b"))))
+          (should (equal (list clutch--pending-inserts clutch--pending-edits
+                               clutch--pending-deletes)
+                         pending)))))))
 
 (ert-deftest clutch-test-result-refuses-writes-after-its-source-moved ()
   "A result should refuse staging and submitting once its connection moved.
@@ -1420,10 +1435,10 @@ idle validation should validate every field changed since the last run."
 
 (ert-deftest clutch-test-edit-special-values-stage-only-from-their-commands ()
   "Only the NULL and DEFAULT commands should stage special values.
-The explicit NULL command should stage a nil value, and the explicit
-DEFAULT command, on \\`C-c C-d', the database-default sentinel; the edit
-buffer shows either as a placeholder.  Typing NULL or DEFAULT should
-stage literal text, not a special value."
+The explicit NULL command should stage a nil value and the explicit
+DEFAULT command the database-default sentinel, each shown in the edit
+buffer as a placeholder.  Typing NULL or DEFAULT should stage literal
+text, not a special value."
   (should (eq (lookup-key clutch--result-edit-mode-map (kbd "C-c C-d"))
               #'clutch-result-edit-set-default))
   (pcase-dolist (`(,text ,command ,special ,placeholder ,expected)
@@ -1432,7 +1447,7 @@ stage literal text, not a special value."
                     ,clutch--cell-default-placeholder)
                    ("NULL" nil nil nil "NULL")
                    ("DEFAULT" nil nil nil "DEFAULT")))
-    (ert-info ((format "%S, then %s" text (or command "typing")))
+    (ert-info ((format "%s on %S" (or command "finish") text))
       (let ((staged-value :not-called)
             quit-called)
         (clutch-test--with-result-edit-buffer _edit-buf text
@@ -1458,6 +1473,27 @@ stage literal text, not a special value."
             (clutch-result-edit-finish)
             (should quit-called)
             (should (equal staged-value expected))))))))
+
+(ert-deftest clutch-test-edit-finish-stages-nothing-for-an-unchanged-buffer ()
+  "Finishing an edit left as it opened should close it without staging.
+The result refuses an edit while a query runs, once its connection moved
+or once the row changed, which would keep an edit that changes nothing
+from closing."
+  (let ((staged-value :not-called)
+        quit-called)
+    (clutch-test--with-result-edit-buffer _edit-buf "42"
+      (setq-local clutch-result-edit--column-name "qty"
+                  clutch-result-edit--column-def '(:name "qty" :type-category numeric)
+                  clutch-result-edit--column-detail '(:name "qty" :type "int")
+                  clutch-result-edit--initial-value-state
+                  (clutch-result-edit--current-state)
+                  clutch-result--edit-callback
+                  (lambda (value) (setq staged-value value)))
+      (cl-letf (((symbol-function 'quit-window)
+                 (lambda (&rest _args) (setq quit-called t))))
+        (clutch-result-edit-finish)
+        (should quit-called)
+        (should (eq staged-value :not-called))))))
 
 (ert-deftest clutch-test-edit-finish-restores-result-cell-position ()
   "Finishing a cell edit should restore point without shifting the viewport."
