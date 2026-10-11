@@ -18,141 +18,91 @@
   (dolist (spec '((5 nil nil) (5 8 nil) (3 8 5)))
     (pcase-let ((`(,size ,total ,offset) spec))
       (clutch-test--with-result-state
-       (:rows '((6 "six") (7 "seven") (8 "eight"))
-              :page-current 1 :page-total-rows total :result-max-rows size)
-       (setq-local clutch--page-offset offset
-                   clutch--connection-render-state '(:connected-p t))
-       (clutch--render-result)
-       (let ((summary clutch--footer-base-string))
-         (dolist (pattern '("eight" "missing"))
-           (cl-letf (((symbol-function 'read-string)
-                      (lambda (&rest _) pattern)))
-             (call-interactively (key-binding (kbd "/"))))
-           (should (equal summary clutch--footer-base-string))
-           (should (string-match-p
-                    (if (equal pattern "eight") "1/3 page matches"
-                      "0/3 page matches")
-                    (clutch--footer-mode-line-display)))
-           (when (equal pattern "missing")
-             (should (string-match-p "No matches on this page" (buffer-string)))
-             (should (string-match-p "/.*clear" (buffer-string)))
-             (should-not (text-property-not-all
-                          (point-min) (point-max) 'clutch-row-idx nil))))
-         (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
-           (call-interactively (key-binding (kbd "/"))))
-         (should (equal summary clutch--footer-base-string))
-         (should (= 3 (length (clutch--result-display-rows))))
-         (should (= 3 (length clutch--row-start-positions)))
-         (should-not (string-match-p "No matches" (buffer-string))))))))
+          (:rows '((6 "six") (7 "seven") (8 "eight"))
+           :page-current 1 :page-total-rows total :result-max-rows size)
+        (setq-local clutch--page-offset offset
+                    clutch--connection-render-state '(:connected-p t))
+        (clutch--render-result)
+        (let ((summary clutch--footer-base-string))
+          (dolist (pattern '("eight" "missing"))
+            (clutch-test--with-minibuffer-answers (list pattern)
+              (call-interactively (key-binding (kbd "/"))))
+            (should (equal summary clutch--footer-base-string))
+            (should (string-match-p
+                     (if (equal pattern "eight") "1/3 page matches"
+                       "0/3 page matches")
+                     (clutch--footer-mode-line-display)))
+            (when (equal pattern "missing")
+              (should (string-match-p "No matches on this page" (buffer-string)))
+              (should (string-match-p "/.*clear" (buffer-string)))
+              (should-not (text-property-not-all
+                           (point-min) (point-max) 'clutch-row-idx nil))))
+          (clutch-test--with-minibuffer-answers '("")
+            (call-interactively (key-binding (kbd "/"))))
+          (should (equal summary clutch--footer-base-string))
+          (should (= 3 (length (clutch--result-display-rows))))
+          (should (= 3 (length clutch--row-start-positions)))
+          (should-not (string-match-p "No matches" (buffer-string))))))))
 
-(ert-deftest clutch-test-filter-apply-state ()
-  "Client-side filtering should update display rows and pattern."
-  (dolist (case
-           '((substring
-              ("id" "name")
-              ((:name "id" :type-category numeric)
-               (:name "name" :type-category text))
-              ((1 "alice") (2 "bob") (3 "carol"))
-              "ALI" ((1 "alice")) "ALI")
-             (formatted-value
-              ("id" "value")
-              ((:name "id" :type-category numeric)
-               (:name "value" :type-category numeric))
-              ((1 nil) (2 42) (3 "hello"))
-              "42" ((2 42)) "42")
-             (no-matches
-              ("id" "name")
-              ((:name "id") (:name "name"))
-              ((1 "alice") (2 "bob"))
-              "missing" nil "missing")))
-    (pcase-let ((`(,label ,columns ,column-defs ,rows
-                          ,pattern ,expected-rows ,expected-pattern)
-                 case))
+(ert-deftest clutch-test-client-filter-narrows-and-clears ()
+  "Client-side filtering should update display rows and pattern.
+Clearing the filter should restore the full result set."
+  (dolist (case '((substring ("id" "name") ((1 "alice") (2 "bob") (3 "carol"))
+                             "ALI" ((1 "alice")))
+                  (formatted-value ("id" "value") ((1 nil) (2 42) (3 "hello"))
+                                   "42" ((2 42)))
+                  (no-matches ("id" "name") ((1 "alice") (2 "bob"))
+                              "missing" nil)))
+    (pcase-let ((`(,label ,columns ,rows ,pattern ,expected-rows) case))
       (ert-info ((format "case: %s" label))
         (clutch-test--with-result-state
-            (:columns columns
-             :column-defs column-defs
-             :rows rows)
-          (cl-letf (((symbol-function 'clutch--render-result) #'ignore))
-            (clutch-result--apply-filter pattern)
-            (should (equal (clutch--result-display-rows) expected-rows))
-            (should (equal clutch--filter-pattern expected-pattern))))))))
-
-(ert-deftest clutch-test-filter-clear-restores-all-rows ()
-  "Clearing the client-side filter should restore the full result set."
-  (clutch-test--with-result-state
-      (:columns '("id" "name")
-       :column-defs '((:name "id" :type-category numeric)
-                      (:name "name" :type-category text))
-       :rows '((1 "alice") (2 "bob") (3 "carol"))
-       :column-widths [2 5])
-    (cl-letf (((symbol-function 'clutch--render-result) #'ignore))
-      (clutch-result--apply-filter "ali")
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _args) "")))
-        (clutch-result-filter))
-      (should-not clutch--filtered-rows)
-      (should-not clutch--filter-pattern))))
+            (:columns columns :rows rows :render t)
+          (clutch-test--with-minibuffer-answers (list pattern)
+            (clutch-result-filter))
+          (should (equal (clutch--result-display-rows) expected-rows))
+          (should (equal clutch--filter-pattern pattern))
+          (clutch-test--with-minibuffer-answers '("")
+            (clutch-result-filter))
+          (should-not clutch--filter-pattern)
+          (should-not clutch--filtered-rows)
+          (should (equal (clutch--result-display-rows) rows)))))))
 
 (ert-deftest clutch-test-apply-filter-contract ()
   "WHERE filtering should validate, rewrite, clear, and execute consistently."
   (with-temp-buffer
     (should-error (clutch-result-apply-filter) :type 'user-error))
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--last-query "SELECT * FROM t"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--result-columns '("clutch__rid_0" "id" "name")
-                clutch--result-column-defs
-                '((:name "clutch__rid_0" :hidden t)
-                  (:name "id")
-                  (:name "name"))
-                clutch--header-active-col 1
-                clutch--where-filter nil)
-    (let (seen)
-      (cl-letf (((symbol-function 'clutch--read-where-filter)
-                 (lambda (_current columns default-col _conn)
-                   (setq seen (list columns default-col))
-                   "id > 1"))
-                ((symbol-function 'clutch--execute) #'ignore))
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)"
+        "INSERT INTO t VALUES (1, 'ann', 10), (2, 'bob', 20)")
+      "SELECT name, score FROM t ORDER BY id"
+    ;; The hidden row identity column is not offered, and the column at
+    ;; point is the default.
+    (should (equal (plist-get clutch--row-identity :indices) '(2)))
+    (clutch--goto-cell 0 1)
+    (clutch--sync-result-cursor-ui)
+    (let (offered default)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &optional _predicate _require-match
+                                  _initial _history def &rest _)
+                   (setq offered collection
+                         default def)
+                   ""))
+                ((symbol-function 'read-string) (lambda (&rest _) "")))
         (clutch-result-apply-filter)
-        (should (equal seen '(("id" "name") "id"))))))
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--last-query "SELECT * FROM t"
-                clutch--base-query "SELECT * FROM t"
-                clutch--result-source-table "t"
-                clutch--result-server-pageable t
-                clutch--result-server-rewritable t
-                clutch--where-filter "id > 5")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--execute)
-                 (lambda (sql &optional result-context)
-                   (setq captured (list sql result-context)))))
-        (clutch-test--with-minibuffer-answers '("")
-          (clutch-result-apply-filter))
-        ;; The cleared filter state is installed with the new result.
-        (should (equal captured
-                       '("SELECT * FROM t"
-                         (:base-query nil :where-filter nil
-                          :keep-result-on-error t
-                          :success-message "Filter cleared")))))))
-  (with-temp-buffer
-    (setq-local clutch--result-server-rewritable nil
-                clutch-connection 'fake-conn
-                clutch--last-query "SELECT a.*, b.* FROM a JOIN b ON a.id = b.id LIMIT 10"
-                clutch--base-query clutch--last-query
-                clutch--result-columns '("id" "name" "id"))
-    (let (executed)
-      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _args) "id"))
-                ((symbol-function 'read-string) (lambda (&rest _args) "= 1"))
-                ((symbol-function 'clutch--execute)
-                 (lambda (&rest _args) (setq executed t))))
-        (let ((err (should-error (clutch-result-apply-filter)
-                                 :type 'user-error)))
-          (should (string-match-p "Server-side filter"
-                                  (error-message-string err))))
-        (should-not executed)))))
+        (clutch-test--await-queries))
+      (should (equal offered '("name" "score")))
+      (should (equal default "score"))))
+  ;; A result Clutch cannot rewrite refuses before running anything.
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO t VALUES (1, 'ann'), (2, 'bob')")
+      "SELECT a.id, b.id FROM t a JOIN t b ON a.id = b.id"
+    (should-not clutch--result-server-rewritable)
+    (let ((rows clutch--result-rows)
+          (err (should-error (clutch-result-apply-filter) :type 'user-error)))
+      (should (string-match-p "Server-side filter" (error-message-string err)))
+      (should (zerop (hash-table-count clutch--running-queries)))
+      (should (eq rows clutch--result-rows)))))
 
 (ert-deftest clutch-test-where-filter-real-sqlite-workflow ()
   "\\`W' should change, mistype, write out and clear a filter like a user.
@@ -196,11 +146,12 @@ default returns the default."
         (should (equal (ids) '(1 3)))
         (should (member "Filter applied: WHERE `name` LIKE 'a%'" shown))
         ;; With point on a column, RET picks it and an empty condition
-        ;; clears the filter.
+        ;; clears the filter, with the query it filtered.
         (point-on "score")
         (filter "" "")
         (should (equal (ids) '(1 2 3)))
         (should-not (buffer-local-value 'clutch--where-filter result))
+        (should-not (buffer-local-value 'clutch--base-query result))
         (should (member "Filter cleared" shown))
         ;; A mistake without a filter keeps the query, so g and the
         ;; next filter still start from it.
@@ -214,54 +165,61 @@ default returns the default."
         ;; Without a column at point, RET asks for the whole condition.
         (point-on "nothing")
         (filter "" "id = 2")
-        (should (equal (ids) '(2)))))))
+        (should (equal (ids) '(2)))
+        ;; A bare value after a column compares for equality.
+        (filter "score" "10")
+        (should (equal (ids) '(1)))
+        (should (member "Filter applied: WHERE \"score\" = 10" shown))))))
 
 (ert-deftest clutch-test-where-filter-column-prompt-prefers-exact-names ()
   "A name at the column prompt should pick the column it spells exactly.
 Matching in any case only picks a column when no other one matches."
-  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-             (lambda (_conn name) (format "\"%s\"" name))))
+  (let ((conn (make-clutch-test-conn)))
     (dolist (case '((("SCORE" "score") "score" "\"score\" > 15")
                     (("SCORE" "score") "SCORE" "\"SCORE\" > 15")
                     (("SCORE" "name") "score" "\"SCORE\" > 15")))
       (pcase-let ((`(,columns ,answer ,expected) case))
         (clutch-test--with-minibuffer-answers (list answer "> 15")
-          (should (equal (clutch--read-where-filter nil columns nil 'conn)
+          (should (equal (clutch--read-where-filter nil columns nil conn)
                          expected)))))
     ;; Another spelling of two columns that differ only in case names
     ;; neither, so it is the whole condition.
     (clutch-test--with-minibuffer-answers '("Score")
-      (should (equal (clutch--read-where-filter nil '("SCORE" "score") nil 'conn)
+      (should (equal (clutch--read-where-filter nil '("SCORE" "score") nil conn)
                      "Score")))))
 
 (ert-deftest clutch-test-kept-result-error-still-warns-of-unknown-transaction ()
   "A filter that loses the connection should still show the error page.
 Only a server error on a live connection keeps the result, so a lost
 connection keeps its warning that the transaction outcome is unknown."
-  (let (hint retired)
-    (with-temp-buffer
-      (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) nil))
-                ((symbol-function 'clutch--tx-unresolved-p) (lambda (_conn) t))
-                ((symbol-function 'clutch--remember-execute-error)
-                 (lambda (&rest _) (cons "Connection closed" "Connection closed")))
-                ((symbol-function 'clutch-result--display-error)
-                 (lambda (_conn _sql _summary _message &optional _elapsed shown)
-                   (setq hint shown)
-                   nil))
-                ((symbol-function 'clutch--retire-query-connection)
-                 (lambda (_conn) (setq retired t)))
-                ((symbol-function 'message) #'ignore))
-        (clutch--present-statement-outcome
-         "SELECT 1" 'fake-conn
-         (list :error '(clutch-db-error "Connection closed")
-               :connection 'fake-conn
-               :elapsed 0.1
-               :result-context '(:keep-result-on-error t)
-               :source-buffer (current-buffer)))))
-    (should retired)
-    (should (string-match-p
-             (regexp-quote clutch--transaction-outcome-unknown-message)
-             (or hint "")))))
+  (let ((conn (make-clutch-test-conn :live nil))
+        (table (clutch--table-key "t")))
+    (clutch-test--with-isolated-metadata-caches
+      (unwind-protect
+          (with-temp-buffer
+            (clutch--set-tx-uncertain conn)
+            (clutch--set-table-metadata conn table
+                                        :column-details '((:name "id")))
+            (clutch-test--with-pop-to-buffer-capture shown
+              (clutch--present-statement-outcome
+               "SELECT 1" conn
+               (list :error '(clutch-db-error "Connection closed")
+                     :connection conn
+                     :elapsed 0.1
+                     :result-context '(:keep-result-on-error t)
+                     :source-buffer (current-buffer)))
+              (with-current-buffer shown
+                (should (derived-mode-p 'clutch-result-mode))
+                (should (string-match-p
+                         (concat "Hint: .*"
+                                 (regexp-quote
+                                  clutch--transaction-outcome-unknown-message))
+                         (buffer-string)))))
+            ;; The lost connection is retired: its metadata goes, while the
+            ;; transaction state it owes an answer for stays.
+            (should-not (clutch--cached-column-details conn table))
+            (should (clutch--tx-unresolved-p conn)))
+        (clutch--clear-tx-state conn)))))
 
 (ert-deftest clutch-test-rerun-keeps-filter-real-sqlite-workflow ()
   "\\`g' and the refresh after a submit should keep a server-side filter.
@@ -314,15 +272,13 @@ without its filter, \\`W' and row editing."
                   (,clutch--cell-default-placeholder "<default>")))
     (pcase-let ((`(,value ,expected) case))
       (ert-info ((format "value: %S" value))
-        (with-temp-buffer
-          (let (captured)
-            (cl-letf (((symbol-function 'clutch--cell-at-point)
-                      (lambda () (list 0 1 value)))
-                      ((symbol-function 'clutch--view-in-buffer)
-                       (lambda (val &rest _args)
-                         (setq captured val))))
-              (clutch-result-shell-command-on-cell "cat")
-              (should (string-match-p expected captured))))))))
+        (clutch-test--with-result-state
+            (:columns '("id" "v") :rows (list (list 1 value)) :render t)
+          (clutch-test--select-cells '(0 1))
+          (clutch-test--with-pop-to-buffer-capture shown
+            (clutch-result-shell-command-on-cell "cat")
+            (should (equal (with-current-buffer shown (buffer-string))
+                           expected)))))))
   (with-temp-buffer
     (should-error (clutch-result-shell-command-on-cell "cat") :type 'user-error)))
 
@@ -330,95 +286,82 @@ without its filter, \\`W' and row editing."
 
 (ert-deftest clutch-test-export-command-writes-selected-format-content ()
   "Export command should write the chosen format through the real export path."
-  (dolist (case '(("c" nil clipboard "id,name\n1,\"a,b\"\n" nil)
-                  ("c" ("--no-header") clipboard "1,\"a,b\"\n" nil)
-                  ("c" ("--file") file "id,name\n1,\"a,b\"\n" "CSV")
-                  ("t" nil clipboard "id\tname\n1\ta,b\n" nil)
-                  ("t" ("--no-header") clipboard "1\ta,b\n" nil)
-                  ("t" ("--file") file "id\tname\n1\ta,b\n" "TSV")
-                  ("i" nil clipboard
+  (dolist (case '(("e c" clipboard "id,name\n1,\"a,b\"\n" nil)
+                  ("e -h c" clipboard "1,\"a,b\"\n" nil)
+                  ("e -f c" file "id,name\n1,\"a,b\"\n" "CSV")
+                  ("e t" clipboard "id\tname\n1\ta,b\n" nil)
+                  ("e -h t" clipboard "1\ta,b\n" nil)
+                  ("e -f t" file "id\tname\n1\ta,b\n" "TSV")
+                  ("e i" clipboard
                    "INSERT INTO users (\"id\", \"name\") VALUES (1, 'a,b');\n"
                    nil)
-                  ("i" ("--file") file
+                  ("e -f i" file
                    "INSERT INTO users (\"id\", \"name\") VALUES (1, 'a,b');\n"
                    nil)
                   ;; UPDATE names the table as the query did.
-                  ("u" nil clipboard
+                  ("e u" clipboard
                    "UPDATE users SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
                    nil)
-                  ("u" ("--file") file
+                  ("e -f u" file
                    "UPDATE users SET \"name\" = 'a,b' WHERE \"id\" = 1\n"
                    nil)))
-    (pcase-let ((`(,key ,args ,target ,expected ,expected-coding-label) case))
-      (ert-info ((format "export key: %s, args: %S" key args))
+    (pcase-let ((`(,keys ,target ,expected ,expected-coding-label) case))
+      (ert-info ((format "keys: %s" keys))
         (let ((path (make-temp-file "clutch-export-"))
               (kill-ring nil)
               (kill-ring-yank-pointer nil)
-              (write-region-function (symbol-function 'write-region))
-              coding-label
-              written-coding)
+              coding-label)
           (unwind-protect
-              (clutch-test--with-sqlite-result (_conn _result)
+              (clutch-test--with-sqlite-result (conn result)
                   '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
                     "INSERT INTO users VALUES (1, 'a,b')")
                   "SELECT id, name FROM users"
-                (let ((suffix
-                       (clutch-test--transient-suffix-for-key
-                        'clutch-result-export key)))
-                  (should suffix)
-                  (cl-letf (((symbol-function 'transient-args)
-                             (lambda (_prefix) args))
-                            ((symbol-function 'completing-read)
-                             (lambda (prompt choices &rest _args)
-                               (if (string-match
-                                    "\\`\\(CSV\\|TSV\\) encoding" prompt)
-                                   (progn
-                                     (should (member "utf-8" choices))
-                                     (setq coding-label
-                                           (match-string 1 prompt))
-                                     "utf-8")
-                                 (ert-fail
-                                  (format "Unexpected prompt: %s" prompt)))))
-                            ((symbol-function 'read-file-name)
-                             (lambda (&rest _args) path))
-                            ((symbol-function 'write-region)
-                             (lambda (&rest write-args)
-                               (setq written-coding coding-system-for-write)
-                               (apply write-region-function write-args))))
-                    (funcall (oref suffix command))
-                    (should (equal coding-label expected-coding-label))
-                    (when expected-coding-label
-                      (should (eq written-coding 'utf-8)))
-                    (should
-                     (equal (if (eq target 'clipboard)
-                                (current-kill 0)
-                              (with-temp-buffer
-                                (insert-file-contents path)
-                                (buffer-string)))
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (prompt choices &rest _args)
+                             (if (string-match
+                                  "\\`\\(CSV\\|TSV\\) encoding" prompt)
+                                 (progn
+                                   (should (member "utf-8" choices))
+                                   (setq coding-label
+                                         (match-string 1 prompt))
+                                   "utf-8-bom")
+                               (ert-fail
+                                (format "Unexpected prompt: %s" prompt)))))
+                          ((symbol-function 'read-file-name)
+                           (lambda (&rest _args) path)))
+                  (clutch-test--type-keys keys)
+                  (clutch-test--await-queries)
+                  (should (equal coding-label expected-coding-label))
+                  ;; A delimited file is written in the chosen coding, whose
+                  ;; byte order mark shows; SQL files have none.
+                  (should
+                   (equal (if (eq target 'clipboard)
+                              (current-kill 0)
+                            (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally path)
+                              (buffer-string)))
+                          (if expected-coding-label
+                              (concat "\357\273\277" expected)
                             expected)))))
-            (ignore-errors (delete-file path))))))))
+            (delete-file path)))))))
 
-(ert-deftest clutch-test-export-transient-shares-copy-option-model ()
-  "Export should expose Header and Destination before choosing a format."
-  (let* ((header
-          (clutch-test--transient-suffix-for-key 'clutch-result-export "-h"))
-         (destination
-          (clutch-test--transient-suffix-for-key 'clutch-result-export "-f"))
-         (header-display (and header (transient-format-value header)))
-         (destination-display
-          (and destination (transient-format-value destination))))
-    (should header)
-    (should destination)
-    (should (equal (substring-no-properties header-display) "(No|Yes)"))
-    (should (eq (get-text-property (string-match "Yes" header-display)
-                                  'face header-display)
-                'transient-value))
-    (should (equal (substring-no-properties destination-display)
-                   "(Clipboard|File)"))
-    (should (eq (get-text-property
-                 (string-match "Clipboard" destination-display)
-                 'face destination-display)
-                'transient-value))))
+(ert-deftest clutch-test-copy-and-export-switches-show-defaults ()
+  "Copy and export menus should present their switches with their defaults.
+Export exposes Header and Destination before a format is chosen, and copy
+presents Header as enabled by default."
+  (dolist (case '((clutch-result-export "-h" "(No|Yes)" "Yes")
+                  (clutch-result-export "-f" "(Clipboard|File)" "Clipboard")
+                  (clutch-result-copy-dispatch "-h" "(No|Yes)" "Yes")))
+    (pcase-let ((`(,prefix ,key ,display ,default) case))
+      (ert-info ((format "%s %s" prefix key))
+        (let ((suffix (clutch-test--transient-suffix-for-key prefix key)))
+          (should suffix)
+          (let ((shown (transient-format-value suffix)))
+            (should (equal (substring-no-properties shown) display))
+            (should (eq (get-text-property (string-match default shown)
+                                           'face shown)
+                        'transient-value))))))))
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
@@ -497,6 +440,8 @@ without its filter, \\`W' and row editing."
 
 (ert-deftest clutch-test-result-export-formats-follow-result-surface ()
   "Export choices should match SQL, document, and key/value result surfaces."
+  (require 'mongodb)
+  (require 'clutch-mongodb)
   (cl-labels
       ((render-menu ()
          (let ((menu (clutch-test--transient-menu-text 'clutch-result-export)))
@@ -507,30 +452,24 @@ without its filter, \\`W' and row editing."
            (should (string-match-p (regexp-quote label) menu)))
          (dolist (label absent)
            (should-not (string-match-p (regexp-quote label) menu)))))
-    (clutch-test--with-native-document-result-buffer
-      (cl-letf (((symbol-function
-                  'clutch-db-document-mutation-supported-p)
-                 (lambda (_conn action) (eq action 'insert-many))))
-        (check-menu (render-menu)
-                    '("CSV" "TSV" "Insert many")
-                    '("INSERT SQL" "UPDATE SQL"))))
-    (with-temp-buffer
-      (setq-local clutch-connection 'sql-conn
-                  clutch--connection-params nil)
-      (clutch-test--with-connection-data-model
-          ('sql-conn 'mysql 'relational)
-        (check-menu (render-menu)
-                    '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
-                    '("Insert many"))))
-    (with-temp-buffer
-      (setq-local clutch-connection 'redis-conn
-                  clutch--connection-params nil)
-      (clutch-test--with-connection-data-model
-          ('redis-conn 'redis 'key-value)
-        (check-menu (render-menu)
-                    '("CSV" "TSV")
-                    '("INSERT SQL" "UPDATE SQL"
-                      "Insert many"))))))
+    (clutch-test--with-result-state
+        (:connection (make-clutch-mongodb-conn
+                      :client (make-mongodb-conn :closed t) :database "test")
+         :connection-params '(:backend mongodb))
+      (check-menu (render-menu)
+                  '("CSV" "TSV" "Insert many")
+                  '("INSERT SQL" "UPDATE SQL")))
+    (clutch-test--with-result-state
+        (:connection nil :connection-params '(:backend sqlite))
+      (check-menu (render-menu)
+                  '("CSV" "TSV" "INSERT SQL" "UPDATE SQL")
+                  '("Insert many")))
+    (clutch-test--with-result-state
+        (:connection nil :connection-params '(:backend redis))
+      (check-menu (render-menu)
+                  '("CSV" "TSV")
+                  '("INSERT SQL" "UPDATE SQL"
+                    "Insert many")))))
 
 (ert-deftest clutch-test-copy-export-menus-show-data-scope ()
   "Menus distinguish current cell, selection and locally filtered export."
@@ -577,116 +516,88 @@ PragmataPro does, shifting the rest of that row."
     (should texts)
     (should-not wide)))
 
-(ert-deftest clutch-test-document-copy-uses-backend-mutation-snippet-generic ()
-  "Document helper copy should use backend-owned mutation snippet generation."
-  (clutch-test--with-native-document-result-buffer
-    (let ((doc '(("_id" . 7) ("name" . "Ann")))
-          captured
-          kill-ring
-          kill-ring-yank-pointer)
-      (clutch-test--init-result-state
-       (list :connection 'document-conn
-             :source-table "users"
-             :columns '("_id" "name" "clutch__document")
-             :column-defs '((:name "_id" :type-category numeric)
-                            (:name "name" :type-category text)
-                            (:name "clutch__document"
-                             :type-category json
-                             :hidden t
-                             :document-source t))
-             :rows (list (list 7 "Ann" doc))
-             :render t))
-      (clutch-test--select-cells '(0 1))
-      (cl-letf (((symbol-function 'clutch-db-document-mutation-supported-p)
-                 (lambda (_conn action) (eq action 'update-one-set)))
-                ((symbol-function 'clutch-db-document-mutation-snippets)
-                 (lambda (conn action collection documents &optional fields)
-                   (setq captured
-                         (list conn action collection documents fields))
-                   '("doc.update.snippet();"))))
-        (clutch-result-copy 'document-update-one-set)
-        (should (equal captured
-                       (list 'document-conn
-                             'update-one-set
-                             "users"
-                             (list doc)
-                             '("name"))))
-        (should (equal (current-kill 0) "doc.update.snippet();"))))))
-
-(ert-deftest clutch-test-document-copy-reports-an-ended-session ()
-  "Document copy should explain an ended session and work on a lost one."
+(ert-deftest clutch-test-document-copy-uses-backend-snippets ()
+  "Document helper copy should use backend-owned mutation snippet generation.
+It should explain an ended session and work on a lost one."
   (require 'mongodb)
   (require 'clutch-mongodb)
   (let ((lost (make-clutch-mongodb-conn
                :client (make-mongodb-conn :closed t) :database "test"))
-        kill-ring kill-ring-yank-pointer)
+        kill-ring
+        kill-ring-yank-pointer)
     (clutch-test--with-result-state
-        (:connection nil :connection-params '(:backend mongodb)
-         :source-table "users" :columns '("_id" "clutch__document")
-         :column-defs '((:name "_id")
-                        (:name "clutch__document" :document-source t :hidden t))
-         :rows (list (list 1 (mongodb-document '(("_id" . 1))))))
-      (let ((err (should-error
-                  (clutch-result-copy 'document-insert-one '((0) 0))
-                  :type 'user-error)))
-        (should (string-match-p "Connection closed" (error-message-string err))))
+        (:connection nil
+         :connection-params '(:backend mongodb)
+         :source-table "users"
+         :columns '("_id" "name" "age" "clutch__document")
+         :column-defs '((:name "_id" :type-category numeric)
+                        (:name "name" :type-category text)
+                        (:name "age" :type-category numeric)
+                        (:name "clutch__document"
+                         :type-category json
+                         :hidden t
+                         :document-source t))
+         :rows (list (list 7 "Ann" 30
+                           (mongodb-document
+                            '(("_id" . 7) ("name" . "Ann") ("age" . 30)))))
+         :render t)
+      (ert-info ("ended session")
+        (let ((err (should-error
+                    (clutch-result-copy 'document-insert-one '((0) 0))
+                    :type 'user-error)))
+          (should (string-match-p "Connection closed"
+                                  (error-message-string err)))))
       (setq-local clutch-connection lost)
-      (clutch-result-copy 'document-insert-one '((0) 0))
-      (should (equal (current-kill 0)
-                     "db.getCollection(\"users\").insertOne({\"_id\":1});")))))
+      (ert-info ("insert one on a lost connection")
+        (clutch-result-copy 'document-insert-one '((0) 0))
+        (should (equal (current-kill 0)
+                       (concat "db.getCollection(\"users\").insertOne("
+                               "{\"_id\":7,\"name\":\"Ann\",\"age\":30});"))))
+      ;; The snippet names the collection, the document and only the
+      ;; selected field.
+      (ert-info ("update the selected field")
+        (clutch-test--select-cells '(0 1))
+        (clutch-result-copy 'document-update-one-set)
+        (should (equal (current-kill 0)
+                       (concat "db.getCollection(\"users\").updateOne("
+                               "{\"_id\":7}, {\"$set\":{\"name\":\"Ann\"}});")))))))
 
 (ert-deftest clutch-test-non-sql-results-reject-sql-mutation-commands ()
   "Document and key/value results should reject SQL-only mutation commands."
-  (dolist (surface '(document key-value))
+  (dolist (backend '(mongodb redis))
     (dolist (case '((copy "Copy INSERT SQL is SQL-only")
                     (edit "Edit / re-edit is SQL-only")))
       (pcase-let ((`(,op ,expected-message) case))
-        (pcase surface
-          ('document
-           (clutch-test--with-native-document-result-buffer
-             (let ((err (pcase op
-                          ('copy (should-error (clutch-result-copy 'insert)
-                                               :type 'user-error))
-                          ('edit (should-error (clutch-result-edit-cell)
-                                               :type 'user-error)))))
-               (should (string-match-p expected-message
-                                       (error-message-string err))))))
-          ('key-value
-           (with-temp-buffer
-             (setq-local clutch-connection 'redis-conn
-                         clutch--connection-params nil)
-             (clutch-test--with-connection-data-model
-                 ('redis-conn 'redis 'key-value)
-               (let ((err (pcase op
-                            ('copy (should-error (clutch-result-copy 'insert)
-                                                 :type 'user-error))
-                            ('edit (should-error (clutch-result-edit-cell)
-                                                 :type 'user-error)))))
-                 (should (string-match-p expected-message
-                                         (error-message-string err))))))))))))
+        (ert-info ((format "%s: %s" backend op))
+          (clutch-test--with-result-state
+              (:connection nil :connection-params (list :backend backend))
+            (let ((err (pcase op
+                         ('copy (should-error (clutch-result-copy 'insert)
+                                              :type 'user-error))
+                         ('edit (should-error (clutch-result-edit-cell)
+                                              :type 'user-error)))))
+              (should (string-match-p expected-message
+                                      (error-message-string err))))))))))
 
 (ert-deftest clutch-test-insert-sql-uses-placeholder-for-ambiguous-source ()
   "INSERT copy/export should use a placeholder table for ambiguous queries."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn
-                clutch--result-columns '("id")
-                clutch--result-rows '((1))
-                clutch--last-query
-                "SELECT u.id FROM users u JOIN posts p ON p.user_id = u.id")
-    (cl-letf (((symbol-function 'clutch--cell-at-point)
-               (lambda () (list 0 0 1)))
-              ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn s) s))
-              ((symbol-function 'clutch-db-escape-literal)
-               (lambda (_conn s) (format "'%s'" s))))
-      (clutch-result--copy-rows 'insert)
+  (clutch-test--with-result-state
+      (:connection (make-clutch-test-conn)
+       :connection-params '(:backend sqlite)
+       :columns '("id" "name")
+       :rows '((1 "a") (2 "b"))
+       :last-query
+       "SELECT u.id, p.name FROM users u JOIN posts p ON p.user_id = u.id"
+       :render t)
+    (let (kill-ring kill-ring-yank-pointer)
+      (clutch-test--select-cells '(0 0))
+      (clutch-result-copy 'insert)
       (should (equal (current-kill 0)
-                     "INSERT INTO MY_TABLE (id) VALUES (1);"))
-      (setq-local clutch--result-columns '("id" "name"))
+                     "INSERT INTO \"MY_TABLE\" (\"id\") VALUES (1);"))
       (should (equal (clutch--export-insert-content '((1 "a") (2 "b")))
                      (concat
-                      "INSERT INTO MY_TABLE (id, name) VALUES (1, 'a');\n"
-                      "INSERT INTO MY_TABLE (id, name) VALUES (2, 'b');\n"))))))
+                      "INSERT INTO \"MY_TABLE\" (\"id\", \"name\") VALUES (1, 'a');\n"
+                      "INSERT INTO \"MY_TABLE\" (\"id\", \"name\") VALUES (2, 'b');\n"))))))
 
 (ert-deftest clutch-test-pg-array-mutation-builders-use-array-literals ()
   "PostgreSQL array mutations should render JSON-style edits as array literals."
@@ -850,10 +761,13 @@ after the edit is staged."
 ;;;; Agent context copy
 
 (defun clutch-test--copy-agent-context ()
-  "Run `clutch-copy-context-for-agent' with deterministic metadata."
+  "Run `clutch-copy-context-for-agent' with deterministic metadata.
+Return the copied text.  The metadata has what SQLite does not report:
+table and column comments and an index."
   (let ((clutch--table-metadata-cache (make-hash-table :test 'eq))
         (clutch--object-cache (make-hash-table :test 'eq))
-        copied)
+        kill-ring
+        kill-ring-yank-pointer)
     (cl-letf (((symbol-function 'clutch--ensure-connection)
                #'ignore)
               ((symbol-function 'clutch--connection-key)
@@ -876,79 +790,96 @@ after the edit is staged."
                          (list :name "email" :type "text"
                                :nullable nil :comment "login email"
                                :foreign-key '(:ref-table "orgs"
-                                             :ref-column "id"))))))
+                                              :ref-column "id"))))))
               ((symbol-function 'clutch--object-related-entries)
                (lambda (_conn entry type)
                  (when (and (string= (plist-get entry :name) "users")
                             (string= type "INDEX"))
                    (list (list :name "users_email_idx" :type "INDEX"
-                               :target-table "users" :unique t)))))
-              ((symbol-function 'kill-new)
-               (lambda (text) (setq copied text))))
-      (clutch-copy-context-for-agent))
-    copied))
+                               :target-table "users" :unique t))))))
+      (clutch-copy-context-for-agent)
+      (current-kill 0))))
+
+(defconst clutch-test--agent-context-schema
+  '("CREATE TABLE orgs (id INTEGER PRIMARY KEY)"
+    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT NOT NULL REFERENCES orgs(id))"
+    "INSERT INTO users VALUES (1, 'ada', 'ada@example.com'), (2, 'bob', 'bob@example.com')")
+  "SQLite schema behind the agent context tests.")
 
 (ert-deftest clutch-test-copy-context-for-agent-from-query-console ()
   "Agent context copy should use the public query-console command path."
-  (dolist (case '(("normal" "SELECT id, email FROM users WHERE active = 1" t)
-                  ("trailing semicolon"
-                   "SELECT id, email FROM users WHERE active = 1;" nil)))
-    (pcase-let ((`(,label ,sql ,check-metadata) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (clutch-mode)
-          (insert sql)
-          (setq-local clutch-connection 'fake-conn)
-          (let ((copied (clutch-test--copy-agent-context)))
-            (should (string-match-p
-                     "SELECT id, email FROM users WHERE active = 1" copied))
-            (should (string-match-p "## Table: users" copied))
-            (when check-metadata
-              (should (string-match-p "# Clutch database context" copied))
-              (should (string-match-p "- Backend: PostgreSQL" copied))
-              (should (string-match-p "users (TABLE)" copied))
-              (should (string-match-p "Comment\n  application users" copied))
-              (should (string-match-p "Columns (2)" copied))
-              (should (string-match-p
-                       "id[[:space:]]+bigint[[:space:]]+NOT NULL, PK"
-                       copied))
-              (should (string-match-p
-                       "email[[:space:]]+text[[:space:]]+NOT NULL, FK -> orgs.id, login email"
-                       copied))
-              (should (string-match-p "Indexes (1)" copied))
-              (should (string-match-p "users_email_idx[[:space:]]+UNIQUE"
-                                      copied))
-              (should-not (string-match-p "Row identity candidates"
-                                          copied)))))))))
+  (clutch-test--with-sqlite-connection conn
+    (dolist (sql clutch-test--agent-context-schema)
+      (clutch-db-query conn sql))
+    (dolist (case '(("normal" "SELECT id, email FROM users WHERE active = 1" t)
+                    ("trailing semicolon"
+                     "SELECT id, email FROM users WHERE active = 1;" nil)))
+      (pcase-let ((`(,label ,sql ,check-metadata) case))
+        (ert-info ((format "case: %s" label))
+          (with-temp-buffer
+            (clutch-mode)
+            (insert sql)
+            (setq-local clutch-connection conn)
+            (let (kill-ring kill-ring-yank-pointer)
+              (clutch-copy-context-for-agent)
+              (let ((copied (current-kill 0)))
+                (should (string-match-p
+                         "SELECT id, email FROM users WHERE active = 1" copied))
+                (should (string-match-p "## Table: users" copied))
+                (when check-metadata
+                  (should (string-match-p "# Clutch database context" copied))
+                  (should (string-match-p "- Backend: SQLite" copied))
+                  (should (string-match-p "- Connection: sqlite::memory:"
+                                          copied))
+                  (should (string-match-p "users (TABLE)" copied))
+                  (should (string-match-p "Columns (3)" copied))
+                  (should (string-match-p "id[[:space:]]+integer[[:space:]]+PK"
+                                          copied))
+                  (should (string-match-p
+                           "email[[:space:]]+text[[:space:]]+NOT NULL, FK -> orgs.id"
+                           copied))))))))))
+  ;; Comments and indexes, which SQLite does not report, show as well.
+  (ert-info ("case: comments and indexes")
+    (with-temp-buffer
+      (clutch-mode)
+      (insert "SELECT id, email FROM users WHERE active = 1")
+      (setq-local clutch-connection 'fake-conn)
+      (let ((copied (clutch-test--copy-agent-context)))
+        (should (string-match-p "Comment\n  application users" copied))
+        (should (string-match-p
+                 "email[[:space:]]+text[[:space:]]+NOT NULL, FK -> orgs.id, login email"
+                 copied))
+        (should (string-match-p "Indexes (1)" copied))
+        (should (string-match-p "users_email_idx[[:space:]]+UNIQUE"
+                                copied))
+        (should-not (string-match-p "Row identity candidates" copied))))))
 
 (ert-deftest clutch-test-result-mode-k-copies-agent-context ()
   "The documented result-mode k binding should copy agent context."
   (should (eq (lookup-key clutch-result-mode-map "k")
               #'clutch-copy-context-for-agent)))
 
-(ert-deftest clutch-test-result-mode-scales-header-with-buffer-text ()
-  "Result headers should follow buffer-local text scaling exactly once."
+(ert-deftest clutch-test-result-mode-header-follows-row-text ()
+  "Result headers should follow buffer-local text scaling exactly once.
+They should keep the rows' font under a proportional theme: a theme such
+as modus with `modus-themes-variable-pitch-ui' gives the header line a
+proportional font, while header padding follows the rows.  Only the
+family is remapped, so text scaling still applies once."
   (require 'face-remap)
   (let ((text-scale-remap-header-line nil))
     (with-temp-buffer
       (clutch-result-mode)
-      (should (local-variable-p 'text-scale-remap-header-line))
-      (should text-scale-remap-header-line)
-      (dolist (face '(mode-line mode-line-inactive))
-        (let ((spec (cadr (assq face face-remapping-alist))))
-          (should-not (eq (plist-get spec :inherit) 'default)))))))
-
-(ert-deftest clutch-test-result-mode-draws-header-in-the-row-font ()
-  "Result headers should keep the rows' font under a proportional theme.
-A theme such as modus with `modus-themes-variable-pitch-ui' gives the
-header line a proportional font, while header padding follows the rows.
-Only the family is remapped, so text scaling still applies once."
-  (with-temp-buffer
-    (clutch-result-mode)
-    (let ((spec (cadr (assq 'header-line face-remapping-alist))))
-      (should (equal (plist-get spec :family)
-                     (face-attribute 'default :family nil t)))
-      (should-not (plist-member spec :inherit)))))
+      (ert-info ("text scaling")
+        (should (local-variable-p 'text-scale-remap-header-line))
+        (should text-scale-remap-header-line)
+        (dolist (face '(mode-line mode-line-inactive))
+          (let ((spec (cadr (assq face face-remapping-alist))))
+            (should-not (eq (plist-get spec :inherit) 'default)))))
+      (ert-info ("row font")
+        (let ((spec (cadr (assq 'header-line face-remapping-alist))))
+          (should (equal (plist-get spec :family)
+                         (face-attribute 'default :family nil t)))
+          (should-not (plist-member spec :inherit)))))))
 
 (ert-deftest clutch-test-result-mouse-click-below-table-preserves-point ()
   "Clicking below the rendered table should not move the current cell."
@@ -984,190 +915,184 @@ Only the family is remapped, so text scaling still applies once."
                  (list (selected-window) event-position '(0 . 0) 0)))
           (should (eq delegated 'set-point)))))))
 
-(ert-deftest clutch-test-copy-context-for-agent-from-result-buffer-includes-sample ()
-  "Agent context copy should include effective result SQL and current sample rows."
+(ert-deftest clutch-test-copy-context-for-agent-includes-result-samples ()
+  "Agent context copy should include a sample of the latest matching result.
+A result buffer copies its effective SQL and current sample rows, and a
+query console includes its latest result's sample while that result's SQL
+is the console's."
   (let ((clutch-agent-context-max-result-rows 1)
-        copied)
+        kill-ring
+        kill-ring-yank-pointer)
+    (clutch-test--with-sqlite-result (conn result)
+        clutch-test--agent-context-schema
+        "SELECT name, email FROM users ORDER BY id"
+      ;; The primary key is not selected, so a hidden row identity is.
+      (should (equal (plist-get clutch--row-identity :indices) '(2)))
+      (let ((console (cl-find-if
+                      (lambda (buffer)
+                        (and (not (eq buffer result))
+                             (eq (buffer-local-value 'clutch--last-result-buffer
+                                                     buffer)
+                                 result)))
+                      (buffer-list))))
+        (ert-info ("console of the result")
+          (with-current-buffer console
+            (clutch-copy-context-for-agent)
+            (let ((copied (current-kill 0)))
+              (should (string-match-p "## Result sample" copied))
+              (should (string-match-p
+                       "```text\nname\temail\nada\tada@example.com\n```"
+                       copied)))))
+        (ert-info ("filtered result")
+          (clutch-test--with-minibuffer-answers '("email" "LIKE '%example.com'")
+            (clutch-result-apply-filter)
+            (clutch-test--await-queries))
+          (clutch-copy-context-for-agent)
+          (let ((copied (current-kill 0)))
+            (should (string-match-p
+                     (concat "SELECT \\* FROM (SELECT name, email FROM users[^)]*) "
+                             "[^\n]*WHERE \"email\" LIKE '%example.com'")
+                     copied))
+            (should (string-match-p "## Result sample" copied))
+            (should (string-match-p "Showing 1 of 2 visible rows" copied))
+            (should (string-match-p
+                     "```text\nname\temail\nada\tada@example.com\n```"
+                     copied))
+            (should-not (string-match-p "clutch__rid" copied))
+            (should-not (string-match-p "bob" copied))))
+        (ert-info ("console once the result's SQL is not its own")
+          (with-current-buffer console
+            (clutch-copy-context-for-agent)
+            (should-not (string-match-p "## Result sample"
+                                        (current-kill 0))))))))
+  ;; The copied SQL is the result's base query under its filter, not the
+  ;; text it last ran.
+  (ert-info ("filtered result state")
     (clutch-test--with-result-state
         (:base-query "SELECT id, email FROM users"
          :where-filter "active = 1"
          :source-table "users"
-         :columns '("clutch__rid_0" "id" "email")
-         :column-defs '((:name "clutch__rid_0" :hidden t)
-                        (:name "id")
-                        (:name "email"))
-         :rows (list (vector "rid-1" 1 "ada@example.com")
-                     (vector "rid-2" 2 "bob@example.com")))
-      (cl-letf (((symbol-function 'clutch-db-apply-where)
-                 (lambda (_conn sql filter)
-                   (format "SELECT * FROM (%s) AS clutch_q WHERE %s" sql filter))))
-        (setq copied (clutch-test--copy-agent-context))))
-    (should (string-match-p
-             "SELECT \\* FROM (SELECT id, email FROM users) AS clutch_q WHERE active = 1"
-             copied))
-    (should (string-match-p "## Result sample" copied))
-    (should (string-match-p "Showing 1 of 2 visible rows" copied))
-    (should (string-match-p "id\temail" copied))
-    (should (string-match-p "1\tada@example.com" copied))
-    (should-not (string-match-p "clutch__rid_0" copied))
-    (should-not (string-match-p "rid-1" copied))
-    (should-not (string-match-p "bob@example.com" copied))))
-
-(ert-deftest clutch-test-copy-context-for-agent-from-query-console-includes-last-result-sample ()
-  "Agent context copy from a query console should include its latest result sample."
-  (let ((clutch-agent-context-max-result-rows 1)
-        (result-buf (generate-new-buffer " *clutch-agent-result*"))
-        copied)
-    (unwind-protect
-        (with-temp-buffer
-          (clutch-mode)
-          (insert "SELECT id, email FROM users")
-          (setq-local clutch-connection 'fake-conn
-                      clutch--last-result-buffer result-buf)
-          (with-current-buffer result-buf
-            (clutch-test--init-result-state
-             (list :base-query "SELECT id, email FROM users"
-                   :columns '("id" "email")
-                   :rows (list (vector 1 "ada@example.com")
-                               (vector 2 "bob@example.com")))))
-          (setq copied (clutch-test--copy-agent-context))
-          ;; The sample-section details are proven by the result-buffer
-          ;; test above; here the rule is that a console resolves its
-          ;; last result buffer at all.
-          (should (string-match-p "## Result sample" copied))
-          (should (string-match-p "1\tada@example.com" copied)))
-      (when (buffer-live-p result-buf)
-        (kill-buffer result-buf)))))
+         :columns '("id" "email")
+         :rows '((1 "ada@example.com")))
+      (should (string-match-p
+               (concat "SELECT \\* FROM (SELECT id, email FROM users) "
+                       "AS _clutch_filter WHERE active = 1")
+               (clutch-test--copy-agent-context))))))
 
 ;;;; Aggregate and copy
 
 (ert-deftest clutch-test-selected-row-indices-priority ()
   "Selection priority should be region > current row."
-  (with-temp-buffer
-    (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-              ((symbol-function 'clutch--rows-in-region)
-               (lambda (_beg _end) '(2 3)))
-              ((symbol-function 'clutch--row-idx-at-line)
-               (lambda () 1))
-              ((symbol-function 'region-beginning) (lambda () 10))
-              ((symbol-function 'region-end) (lambda () 20)))
-      (should (equal (clutch--selected-row-indices) '(2 3)))))
-  (with-temp-buffer
-    (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-              ((symbol-function 'clutch--row-idx-at-line)
-               (lambda () 4)))
-      (should (equal (clutch--selected-row-indices) '(4))))))
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows '((1 "a") (2 "b") (3 "c") (4 "d"))
+       :render t)
+    (clutch-test--select-cells '(2 0) '(3 1))
+    (should (equal (clutch--selected-row-indices) '(2 3)))
+    (deactivate-mark)
+    (clutch--goto-cell 1 1)
+    (should (equal (clutch--selected-row-indices) '(1)))))
 
 (ert-deftest clutch-test-aggregate-selection-scenarios ()
   "Aggregate should summarize current, filtered, and rectangular selections."
-  (dolist (case '((current nil
+  (dolist (case '((current
                    ("id" "score")
                    ((1 "1.5") (2 "2.5") (3 "x") (4 4))
-                   nil nil nil (1 1 "2.5")
+                   nil nil (1 1) nil
                    ("Aggregate \\[score\\]" "sum=2.5" "avg=2.5"
                     "\\[rows=1 cells=1 skipped=0\\]")
                    nil)
-                  (filtered nil
+                  (filtered
                    ("id" "score")
                    ((1 10) (2 20))
-                   "20" ((2 20)) nil (0 1 20)
+                   "20" ((2 20)) (0 1) nil
                    ("sum=20")
                    ("sum=10"))
-                  (region-multi t
+                  (region-multi
                    ("id" "a" "b")
                    ((1 10 20) (2 11 21))
-                   nil nil ((0 1) 1 2) nil
+                   nil nil (0 1) (1 2)
                    ("Aggregate \\[selection\\]" "sum=62" "avg=15.5"
                     "\\[rows=2 cells=4 skipped=0\\]")
                    nil)
-                  (region-single t
+                  (region-single
                    ("id" "score")
                    ((1 "1") (2 "2") (3 "3"))
-                   nil nil ((0 2) 1) (0 1 "1")
-                   ("Aggregate \\[score\\]" "sum=4" "avg=2"
+                   nil nil (0 1) (1 1)
+                   ("Aggregate \\[score\\]" "sum=3" "avg=1.5"
                     "\\[rows=2 cells=2 skipped=0\\]")
                    nil)
-                  (scientific t
+                  (scientific
                    ("id" "score")
                    ((1 "1E+3") (2 "2.5"))
-                   nil nil ((0 1) 1) (0 1 "1E+3")
+                   nil nil (0 1) (1 1)
                    ("sum=1002.5" "\\[rows=2 cells=2 skipped=0\\]")
                    nil)))
-    (pcase-let ((`(,name ,region-active ,columns ,rows ,filter ,filtered
-                         ,rect ,cell ,expected ,absent)
+    (pcase-let ((`(,name ,columns ,rows ,filter ,filtered ,from ,to
+                         ,expected ,absent)
                  case))
       (ert-info ((symbol-name name))
         (clutch-test--with-result-state
             (:columns columns
              :rows rows
              :filter-pattern filter
-             :filtered-rows filtered)
+             :filtered-rows filtered
+             :render t)
           (let (kill-ring kill-ring-yank-pointer)
-            (cl-letf (((symbol-function 'use-region-p)
-                       (lambda () region-active))
-                      ((symbol-function 'clutch-result--region-rectangle-indices)
-                       (lambda () rect))
-                      ((symbol-function 'clutch--cell-at-point)
-                       (lambda () cell)))
-              (clutch-result-aggregate)
-              (let ((summary (current-kill 0)))
-                (dolist (pattern expected)
-                  (should (string-match-p pattern summary)))
-                (dolist (pattern absent)
-                  (should-not (string-match-p pattern summary)))))))))))
+            (clutch-test--select-cells from to)
+            (clutch-result-aggregate)
+            (let ((summary (current-kill 0)))
+              (dolist (pattern expected)
+                (should (string-match-p pattern summary)))
+              (dolist (pattern absent)
+                (should-not (string-match-p pattern summary))))))))))
 
 (ert-deftest clutch-test-aggregate-refreshes-footer-without-redrawing-body ()
   "Aggregate should update footer state without rebuilding the result body."
   (clutch-test--with-result-state
       (:columns '("id" "score")
-       :rows '((1 10) (2 20)))
-    (let ((footer-refreshes 0)
-          (body-refreshes 0)
-          kill-ring
-          kill-ring-yank-pointer)
-      (cl-letf (((symbol-function 'use-region-p) (lambda () nil))
-                ((symbol-function 'clutch--cell-at-point)
-                 (lambda () '(1 1 20)))
-                ((symbol-function 'clutch--refresh-footer-line)
-                 (lambda () (cl-incf footer-refreshes)))
-                ((symbol-function 'clutch--refresh-display)
-                 (lambda () (cl-incf body-refreshes))))
+       :rows '((1 10) (2 20))
+       :render t)
+    (let (kill-ring kill-ring-yank-pointer)
+      (clutch-test--select-cells '(1 1))
+      (let ((body (buffer-string))
+            (tick (buffer-chars-modified-tick)))
         (clutch-result-aggregate)
-        (should (= footer-refreshes 1))
-        (should (= body-refreshes 0))
-        (should (= (plist-get clutch--aggregate-summary :sum) 20))))))
+        (should (equal (buffer-string) body))
+        (should (= (buffer-chars-modified-tick) tick))
+        (should (= (plist-get clutch--aggregate-summary :sum) 20))
+        (should (string-match-p "sum=20"
+                                (clutch--footer-mode-line-display)))))))
 
 (ert-deftest clutch-test-aggregate-with-prefix-refines-region ()
   "Prefix-arg aggregate should use refined rectangle selection."
   (clutch-test--with-result-state
       (:columns '("id" "score")
-       :rows '((1 "1") (2 "2") (3 "3")))
+       :rows '((1 "1") (2 "2") (3 "3"))
+       :render t)
     (let (kill-ring kill-ring-yank-pointer)
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-                ((symbol-function 'clutch-result--region-rectangle-indices)
-                 (lambda () '((0 1 2) . (1))))
-                ((symbol-function 'clutch-result--start-refine)
-                 (lambda (_rect callback)
-                   (funcall callback '((0 2) . (1)))))
-                ((symbol-function 'clutch--cell-at-point)
-                 (lambda () '(0 1 "1"))))
-        (clutch-result-aggregate t)
-        (let ((summary (current-kill 0)))
-          (should (string-match-p "sum=4" summary))
-          (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary)))))))
+      (clutch-test--select-cells '(0 1) '(2 1))
+      (clutch-result-aggregate t)
+      (should clutch-refine-mode)
+      (clutch--goto-cell 1 1)
+      (clutch-refine-toggle-row)
+      (clutch-refine-confirm)
+      (let ((summary (current-kill 0)))
+        (should (string-match-p "sum=4" summary))
+        (should (string-match-p "\\[rows=2 cells=2 skipped=0\\]" summary))))))
 
 (ert-deftest clutch-test-down-cell-keeps-region-active ()
   "Row navigation should keep region active for selection workflows."
-  (with-temp-buffer
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows '((1 "a") (2 "b") (3 "c"))
+       :render t)
+    (clutch-test--select-cells '(0 1) '(1 1))
     (let ((deactivate-mark t))
-      (cl-letf (((symbol-function 'use-region-p) (lambda () t))
-                ((symbol-function 'clutch--col-idx-at-point) (lambda () 1))
-                ((symbol-function 'get-text-property)
-                 (lambda (_pos prop &optional _object)
-                   (when (eq prop 'clutch-row-idx) 2)))
-                ((symbol-function 'clutch--goto-cell) (lambda (&rest _args) nil)))
-        (clutch-result-down-cell)
-        (should-not deactivate-mark)))))
+      (clutch-result-down-cell)
+      (should-not deactivate-mark))
+    (should (equal (cl-subseq (clutch--cell-at-point) 0 2) '(2 1)))
+    (should (use-region-p))))
 
 (ert-deftest clutch-test-tsv-copy-selection-contract ()
   "TSV copy should use the selected columns with optional headers."
@@ -1186,59 +1111,29 @@ Only the family is remapped, so text scaling still applies once."
             (clutch-result-copy 'tsv nil omit-header)
             (should (equal (current-kill 0) expected))))))))
 
-(ert-deftest clutch-test-copy-format-commands-copy-visible-content ()
-  "Public CSV and TSV copy commands should copy through the real entry point."
-  (dolist (case '((clutch-result-copy-csv "name\nalice")
-                  (clutch-result-copy-org-table "| name  |\n|-------|\n| alice |")
-                  (clutch-result-copy-tsv "name\nalice")))
-    (pcase-let ((`(,command ,expected-text) case))
-      (ert-info ((symbol-name command))
+(ert-deftest clutch-test-copy-format-commands-honor-header-switch ()
+  "Public copy format commands should copy through the real entry point.
+CSV, TSV and Org table copies honor the installed no-header switch."
+  (dolist (case '(("c c" "name\nalice")
+                  ("c t" "name\nalice")
+                  ("c o" "| name  |\n|-------|\n| alice |")
+                  ("c -h c" "alice")
+                  ("c -h t" "alice")
+                  ("c -h o" "| alice |")))
+    (pcase-let ((`(,keys ,expected) case))
+      (ert-info (keys)
         (clutch-test--with-result-state
             (:columns '("id" "name")
              :rows '((1 "alice"))
              :render t)
           (let (kill-ring kill-ring-yank-pointer)
             (clutch-test--select-cells '(0 1))
-            (cl-letf (((symbol-function 'transient-args)
-                       (lambda (_prefix) nil))
-                      ((symbol-function 'transient-arg-value)
-                       (lambda (_flag _args) nil)))
-              (funcall command)
-              (should (equal (current-kill 0) expected-text)))))))))
-
-(ert-deftest clutch-test-copy-header-switch-omits-tabular-headers ()
-  "Copy commands should honor the installed no-header switch."
-  (dolist (case '((clutch-result-copy-tsv "alice")
-                  (clutch-result-copy-csv "alice")
-                  (clutch-result-copy-org-table "| alice |")))
-    (pcase-let ((`(,command ,expected) case))
-      (clutch-test--with-result-state
-          (:columns '("name")
-           :rows '(("alice"))
-           :render t)
-        (let (kill-ring kill-ring-yank-pointer)
-          (clutch-test--select-cells '(0 0))
-          (cl-letf (((symbol-function 'transient-args)
-                     (lambda (_prefix) '("--no-header")))
-                    ((symbol-function 'transient-arg-value)
-                     (lambda (flag args) (member flag args))))
-            (funcall command)
+            (clutch-test--type-keys keys)
             (should (equal (current-kill 0) expected))))))))
 
-(ert-deftest clutch-test-copy-header-switch-defaults-to-yes ()
-  "Copy transient should present Header as enabled by default."
-  (let* ((suffix
-          (clutch-test--transient-suffix-for-key
-           'clutch-result-copy-dispatch "-h"))
-         (display (and suffix (transient-format-value suffix))))
-    (should suffix)
-    (should (equal (substring-no-properties display) "(No|Yes)"))
-    (should (eq (get-text-property (string-match "Yes" display)
-                                  'face display)
-                'transient-value))))
-
 (ert-deftest clutch-test-copy-fmt-with-refine-uses-refined-rectangle ()
-  "Refined copy should copy the final rectangle, not the initial region."
+  "Refined copy should copy the final rectangle, not the initial region.
+Without a region, choosing a format with refinement is refused."
   (clutch-test--with-result-state
       (:columns '("id" "name" "score")
        :rows '((1 "alice" 10)
@@ -1247,18 +1142,20 @@ Only the family is remapped, so text scaling still applies once."
        :render t)
     (let (kill-ring kill-ring-yank-pointer)
       (clutch-test--select-cells '(0 1) '(2 2))
-      (cl-letf (((symbol-function 'transient-args)
-                 (lambda (_prefix) '("--refine")))
-                ((symbol-function 'transient-arg-value)
-                 (lambda (flag args)
-                   (and (equal flag "--refine")
-                        (member "--refine" args))))
-                ((symbol-function 'clutch-result--start-refine)
-                 (lambda (rect callback)
-                   (should (equal rect '((0 1 2) . (1 2))))
-                   (funcall callback '((0 2) . (2))))))
-        (clutch-result--copy-fmt 'csv)
-        (should (equal (current-kill 0) "score\n10\n30"))))))
+      (clutch-test--type-keys "c -r c")
+      (should clutch-refine-mode)
+      (should (equal clutch--refine-rect '((0 1 2) . (1 2))))
+      (clutch--goto-cell 1 1)
+      (clutch-refine-toggle-row)
+      (clutch-refine-toggle-col)
+      (clutch-refine-confirm)
+      (should (equal (current-kill 0) "score\n10\n30"))
+      (ert-info ("without a region")
+        (let ((err (should-error (clutch-test--type-keys "c -r c")
+                                 :type 'user-error)))
+          (should (string-match-p "Set a region"
+                                  (error-message-string err))))
+        (should-not clutch-refine-mode)))))
 
 (ert-deftest clutch-test-copy-org-table-escapes-table-sensitive-content ()
   "Org table copy should keep one logical table row per result row."
@@ -1308,32 +1205,21 @@ Only the family is remapped, so text scaling still applies once."
 (ert-deftest clutch-test-copy-insert-unified-entry-uses-selection ()
   "Unified INSERT copy should use either the active region or current cell."
   (dolist (case
-           '((((0 0) (1 1))
-              ("INSERT INTO t (\"id\", \"name\") VALUES ('1', 'a');"
-               "INSERT INTO t (\"id\", \"name\") VALUES ('2', 'b');"))
-	     (((0 1))
-	      ("INSERT INTO t (\"name\") VALUES ('a');"))))
-    (pcase-let ((`(,cells ,expected-lines) case))
-      (clutch-test--with-result-state
-          (:connection-params '(:backend mysql)
-           :columns '("id" "name" "age")
-           :rows '((1 "a" 10) (2 "b" 20))
-           :source-table "t"
-           :last-query "SELECT id, name, age FROM t"
-           :render t)
-        (let (kill-ring kill-ring-yank-pointer)
-          (apply #'clutch-test--select-cells cells)
-          (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-                     (lambda (_conn s) (format "\"%s\"" s)))
-                    ((symbol-function 'clutch-db-value-to-literal)
-                     (lambda (_conn v &optional _formatter)
-                       (format "'%s'" v))))
+           `((((0 0) (1 1))
+              ,(concat "INSERT INTO t (\"id\", \"name\") VALUES (1, 'a');\n"
+                       "INSERT INTO t (\"id\", \"name\") VALUES (2, 'b');"))
+             (((0 1))
+              "INSERT INTO t (\"name\") VALUES ('a');")))
+    (pcase-let ((`(,cells ,expected) case))
+      (ert-info ((format "cells: %S" cells))
+        (clutch-test--with-sqlite-result (conn result)
+            '("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
+              "INSERT INTO t VALUES (1, 'a', 10), (2, 'b', 20)")
+            "SELECT id, name, age FROM t"
+          (let (kill-ring kill-ring-yank-pointer)
+            (apply #'clutch-test--select-cells cells)
             (clutch-result-copy 'insert)
-            (if (cdr cells)
-                (dolist (expected expected-lines)
-                  (should (string-match-p (regexp-quote expected)
-                                          (current-kill 0))))
-              (should (equal (current-kill 0) (car expected-lines))))))))))
+            (should (equal (current-kill 0) expected))))))))
 
 ;;;; Refine
 
@@ -1347,16 +1233,24 @@ Only the family is remapped, so text scaling still applies once."
      :column-widths [2 5]))
   (clutch--refresh-display))
 
-(ert-deftest clutch-test-refine-start-activates-mode-and-overlays ()
-  "Starting refine mode should enable the mode and create selection overlays."
+(ert-deftest clutch-test-refine-start-and-cancel ()
+  "Starting refine mode should enable the mode and create selection overlays.
+Cancelling should exit without invoking the callback and drop them."
   (with-temp-buffer
     (clutch-test--setup-refine-result-buffer)
-    (let ((callback (lambda (_rect) nil)))
-      (clutch-result--start-refine '((0 1 2) . (0 1)) callback)
-      (should clutch-refine-mode)
-      (should (equal clutch--refine-rect '((0 1 2) . (0 1))))
-      (should clutch--refine-overlays)
-      (should (eq clutch--refine-callback callback)))))
+    (let* ((called nil)
+           (callback (lambda (_rect) (setq called t))))
+      (ert-info ("start")
+        (clutch-result--start-refine '((0 1 2) . (0 1)) callback)
+        (should clutch-refine-mode)
+        (should (equal clutch--refine-rect '((0 1 2) . (0 1))))
+        (should clutch--refine-overlays)
+        (should (eq clutch--refine-callback callback)))
+      (ert-info ("cancel")
+        (clutch-refine-cancel)
+        (should-not called)
+        (should-not clutch-refine-mode)
+        (should-not clutch--refine-overlays)))))
 
 (ert-deftest clutch-test-refine-suspends-automatic-cell-preview ()
   "Refine mode should close and suppress automatic cell previews."
@@ -1392,7 +1286,9 @@ Only the family is remapped, so text scaling still applies once."
         (should scheduled)))))
 
 (ert-deftest clutch-test-refine-toggle-excludes-and-includes ()
-  "Refine mode should toggle row and column exclusions at point."
+  "Refine mode should toggle row and column exclusions at point.
+It refuses a row or column outside the selection, and a point off the
+table."
   (dolist (case '((row clutch-row-idx clutch-refine-toggle-row
                        clutch--refine-excluded-rows)
                   (column clutch-col-idx clutch-refine-toggle-col
@@ -1409,7 +1305,22 @@ Only the family is remapped, so text scaling still applies once."
           (funcall toggle)
           (should (equal (symbol-value state-var) '(1)))
           (funcall toggle)
-          (should-not (symbol-value state-var)))))))
+          (should-not (symbol-value state-var))))))
+  (with-temp-buffer
+    (clutch-test--setup-refine-result-buffer)
+    (clutch-result--start-refine '((0 1) . (0)) #'ignore)
+    (dolist (case '(((2 0) clutch-refine-toggle-row "Row not in selection")
+                    ((0 1) clutch-refine-toggle-col "Column not in selection")
+                    (nil clutch-refine-toggle-row "No row at point")
+                    (nil clutch-refine-toggle-col "No column at point")))
+      (pcase-let ((`(,cell ,toggle ,text) case))
+        (ert-info ((format "refused: %s" text))
+          (if cell
+              (apply #'clutch--goto-cell cell)
+            (goto-char (point-max)))
+          (should (equal (error-message-string
+                          (should-error (funcall toggle) :type 'user-error))
+                         text)))))))
 
 (ert-deftest clutch-test-refine-confirm-calls-callback-with-filtered-rect ()
   "Refine confirm should pass the remaining rectangle to the callback."
@@ -1450,170 +1361,167 @@ Only the family is remapped, so text scaling still applies once."
           (funcall toggle)
           (should-error (clutch-refine-confirm) :type 'user-error))))))
 
-(ert-deftest clutch-test-refine-cancel-does-not-call-callback ()
-  "Refine cancel should exit without invoking the callback."
-  (with-temp-buffer
-    (clutch-test--setup-refine-result-buffer)
-    (let ((called nil))
-      (clutch-result--start-refine '((0 1 2) . (0 1))
-                                   (lambda (_rect) (setq called t)))
-      (clutch-refine-cancel)
-      (should-not called)
-      (should-not clutch-refine-mode))))
-
 ;;;; Page navigation and sorting
+
+(defun clutch-test--insert-ids-sql (count)
+  "Return SQL inserting the ids 1 to COUNT into table t."
+  (concat "INSERT INTO t (id) VALUES "
+          (mapconcat (lambda (id) (format "(%d)" id))
+                     (number-sequence 1 count) ", ")))
 
 (ert-deftest clutch-test-page-navigation-contract ()
   "Page commands should error at boundaries and dispatch target pages."
-  (dolist (case '((next clutch-result-next-page)
-                  (previous clutch-result-prev-page)
-                  (first clutch-result-first-page)))
-    (pcase-let ((`(,label ,command) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (pcase label
-            ('next
-             (setq-local clutch--result-rows (make-list 10 '(1))
-                         clutch--page-has-more nil
-                         clutch-result-max-rows 10))
-            ((or 'previous 'first)
-             (setq-local clutch--page-current 0)))
-          (should-error (funcall command) :type 'user-error)))))
-  (dolist (case '((next clutch-result-next-page 0 1)
-                  (previous clutch-result-prev-page 3 2)
-                  (first clutch-result-first-page 5 0)))
-    (pcase-let ((`(,label ,command ,current-page ,expected-page) case))
-      (ert-info ((format "case: %s" label))
-        (with-temp-buffer
-          (setq-local clutch--result-rows (make-list 50 '(1))
-                      clutch-result-max-rows 50
-                      clutch--page-current current-page
-                      clutch--page-has-more t)
-          (let (executed-page)
-            (cl-letf (((symbol-function 'clutch-result--execute-page)
-                       (lambda (page) (setq executed-page page))))
-              (funcall command)
-              (should (= executed-page expected-page)))))))))
+  (let ((clutch-result-max-rows 2))
+    (clutch-test--with-sqlite-result (conn result)
+        (list "CREATE TABLE t (id INTEGER PRIMARY KEY)"
+              (clutch-test--insert-ids-sql 12))
+        "SELECT id FROM t ORDER BY id"
+      (cl-flet ((ids ()
+                  (mapcar #'car clutch--result-rows))
+                (run (command)
+                  (funcall command)
+                  (clutch-test--await-queries))
+                (refused (command text)
+                  (let ((err (should-error (funcall command)
+                                           :type 'user-error)))
+                    (should (equal (error-message-string err) text)))))
+        (refused #'clutch-result-prev-page "Already on first page")
+        (refused #'clutch-result-first-page "Already on first page")
+        (run #'clutch-result-next-page)
+        (should (= clutch--page-current 1))
+        (should (equal (ids) '(3 4)))
+        (dotimes (_ 2) (run #'clutch-result-next-page))
+        (should (= clutch--page-current 3))
+        (run #'clutch-result-prev-page)
+        (should (= clutch--page-current 2))
+        (should (equal (ids) '(5 6)))
+        (run #'clutch-result-first-page)
+        (should (= clutch--page-current 0))
+        (should (equal (ids) '(1 2)))
+        (dotimes (_ 5) (run #'clutch-result-next-page))
+        (should (equal (ids) '(11 12)))
+        (refused #'clutch-result-next-page "Already on last page")))))
 
 (ert-deftest clutch-test-last-page-navigation ()
   "Last page should calculate final windows and reject boundary states."
-  (dolist (case '((normal 0 nil 237 50 4 187 nil)
-                  (already-last 4 187 237 50 nil nil user-error)
-                  (shift-to-last-window 1 500 578 500 1 78 nil)
-                  (single-page 0 nil 30 50 nil nil user-error)))
-    (pcase-let ((`(,label ,current ,offset ,total ,page-size
-                          ,expected-page ,expected-offset ,error-type)
+  (dolist (case '((normal 237 50 0 4 187 "188-237 of 237 rows")
+                  (shift-to-last-window 578 500 1 1 78 "79-578 of 578 rows")))
+    (pcase-let ((`(,label ,total ,page-size ,start-page
+                          ,expected-page ,expected-offset ,summary)
                  case))
       (ert-info ((symbol-name label))
-        (with-temp-buffer
-          (setq-local clutch--page-current current
-                      clutch--page-offset offset
-                      clutch--page-total-rows total
-                      clutch-result-max-rows page-size)
-          (let (executed-page executed-offset)
-            (cl-letf (((symbol-function 'clutch-result--execute-page)
-                       (lambda (page &optional offset)
-                         (setq executed-page page
-                               executed-offset offset))))
-              (if error-type
-                  (should-error (clutch-result-last-page) :type error-type)
-                (clutch-result-last-page)
-                (should (= executed-page expected-page))
-                (should (= executed-offset expected-offset))))))))))
+        (let ((clutch-result-max-rows page-size))
+          (clutch-test--with-sqlite-result (conn result)
+              (list "CREATE TABLE t (id INTEGER PRIMARY KEY)"
+                    (clutch-test--insert-ids-sql total))
+              "SELECT id FROM t ORDER BY id"
+            (dotimes (_ start-page)
+              (clutch-result-next-page)
+              (clutch-test--await-queries))
+            ;; The rows are counted first, then the last full window loads.
+            (clutch-result-last-page)
+            (clutch-test--await-queries)
+            (should (= clutch--page-total-rows total))
+            (should (= clutch--page-current expected-page))
+            (should (= clutch--page-offset expected-offset))
+            (should (= (length clutch--result-rows) page-size))
+            (should (= (caar (last clutch--result-rows)) total))
+            (should (string-match-p (regexp-quote summary)
+                                    clutch--footer-base-string))
+            (let ((err (should-error (clutch-result-last-page)
+                                     :type 'user-error)))
+              (should (equal (error-message-string err)
+                             "Already on last page"))))))))
+  (ert-info ("single-page")
+    (let ((clutch-result-max-rows 50))
+      (clutch-test--with-sqlite-result (conn result)
+          (list "CREATE TABLE t (id INTEGER PRIMARY KEY)"
+                (clutch-test--insert-ids-sql 30))
+          "SELECT id FROM t ORDER BY id"
+        ;; Before the rows are counted, M-> counts them and then only
+        ;; says this page is the last; once counted, it refuses.
+        (let (shown)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (when fmt
+                         (push (apply #'format-message fmt args) shown)))))
+            (clutch-result-last-page)
+            (clutch-test--await-queries))
+          (should (= clutch--page-total-rows 30))
+          (should (equal (car shown) "Already on last page")))
+        (should-error (clutch-result-last-page) :type 'user-error)))))
 
-(defmacro clutch-test--with-instant-pages (pages-var &rest body)
-  "Run BODY with every result page load succeeding at once.
-Each loaded page number is pushed onto PAGES-VAR, and every page holds the
-result's current rows."
-  (declare (indent 1) (debug (symbolp body)))
-  `(let ((,pages-var nil))
-     (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-               ((symbol-function 'clutch-db-build-paged-sql)
-                (lambda (_conn _sql page-num &rest _)
-                  (push page-num ,pages-var)
-                  "SELECT 1"))
-               ((symbol-function 'clutch-result--run-query)
-                (lambda (_sql _query on-result)
-                  (funcall on-result
-                           (make-clutch-db-result
-                            :columns clutch--result-column-defs
-                            :rows clutch--result-rows)
-                           0)))
-               ((symbol-function 'clutch--refresh-display) #'ignore)
-               ((symbol-function 'message) #'ignore))
-       ,@body)))
-
-(ert-deftest clutch-test-sort-by-column-state-machine ()
-  "Keyboard sorting should cycle column state and reject non-column points."
-  (dolist (case '((toggle "name" 1 "name" nil nil nil ("name" t nil))
-                  (clear "name" 1 "name" t ("name" . "DESC") clear nil)
-                  (new-column "age" 2 "name" t nil nil ("age" nil nil))
-                  (no-column nil nil nil nil nil error nil)))
-    (pcase-let ((`(,label ,text ,col-idx ,sort-column ,sort-descending
-                         ,order-by ,expected-state ,expected-sort)
-                 case))
-      (ert-info ((symbol-name label))
-        (clutch-test--with-result-state
-            (:columns '("id" "name" "age")
-             :column-defs '((:name "id")
-                            (:name "name")
-                            (:name "age"))
-             :server-rewritable t
-             :server-pageable t
-             :base-query "SELECT id, name, age FROM t"
-             :sort-column sort-column
-             :sort-descending sort-descending
-             :page-current 4)
-          (when text
-            (insert text)
-            (add-text-properties (point-min) (point-max)
-                                 (list 'clutch-col-idx col-idx))
-            (goto-char (point-min)))
-          (setq-local clutch--order-by order-by)
-          (let (sort-args)
-            (clutch-test--with-instant-pages pages
-              (cl-letf (((symbol-function 'completing-read)
-                         (lambda (&rest _)
-                           (error "unexpected sort column prompt")))
-                        ((symbol-function 'clutch-result--sort)
-                         (lambda (col desc &optional idx)
-                           (setq sort-args (list col desc idx)))))
-                (pcase expected-state
-                  ('error
-                   (let ((err (should-error (clutch-result-sort-by-column)
-                                            :type 'user-error)))
-                     (should (string-match-p "No column at point"
-                                             (error-message-string err)))))
-                  ('clear
-                   (clutch-result-sort-by-column)
-                   (should-not clutch--sort-column)
-                   (should-not clutch--sort-descending)
-                   (should-not clutch--order-by)
-                   (should (= clutch--page-current 0))
-                   (should (equal pages '(0)))
-                   (should-not sort-args))
-                  (_
-                   (clutch-result-sort-by-column)
-                   (should (equal sort-args expected-sort))))))))))))
+(ert-deftest clutch-test-sort-cycle-real-sqlite-workflow ()
+  "Keyboard and header sorting should cycle a column's sort state.
+\\`s' sorts an unsorted column ascending, then descending, then not at
+all, each time from page 0, and another column starts its own cycle; off
+a column there is nothing to sort.  A header click sorts by the column
+name it captured, not a stale index."
+  (let ((clutch-result-max-rows 2))
+    (clutch-test--with-sqlite-result (conn result)
+        '("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
+          "INSERT INTO t VALUES (1, 'cam', 30), (2, 'alice', 20), (3, 'bob', 10)")
+        "SELECT id, name, age FROM t"
+      (cl-flet ((names ()
+                  (mapcar #'cadr clutch--result-rows))
+                (next-page ()
+                  (clutch-result-next-page)
+                  (clutch-test--await-queries))
+                (press-s-on (column)
+                  (clutch--goto-cell 0 column)
+                  (call-interactively #'clutch-result-sort-by-column)
+                  (clutch-test--await-queries))
+                (click (&rest args)
+                  (apply #'clutch-result--sort-by-column-index args)
+                  (clutch-test--await-queries)))
+        (ert-info ("s at point")
+          (next-page)
+          (press-s-on 1)
+          (should (equal clutch--order-by '("name" . "ASC")))
+          (should (= clutch--page-current 0))
+          (should (equal (names) '("alice" "bob")))
+          (press-s-on 1)
+          (should (equal clutch--order-by '("name" . "DESC")))
+          (should (equal (names) '("cam" "bob")))
+          (next-page)
+          (press-s-on 1)
+          (should-not clutch--order-by)
+          (should-not clutch--sort-column)
+          (should-not clutch--sort-descending)
+          (should (= clutch--page-current 0))
+          (should (equal (names) '("cam" "alice")))
+          (press-s-on 1)
+          (press-s-on 2)
+          (should (equal clutch--order-by '("age" . "ASC")))
+          (should (equal (names) '("bob" "alice")))
+          (goto-char (point-max))
+          (let ((err (should-error (call-interactively
+                                    #'clutch-result-sort-by-column)
+                                   :type 'user-error)))
+            (should (string-match-p "No column at point"
+                                    (error-message-string err)))))
+        (ert-info ("header click")
+          (click 99 "name")
+          (should (equal clutch--order-by '("name" . "ASC")))
+          (should (equal (names) '("alice" "bob")))
+          (let ((err (should-error (click 1 "gone") :type 'user-error)))
+            (should (string-match-p "Column not found"
+                                    (error-message-string err))))
+          (should (equal clutch--order-by '("name" . "ASC"))))))))
 
 (ert-deftest clutch-test-auto-commit-transient-description-shows-state ()
   "Auto-commit transient label should show manual and automatic states."
-  (with-temp-buffer
-    (setq-local clutch-connection 'fake-connection)
-    (cl-letf (((symbol-function 'clutch--dispatch-transaction-controls-inapt-p)
-               (lambda () nil)))
-      (dolist (case '((t manual) (nil auto)))
-        (pcase-let ((`(,manual-p ,active) case))
-          (cl-letf (((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_connection) manual-p)))
-            (let ((description (clutch--dispatch-auto-commit-description)))
-              (should (equal (substring-no-properties description)
-                             "Auto-commit (manual|auto)"))
-              (let ((case-fold-search nil))
-                (should (eq (get-text-property
-                             (string-match (symbol-name active) description)
-                             'face description)
-                            'transient-value))))))))))
+  (dolist (mode '(manual auto))
+    (with-temp-buffer
+      (setq-local clutch-connection (make-clutch-test-conn :commit-mode mode))
+      (let ((description (clutch--dispatch-auto-commit-description)))
+        (should (equal (substring-no-properties description)
+                       "Auto-commit (manual|auto)"))
+        (let ((case-fold-search nil))
+          (should (eq (get-text-property
+                       (string-match (symbol-name mode) description)
+                       'face description)
+                      'transient-value)))))))
 
 (ert-deftest clutch-test-query-console-sqli-keys ()
   "Console keys use Clutch results instead of an unrelated SQLi process."
@@ -1696,20 +1604,19 @@ result's current rows."
 
 (ert-deftest clutch-test-result-dispatch-pending-actions-follow-state ()
   "Result dispatch should show pending actions only while changes are staged."
-  (with-temp-buffer
-    (cl-letf (((symbol-function 'clutch-result--action-supported-p)
-               (lambda (action) (eq action 'sql-mutation))))
-      (let ((labels '("Submit staged"
-                      "Discard staged at point"
-                      "Copy staged SQL"
-                      "Save staged SQL"))
-            (menu (clutch-test--transient-menu-text 'clutch-result-dispatch)))
-        (dolist (label labels)
-          (should-not (string-match-p (regexp-quote label) menu)))
-        (setq-local clutch--pending-edits '(pending))
-        (setq menu (clutch-test--transient-menu-text 'clutch-result-dispatch))
-        (dolist (label labels)
-          (should (string-match-p (regexp-quote label) menu)))))))
+  (clutch-test--with-result-state
+      (:connection nil :connection-params '(:backend sqlite))
+    (let ((labels '("Submit staged"
+                    "Discard staged at point"
+                    "Copy staged SQL"
+                    "Save staged SQL"))
+          (menu (clutch-test--transient-menu-text 'clutch-result-dispatch)))
+      (dolist (label labels)
+        (should-not (string-match-p (regexp-quote label) menu)))
+      (setq-local clutch--pending-edits '(pending))
+      (setq menu (clutch-test--transient-menu-text 'clutch-result-dispatch))
+      (dolist (label labels)
+        (should (string-match-p (regexp-quote label) menu))))))
 
 (ert-deftest clutch-test-filter-transient-descriptions-show-current-values ()
   "Result filter labels should expose inactive and active values."
@@ -1800,71 +1707,19 @@ result's current rows."
       (should (eq (get-text-property (string-match "desc" desc) 'face desc)
                   'transient-value)))))
 
-(ert-deftest clutch-test-sort-by-header-column-contract ()
-  "Header sorting should use captured names and cycle sort state."
-  (clutch-test--with-result-state
-      (:columns '("id" "name")
-       :server-rewritable t
-       :server-pageable t
-       :base-query "SELECT id, name FROM t")
-    (clutch-test--with-instant-pages pages
-      (clutch-result--sort-by-column-index 99 "name")
-      (should (equal clutch--sort-column "name"))
-      (should (equal clutch--order-by '("name" . "ASC")))
-      (should (equal pages '(0)))))
-  (clutch-test--with-result-state
-      (:columns '("id" "age")
-       :column-defs '((:name "id") (:name "age")))
-    (let (sort-args)
-      (cl-letf (((symbol-function 'clutch-result--sort)
-                 (lambda (name descending)
-                   (setq sort-args (list name descending)))))
-        (let ((err (should-error
-                    (clutch-result--sort-by-column-index 1 "name")
-                    :type 'user-error)))
-          (should (string-match-p "Column not found"
-                                  (error-message-string err)))))
-      (should-not sort-args)))
-  (clutch-test--with-result-state
-      (:columns '("id" "name")
-       :server-rewritable t
-       :server-pageable t
-       :base-query "SELECT id, name FROM t"
-       :page-current 3)
-    (clutch-test--with-instant-pages pages
-      (clutch-result--sort-by-column-index 1)
-      (should (equal clutch--sort-column "name"))
-      (should-not clutch--sort-descending)
-      (should (equal clutch--order-by '("name" . "ASC")))
-      (should (= clutch--page-current 0))
-      (clutch-result--sort-by-column-index 1)
-      (should (equal clutch--sort-column "name"))
-      (should clutch--sort-descending)
-      (should (equal clutch--order-by '("name" . "DESC")))
-      (clutch-result--sort-by-column-index 1)
-      (should-not clutch--sort-column)
-      (should-not clutch--sort-descending)
-      (should-not clutch--order-by)
-      (clutch-result--sort-by-column-index 0)
-      (should (equal clutch--sort-column "id"))
-      (should-not clutch--sort-descending)
-      (should (equal clutch--order-by '("id" . "ASC")))
-      (should (equal (nreverse pages) '(0 0 0 0))))))
-
 (ert-deftest clutch-test-local-sort-cycles-on-an-empty-page ()
   "Sorting an empty page locally should cycle back to unsorted."
   (clutch-test--with-result-state
       (:columns '("id" "name")
-       :rows nil)
-    (cl-letf (((symbol-function 'clutch--refresh-display) #'ignore)
-              ((symbol-function 'message) #'ignore))
-      (clutch-result--sort-by-column-index 1)
-      (should (equal clutch--sort-column "name"))
-      (clutch-result--sort-by-column-index 1)
-      (should clutch--sort-descending)
-      (clutch-result--sort-by-column-index 1)
-      (should-not clutch--sort-column)
-      (should-not clutch--sort-descending))))
+       :rows nil
+       :render t)
+    (clutch-result--sort-by-column-index 1)
+    (should (equal clutch--sort-column "name"))
+    (clutch-result--sort-by-column-index 1)
+    (should clutch--sort-descending)
+    (clutch-result--sort-by-column-index 1)
+    (should-not clutch--sort-column)
+    (should-not clutch--sort-descending)))
 
 (ert-deftest clutch-test-sort-rejects-hidden-row-identity-column ()
   "Server-side sort should only accept visible user columns."
@@ -1874,14 +1729,10 @@ result's current rows."
                       (:name "id")
                       (:name "name"))
        :server-rewritable t)
-    (let (paged)
-      (cl-letf (((symbol-function 'clutch-result--execute-page)
-                 (lambda (&rest _args) (setq paged t))))
-        (let ((err (should-error (clutch-result--sort "clutch__rid_0" nil)
-                                 :type 'user-error)))
-          (should (string-match-p "Column clutch__rid_0 not found"
-                                  (error-message-string err))))
-        (should-not paged)))))
+    (let ((err (should-error (clutch-result--sort "clutch__rid_0" nil)
+                             :type 'user-error)))
+      (should (string-match-p "Column clutch__rid_0 not found"
+                              (error-message-string err))))))
 
 (ert-deftest clutch-test-sort-falls-back-to-current-page-for-nonrewritable-result ()
   "Arbitrary query results should cycle a local current-page sort."
@@ -1889,80 +1740,66 @@ result's current rows."
       (:columns '("score" "score")
        :column-defs '((:name "score") (:name "score"))
        :rows '((1 20) (2 nil) (3 10) (4 10))
-       :server-rewritable nil)
-    (insert "score")
-    (add-text-properties (point-min) (point-max) '(clutch-col-idx 1))
-    (goto-char (point-min))
-    (let ((refreshed 0))
-      (cl-letf (((symbol-function 'clutch-result--execute-page)
-                 (lambda (&rest _args)
-                   (ert-fail "local sort must not execute a query")))
-                ((symbol-function 'clutch--refresh-display)
-                 (lambda () (cl-incf refreshed)))
-                ((symbol-function 'message) #'ignore))
-        (clutch-result--sort-by-column-index 1)
-        (should (equal (mapcar #'car clutch--result-rows) '(2 3 4 1)))
-        (should (equal clutch--local-sort-original-rows
-                       '((1 20) (2 nil) (3 10) (4 10))))
-        (should (equal clutch--sort-column "score"))
-        (should-not clutch--sort-descending)
-        (should-not clutch--order-by)
-        (should (= clutch--local-sort-column-index 1))
-        (should (string-match-p
-                 "Sort page"
-                 (clutch-result--sort-transient-description)))
-        (should (string-match-p
-                 "ASC\\[score\\] page"
-                 (substring-no-properties (clutch--footer-sort-part))))
-        (clutch-result--sort-by-column-index 1)
-        (should (equal (mapcar #'car clutch--result-rows) '(1 3 4 2)))
-        (should clutch--sort-descending)
-        (should (= clutch--local-sort-column-index 1))
-        (clutch-result--sort-by-column-index 1)
-        (should (equal (mapcar #'car clutch--result-rows) '(1 2 3 4)))
-        (should-not clutch--local-sort-original-rows)
-        (should-not clutch--local-sort-column-index)
-        (should-not clutch--sort-column)
-        (should (= refreshed 3))))))
+       :server-rewritable nil
+       :render t)
+    (cl-flet ((first-shown ()
+                (clutch--goto-cell 0 0)
+                (nth 2 (clutch--cell-at-point))))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal (mapcar #'car clutch--result-rows) '(2 3 4 1)))
+      (should (= (first-shown) 2))
+      (should (equal clutch--local-sort-original-rows
+                     '((1 20) (2 nil) (3 10) (4 10))))
+      (should (equal clutch--sort-column "score"))
+      (should-not clutch--sort-descending)
+      (should-not clutch--order-by)
+      (should (= clutch--local-sort-column-index 1))
+      (clutch--goto-cell 0 1)
+      (should (string-match-p
+               "Sort page"
+               (clutch-result--sort-transient-description)))
+      (should (string-match-p
+               "ASC\\[score\\] page"
+               (substring-no-properties (clutch--footer-sort-part))))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal (mapcar #'car clutch--result-rows) '(1 3 4 2)))
+      (should (= (first-shown) 1))
+      (should clutch--sort-descending)
+      (should (= clutch--local-sort-column-index 1))
+      (clutch-result--sort-by-column-index 1)
+      (should (equal (mapcar #'car clutch--result-rows) '(1 2 3 4)))
+      (should (= (first-shown) 1))
+      (should-not clutch--local-sort-original-rows)
+      (should-not clutch--local-sort-column-index)
+      (should-not clutch--sort-column))))
 
-(ert-deftest clutch-test-local-numeric-sort-keeps-exact-decimal-order ()
-  "Local numeric sorting should not use text order or floating point."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("amount")
-                clutch--result-column-defs
-                '((:name "amount" :type-category numeric))
-                clutch--local-sort-original-rows
-                '(("12345678901234567890.12345678901234567891")
-                  ("10")
-                  (nil)
-                  ("2")
-                  ("12345678901234567890.12345678901234567890"))
-                clutch--filter-pattern nil)
-    (clutch-result--sort-local-page "amount" nil)
-    (should
-     (equal clutch--result-rows
-            '((nil)
-              ("2")
-              ("10")
-              ("12345678901234567890.12345678901234567890")
-              ("12345678901234567890.12345678901234567891"))))))
-
-(ert-deftest clutch-test-local-numeric-sort-orders-floats-and-sentinels ()
-  "Local numeric sorting should order exponent floats, infinity, and NaN."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("label" "amount")
-                clutch--result-column-defs
-                '((:name "label" :type-category text)
-                  (:name "amount" :type-category numeric))
-                clutch--local-sort-original-rows
-                (list (list 'two 2)
-                      (list 'nan 0.0e+NaN)
-                      (list 'negative -1e+20)
-                      (list 'infinity 1.0e+INF))
-                clutch--filter-pattern nil)
-    (clutch-result--sort-local-page "amount" nil 1)
-    (should (equal (mapcar #'car clutch--result-rows)
-                   '(negative two infinity nan)))))
+(ert-deftest clutch-test-local-numeric-sort-orders-by-value ()
+  "Local numeric sorting should not use text order or floating point.
+It orders exponent floats, infinity, and NaN as well."
+  (dolist (case
+           '((exact-decimals
+              ((:name "amount" :type-category numeric))
+              (("12345678901234567890.12345678901234567891") ("10") (nil) ("2")
+               ("12345678901234567890.12345678901234567890"))
+              nil
+              (nil "2" "10" "12345678901234567890.12345678901234567890"
+                   "12345678901234567890.12345678901234567891"))
+             (floats-and-sentinels
+              ((:name "label" :type-category text)
+               (:name "amount" :type-category numeric))
+              ((two 2) (nan 0.0e+NaN) (negative -1e+20) (infinity 1.0e+INF))
+              1
+              (negative two infinity nan))))
+    (pcase-let ((`(,label ,column-defs ,rows ,index ,expected) case))
+      (ert-info ((symbol-name label))
+        (with-temp-buffer
+          (setq-local clutch--result-columns
+                      (mapcar (lambda (def) (plist-get def :name)) column-defs)
+                      clutch--result-column-defs column-defs
+                      clutch--local-sort-original-rows rows
+                      clutch--filter-pattern nil)
+          (clutch-result--sort-local-page "amount" nil index)
+          (should (equal (mapcar #'car clutch--result-rows) expected)))))))
 
 ;;;; Foreign-key navigation
 
@@ -1971,7 +1808,7 @@ result's current rows."
 SQLite finds main.parents first for the bare name, with a row of the same key."
   (require 'clutch-db-sqlite)
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-        result-buf followed)
+        result-buf)
     (unwind-protect
         (progn
           (dolist (sql '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
@@ -1991,14 +1828,16 @@ SQLite finds main.parents first for the bare name, with a row of the same key."
                     (buffer-local-value 'clutch--last-result-buffer source))))
           (ert-run-idle-timers)
           (with-current-buffer result-buf
-            (cl-letf (((symbol-function 'clutch--execute)
-                       (lambda (sql &rest _) (setq followed sql))))
-              (clutch-record--follow-fk
-               (cdr (assq 1 clutch--fk-info)) 1 result-buf)))
-          (should (equal followed
-                         "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
-          (should (equal (clutch-db-result-rows (clutch-db-query conn followed))
-                         '((1 "aux")))))
+            (clutch-record--follow-fk
+             (cdr (assq 1 clutch--fk-info)) 1 result-buf)
+            (clutch-test--await-queries)
+            (should (equal clutch--last-query
+                           "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
+            ;; The followed row is the aux parent, its hidden row identity
+            ;; after its columns.
+            (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
+                                   clutch--result-rows)
+                           '((1 "aux"))))))
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf))
       (clutch-db-disconnect conn))))
