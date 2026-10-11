@@ -1611,7 +1611,6 @@ fails signals before any SQL is sent."
 
 (ert-deftest clutch-test-execute-statements-remembers-error-details ()
   "Batch statement failures should store details for early and final errors."
-  (skip-unless (sqlite-available-p))
   (dolist (case '((nil
                    "INSERT INTO first VALUES (1);\nINSERT INTO second VALUES (2);"
                    "INSERT INTO first VALUES (1)" 1 "first")
@@ -1619,52 +1618,48 @@ fails signals before any SQL is sent."
                    "INSERT INTO ok_rows VALUES (1);\nINSERT INTO broken_rows VALUES (2);"
                    "INSERT INTO broken_rows VALUES (2)" 2 "broken_rows")))
     (pcase-let ((`(,setup ,sql ,broken-sql ,statement-index ,table) case))
-      (let ((clutch-debug-mode t)
-            (conn (clutch-db-sqlite-connect '(:database ":memory:")))
-            (missing (concat "no such table: " table))
-            (clutch--execution-refresh-timer nil)
-            result)
-        (clutch--clear-debug-capture)
-        (unwind-protect
-            (save-window-excursion
-              (with-temp-buffer
-                (clutch-mode)
-                (setq-local clutch-connection conn
-                            clutch--connection-params
-                            '(:backend sqlite :database ":memory:"))
-                (dolist (statement setup)
-                  (clutch-db-query conn statement))
-                (insert sql)
-                (let ((signaled (should-error (clutch-execute-buffer)
-                                              :type 'user-error)))
-                  (setq result clutch--last-result-buffer)
-                  (should (eq clutch-connection conn))
-                  (should (string-match-p
-                           (format "\\`Statement %d failed: .*%s"
-                                   statement-index missing)
-                           (cadr signaled)))
-                  (let* ((details clutch--buffer-error-details)
-                         (diag (plist-get details :diag))
-                         (debug-text (clutch-test--debug-buffer-string)))
-                    ;; The page leads with the summary of the database's message.
-                    (with-current-buffer result
-                      (should (string-prefix-p
-                               (clutch--humanize-db-error
-                                (plist-get diag :raw-message))
-                               (buffer-string))))
-                    (should (eq (plist-get details :backend) 'sqlite))
-                    (should (string-match-p missing
-                                            (plist-get diag :raw-message)))
-                    (should (equal (plist-get (plist-get diag :context) :sql)
-                                   broken-sql))
-                    (should (string-match-p "Phase: error" debug-text))
-                    (should (string-match-p (concat "Summary: .*" missing)
-                                            debug-text))))))
-          (clutch--execution-refresh-stop)
-          (when (buffer-live-p result)
-            (kill-buffer result))
-          (when (clutch-db-live-p conn)
-            (clutch-db-disconnect conn)))))))
+      (clutch-test--with-sqlite-connection conn
+        (let ((clutch-debug-mode t)
+              (missing (concat "no such table: " table))
+              result)
+          (clutch--clear-debug-capture)
+          (unwind-protect
+              (save-window-excursion
+                (with-temp-buffer
+                  (clutch-mode)
+                  (setq-local clutch-connection conn
+                              clutch--connection-params
+                              '(:backend sqlite :database ":memory:"))
+                  (dolist (statement setup)
+                    (clutch-db-query conn statement))
+                  (insert sql)
+                  (let ((signaled (should-error (clutch-execute-buffer)
+                                                :type 'user-error)))
+                    (setq result clutch--last-result-buffer)
+                    (should (eq clutch-connection conn))
+                    (should (string-match-p
+                             (format "\\`Statement %d failed: .*%s"
+                                     statement-index missing)
+                             (cadr signaled)))
+                    (let* ((details clutch--buffer-error-details)
+                           (diag (plist-get details :diag))
+                           (debug-text (clutch-test--debug-buffer-string)))
+                      ;; The page leads with the summary of the database's message.
+                      (with-current-buffer result
+                        (should (string-prefix-p
+                                 (clutch--humanize-db-error
+                                  (plist-get diag :raw-message))
+                                 (buffer-string))))
+                      (should (eq (plist-get details :backend) 'sqlite))
+                      (should (string-match-p missing
+                                              (plist-get diag :raw-message)))
+                      (should (equal (plist-get (plist-get diag :context) :sql)
+                                     broken-sql))
+                      (should (string-match-p "Phase: error" debug-text))
+                      (should (string-match-p (concat "Summary: .*" missing)
+                                              debug-text))))))
+            (when (buffer-live-p result)
+              (kill-buffer result))))))))
 
 (ert-deftest clutch-test-execution-error-renders-result-without-message ()
   "Single-statement execution errors should not duplicate details in messages."
@@ -1783,85 +1778,74 @@ fails signals before any SQL is sent."
   "Only a quit during the database call should retire the connection.
 A quit while confirming keeps the session, and so does a quit during the
 call when a backend interrupt succeeds."
-  (skip-unless (sqlite-available-p))
   (pcase-dolist (`(,phase ,interrupted ,retired ,error-message)
                  `((confirm nil nil nil)
                    (query nil t ,clutch--transaction-outcome-unknown-message)
                    (query t nil nil)))
     (ert-info ((format "quit while %s, interrupted: %s" phase interrupted))
       (with-temp-buffer
-        (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-              (clutch--tx-state-cache (make-hash-table :test 'eq))
-              (clutch--execution-refresh-timer nil))
-          (setq-local clutch-connection conn)
-          (puthash conn 'dirty clutch--tx-state-cache)
-          (unwind-protect
-              (cl-letf (((symbol-function 'clutch--confirm-query-execution)
-                         (lambda (_sql)
-                           (when (eq phase 'confirm) (signal 'quit nil))))
-                        ((symbol-function 'clutch--prepare-row-identity-query)
-                         (lambda (&rest _args)
-                           (should clutch--execution-refresh-timer)
-                           (signal 'quit nil)))
-                        ;; SQLite cannot interrupt a query; other backends can.
-                        ((symbol-function 'clutch-db-interrupt-query)
-                         (lambda (_conn) interrupted)))
-                (if (eq phase 'confirm)
-                    (should (eq (condition-case nil
-                                    (clutch--execute "SELECT 1")
-                                  (quit 'quit))
-                                'quit))
-                  (should (equal (cadr (should-error (clutch--execute "SELECT 1")
-                                                     :type 'user-error))
-                                 error-message)))
-                (if retired
-                    (should-not (clutch-db-live-p conn))
-                  (should (clutch-db-live-p conn)))
-                (should (eq clutch-connection conn))
-                ;; Retirement keeps the dirty flag as lost-transaction evidence;
-                ;; the next transaction command consumes it and refuses to run.
-                (should (gethash conn clutch--tx-state-cache))
-                (should-not clutch--execution-start-time))
-            (clutch--execution-refresh-stop)
-            (when (clutch-db-live-p conn)
-              (clutch-db-disconnect conn))))))))
+        (clutch-test--with-sqlite-connection conn
+          (let ((clutch--tx-state-cache (make-hash-table :test 'eq)))
+            (setq-local clutch-connection conn)
+            (puthash conn 'dirty clutch--tx-state-cache)
+            (cl-letf (((symbol-function 'clutch--confirm-query-execution)
+                       (lambda (_sql)
+                         (when (eq phase 'confirm) (signal 'quit nil))))
+                      ((symbol-function 'clutch--prepare-row-identity-query)
+                       (lambda (&rest _args)
+                         (should clutch--execution-refresh-timer)
+                         (signal 'quit nil)))
+                      ;; SQLite cannot interrupt a query; other backends can.
+                      ((symbol-function 'clutch-db-interrupt-query)
+                       (lambda (_conn) interrupted)))
+              (if (eq phase 'confirm)
+                  (should (eq (condition-case nil
+                                  (clutch--execute "SELECT 1")
+                                (quit 'quit))
+                              'quit))
+                (should (equal (cadr (should-error (clutch--execute "SELECT 1")
+                                                   :type 'user-error))
+                               error-message)))
+              (if retired
+                  (should-not (clutch-db-live-p conn))
+                (should (clutch-db-live-p conn)))
+              (should (eq clutch-connection conn))
+              ;; Retirement keeps the dirty flag as lost-transaction evidence;
+              ;; the next transaction command consumes it and refuses to run.
+              (should (gethash conn clutch--tx-state-cache))
+              (should-not clutch--execution-start-time))))))))
 
 (ert-deftest clutch-test-execute-db-error-preserves-dead-reconnect-anchor ()
   "Query errors should retain a dead connection for the next reconnect."
-  (skip-unless (sqlite-available-p))
   (with-temp-buffer
-    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch--execution-refresh-timer nil)
-          details-cleared)
-      (setq-local clutch-connection conn)
-      (puthash conn 'dirty clutch--tx-state-cache)
-      (unwind-protect
-          (save-window-excursion
-            (cl-letf (((symbol-function 'clutch-db-query)
-                       ;; The connection dies with its query.
-                       (lambda (connection _sql)
-                         (clutch-db-disconnect connection)
-                         (signal 'clutch-db-error '("query timed out"))))
-                      ;; Retiring clears error details, which SQLite does not keep.
-                      ((symbol-function 'clutch-db-clear-error-details)
-                       (lambda (connection)
-                         (setq details-cleared connection))))
-              (clutch--execute "SELECT SLEEP(60)"))
-            (should (eq clutch-connection conn))
-            (should-not (clutch-db-live-p conn))
-            (should (eq details-cleared conn))
-            (should-not clutch--execution-start-time)
-            (with-current-buffer clutch--last-result-buffer
-              (should (string-match-p "query timed out" (buffer-string)))
-              (should (string-match-p
-                       (regexp-quote clutch--transaction-outcome-unknown-message)
-                       (buffer-string)))))
-        (clutch--execution-refresh-stop)
-        (when (buffer-live-p clutch--last-result-buffer)
-          (kill-buffer clutch--last-result-buffer))
-        (when (clutch-db-live-p conn)
-          (clutch-db-disconnect conn))))))
+    (clutch-test--with-sqlite-connection conn
+      (let ((clutch--tx-state-cache (make-hash-table :test 'eq))
+            details-cleared)
+        (setq-local clutch-connection conn)
+        (puthash conn 'dirty clutch--tx-state-cache)
+        (unwind-protect
+            (save-window-excursion
+              (cl-letf (((symbol-function 'clutch-db-query)
+                         ;; The connection dies with its query.
+                         (lambda (connection _sql)
+                           (clutch-db-disconnect connection)
+                           (signal 'clutch-db-error '("query timed out"))))
+                        ;; Retiring clears error details, which SQLite does not keep.
+                        ((symbol-function 'clutch-db-clear-error-details)
+                         (lambda (connection)
+                           (setq details-cleared connection))))
+                (clutch--execute "SELECT SLEEP(60)"))
+              (should (eq clutch-connection conn))
+              (should-not (clutch-db-live-p conn))
+              (should (eq details-cleared conn))
+              (should-not clutch--execution-start-time)
+              (with-current-buffer clutch--last-result-buffer
+                (should (string-match-p "query timed out" (buffer-string)))
+                (should (string-match-p
+                         (regexp-quote clutch--transaction-outcome-unknown-message)
+                         (buffer-string)))))
+          (when (buffer-live-p clutch--last-result-buffer)
+            (kill-buffer clutch--last-result-buffer)))))))
 
 (ert-deftest clutch-test-replacement-connection-keeps-the-commit-mode ()
   "A connection that replaces another should keep its commit mode.
@@ -3391,69 +3375,66 @@ Otherwise the connection stays reserved and the mode line keeps counting."
 
 (ert-deftest clutch-test-handle-query-quit-remembers-interrupt-error-details-and-debug-event ()
   "Interrupt RPC failures should record details and retain reconnect anchors."
-  (skip-unless (sqlite-available-p))
   (with-temp-buffer
-    (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-           (clutch-debug-mode t)
-           (clutch-connection conn)
-           (raw-message "Connection refused (host=db.example.com, port=3306)")
-           (captured-message nil)
-           (record (generate-new-buffer " *clutch-abandoned-record*")))
-      (unwind-protect
-          (progn
-            (clutch--clear-debug-capture)
-            (with-current-buffer record
-              (clutch-record-mode)
-              (setq-local clutch-connection conn
-                          clutch--connection-render-state
-                          '(:connected-p t)))
-            (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                       (lambda (_conn)
-                         (signal 'clutch-db-error (list raw-message))))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq captured-message (apply #'format fmt args)))))
-              (should-error (clutch--handle-query-quit clutch-connection)
-                            :type 'clutch-query-interrupted)
-              (let* ((summary (clutch--humanize-db-error raw-message))
-                     (message-summary
-                      (condition-case err
-                          (signal 'clutch-db-error (list raw-message))
-                        (clutch-db-error
-                         (clutch--humanize-db-error
-                          (error-message-string err)))))
-                     (details clutch--buffer-error-details)
-                     (diag (plist-get details :diag))
-                     (context (plist-get diag :context))
-                     (debug-text (clutch-test--debug-buffer-string)))
-                (should-not (clutch-db-live-p conn))
-                (should details)
-                (should (eq (plist-get details :backend) 'sqlite))
-                (should (equal (plist-get details :summary) summary))
-                (should (equal (plist-get diag :raw-message) raw-message))
-                (should (plist-member context :sql))
-                (should-not (plist-get context :sql))
-                (should
-                 (equal captured-message
-                        (format
-                         "Interrupt failed: %s"
-                         (clutch--debug-workflow-message message-summary))))
-                (dolist (expected
-                         `(,(concat "Operation: cancel\nPhase: error")
-                           ,(concat "Summary: " message-summary)
-                           "Operation: interrupt\nPhase: disconnect"))
-                  (should (string-match-p (regexp-quote expected) debug-text)))
-                (with-current-buffer record
-                  (should (eq clutch-connection conn))
+    (clutch-test--with-sqlite-connection conn
+      (let ((clutch-debug-mode t)
+            (clutch-connection conn)
+            (raw-message "Connection refused (host=db.example.com, port=3306)")
+            (captured-message nil)
+            (record (generate-new-buffer " *clutch-abandoned-record*")))
+        (unwind-protect
+            (progn
+              (clutch--clear-debug-capture)
+              (with-current-buffer record
+                (clutch-record-mode)
+                (setq-local clutch-connection conn
+                            clutch--connection-render-state
+                            '(:connected-p t)))
+              (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                         (lambda (_conn)
+                           (signal 'clutch-db-error (list raw-message))))
+                        ((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (setq captured-message (apply #'format fmt args)))))
+                (should-error (clutch--handle-query-quit clutch-connection)
+                              :type 'clutch-query-interrupted)
+                (let* ((summary (clutch--humanize-db-error raw-message))
+                       (message-summary
+                        (condition-case err
+                            (signal 'clutch-db-error (list raw-message))
+                          (clutch-db-error
+                           (clutch--humanize-db-error
+                            (error-message-string err)))))
+                       (details clutch--buffer-error-details)
+                       (diag (plist-get details :diag))
+                       (context (plist-get diag :context))
+                       (debug-text (clutch-test--debug-buffer-string)))
+                  (should-not (clutch-db-live-p conn))
+                  (should details)
+                  (should (eq (plist-get details :backend) 'sqlite))
+                  (should (equal (plist-get details :summary) summary))
+                  (should (equal (plist-get diag :raw-message) raw-message))
+                  (should (plist-member context :sql))
+                  (should-not (plist-get context :sql))
                   (should
-                   (string-match-p
-                    "DISCONNECTED"
-                    (substring-no-properties
-                     (clutch--header-with-disconnect-badge "Record"))))))))
-        (when (buffer-live-p record)
-          (kill-buffer record))
-        (when (clutch-db-live-p conn)
-          (clutch-db-disconnect conn))))))
+                   (equal captured-message
+                          (format
+                           "Interrupt failed: %s"
+                           (clutch--debug-workflow-message message-summary))))
+                  (dolist (expected
+                           `(,(concat "Operation: cancel\nPhase: error")
+                             ,(concat "Summary: " message-summary)
+                             "Operation: interrupt\nPhase: disconnect"))
+                    (should (string-match-p (regexp-quote expected) debug-text)))
+                  (with-current-buffer record
+                    (should (eq clutch-connection conn))
+                    (should
+                     (string-match-p
+                      "DISCONNECTED"
+                      (substring-no-properties
+                       (clutch--header-with-disconnect-badge "Record"))))))))
+          (when (buffer-live-p record)
+            (kill-buffer record)))))))
 
 (ert-deftest clutch-test-execute-uses-backend-result-query-p ()
   "Execute should let the backend classify non-SQL result-set queries."
@@ -3475,55 +3456,41 @@ Otherwise the connection stays reserved and the mode line keeps counting."
 
 (ert-deftest clutch-test-execute-statements-confirms-each-nonselect ()
   "Batch execution should apply destructive and high-risk guards."
-  (skip-unless (sqlite-available-p))
   (with-temp-buffer
-    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-          (clutch--execution-refresh-timer nil)
-          prompts)
-      (setq-local clutch-connection conn)
-      (unwind-protect
-          (progn
-            (clutch-db-query conn "CREATE TABLE users (id INT, admin INT)")
-            (cl-letf (((symbol-function 'yes-or-no-p)
-                       (lambda (prompt) (push prompt prompts) t))
-                      ((symbol-function 'message) #'ignore))
-              ;; The UPDATE without a WHERE clause needs YES typed.
-              (clutch-test--with-minibuffer-answers '("YES")
-                (clutch--execute-statements
-                 '("UPDATE users SET admin = 1" "DROP TABLE users"))))
-            (should (= (length prompts) 1))
-            (should (string-prefix-p "Execute destructive query?" (car prompts)))
-            ;; A batch stops at a failure, so the DROP ran after the UPDATE.
-            (should-not (clutch-db-result-rows
-                         (clutch-db-query
-                          conn "SELECT name FROM sqlite_master WHERE name = 'users'"))))
-        (clutch--execution-refresh-stop)
-        (when (clutch-db-live-p conn)
-          (clutch-db-disconnect conn))))))
+    (clutch-test--with-sqlite-connection conn
+      (let (prompts)
+        (setq-local clutch-connection conn)
+        (clutch-db-query conn "CREATE TABLE users (id INT, admin INT)")
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (prompt) (push prompt prompts) t))
+                  ((symbol-function 'message) #'ignore))
+          ;; The UPDATE without a WHERE clause needs YES typed.
+          (clutch-test--with-minibuffer-answers '("YES")
+            (clutch--execute-statements
+             '("UPDATE users SET admin = 1" "DROP TABLE users"))))
+        (should (= (length prompts) 1))
+        (should (string-prefix-p "Execute destructive query?" (car prompts)))
+        ;; A batch stops at a failure, so the DROP ran after the UPDATE.
+        (should-not (clutch-db-result-rows
+                     (clutch-db-query
+                      conn "SELECT name FROM sqlite_master WHERE name = 'users'")))))))
 
 (ert-deftest clutch-test-execute-statements-refreshes-schema-after-ddl ()
   "Batch DDL execution should refresh or invalidate schema metadata.
 SQLite refreshes its schema eagerly, so DDL marks it stale; no backend
 here exercises the asynchronous refresh a non-eager backend gets."
-  (skip-unless (sqlite-available-p))
   (clutch-test--with-isolated-metadata-caches
     (with-temp-buffer
-      (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-            (clutch--execution-refresh-timer nil))
+      (clutch-test--with-sqlite-connection conn
         (setq-local clutch-connection conn)
-        (unwind-protect
-            (progn
-              (cl-letf (((symbol-function 'message) #'ignore))
-                (clutch--execute-statements '("CREATE TABLE users (id INT)")))
-              (should (equal (clutch-db-result-rows
-                              (clutch-db-query
-                               conn "SELECT name FROM sqlite_master WHERE type = 'table'"))
-                             '(("users"))))
-              (should (eq (plist-get (clutch--schema-status-entry conn) :state)
-                          'stale)))
-          (clutch--execution-refresh-stop)
-          (when (clutch-db-live-p conn)
-            (clutch-db-disconnect conn)))))))
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (clutch--execute-statements '("CREATE TABLE users (id INT)")))
+        (should (equal (clutch-db-result-rows
+                        (clutch-db-query
+                         conn "SELECT name FROM sqlite_master WHERE type = 'table'"))
+                       '(("users"))))
+        (should (eq (plist-get (clutch--schema-status-entry conn) :state)
+                    'stale))))))
 
 (provide 'clutch-test-query)
 

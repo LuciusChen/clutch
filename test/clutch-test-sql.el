@@ -1638,81 +1638,77 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 (ert-deftest clutch-test-completion-capf-real-sqlite-workflow ()
   "Exercise the installed SQL CAPFs against real SQLite metadata."
-  (skip-unless (sqlite-available-p))
   (clutch-test--with-isolated-metadata-caches
-    (let* ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
-           (schema (make-hash-table :test 'equal)))
-      (unwind-protect
-          (progn
-            (dolist (ddl '("create table users (id integer, name text)"
-                           "create table posts (id integer, title text)"
-                           "create table orders (order_id integer, user_id integer)"
-                           "create table user_roles (id integer)"
-                           "create table xaccounts (id integer)"
-                           "create table APP_CONFIG (CONFIG_ID integer, CONFIG_NAME text)"))
-              (clutch-db-query conn ddl))
-            (dolist (table '("users" "posts" "orders" "user_roles"
-                             "xaccounts" "APP_CONFIG"))
-              (puthash table (clutch-db-list-columns conn table) schema))
-            (dolist (table '("orders" "xaccounts"))
-              (puthash table nil schema))
-            (puthash conn schema clutch--schema-cache)
-            (puthash conn '(:state ready) clutch--schema-status-cache)
-            (dolist (case
-                     '((short "x" nil preserve (:exact ("xaccounts")) nil)
-                       (no-from "select * from users;\nselect users" nil preserve
-                                (:exact ("users")) nil)
-                       (no-source "select user_r" nil preserve
-                                  (:exact ("user_roles")) nil)
-                       (from "select * from or" nil preserve
-                             (:exact ("orders")) nil)
-                       (qualified
-                        "select * from users u join posts p on u."
-                        nil preserve (:exact ("id" "name")) t)
-                       (keyword "sele from users" "sele" preserve
-                                (:members ("SELECT")) nil)
-                       (cache-miss
-                        "select ord from users join orders on users.id = orders.user_id"
-                        "ord" preserve (:members ("ORDER BY" "order_id")) nil)
-                       (lowercase "select con from APP_CONFIG" "con" lower
-                                  (:members ("concat" "constraint" "config_id" "config_name")
-                                            :absent ("CONFIG_ID" "CONFIG_NAME"))
-                                  nil)))
-              (pcase-let ((`(,label ,sql ,needle ,style ,expected ,company) case))
-                (ert-info ((format "case: %s" label))
-                  (with-temp-buffer
-                    (clutch-mode)
-                    (setq-local clutch-connection conn)
-                    (insert sql)
-                    (if needle
-                        (progn
-                          (goto-char (point-min))
-                          (search-forward needle))
-                      (goto-char (point-max)))
-                    (let* ((clutch-sql-completion-case-style style)
-                           (captured nil)
-                           (completion-in-region-function
-                            (lambda (start end collection &optional predicate)
-                              (setq captured
-                                    (all-completions
-                                     (buffer-substring-no-properties start end)
-                                     collection predicate))
-                              t)))
-                      (should (completion-at-point))
-                      (if-let* ((exact (plist-get expected :exact)))
-                          (should (equal captured exact))
-                        (dolist (candidate (plist-get expected :members))
-                          (should (member candidate captured))))
-                      (dolist (candidate (plist-get expected :absent))
-                        (should-not (member candidate captured)))
-                      (when company
-                        (should
-                         (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
-                                        :company-prefix-length)
-                             t))))))))
-            (should-not (gethash "xaccounts" schema))
-            (should (equal (gethash "orders" schema) '("order_id" "user_id"))))
-        (clutch-db-disconnect conn)))))
+    (clutch-test--with-sqlite-connection conn
+      (let ((schema (make-hash-table :test 'equal)))
+        (dolist (ddl '("create table users (id integer, name text)"
+                       "create table posts (id integer, title text)"
+                       "create table orders (order_id integer, user_id integer)"
+                       "create table user_roles (id integer)"
+                       "create table xaccounts (id integer)"
+                       "create table APP_CONFIG (CONFIG_ID integer, CONFIG_NAME text)"))
+          (clutch-db-query conn ddl))
+        (dolist (table '("users" "posts" "orders" "user_roles"
+                         "xaccounts" "APP_CONFIG"))
+          (puthash table (clutch-db-list-columns conn table) schema))
+        (dolist (table '("orders" "xaccounts"))
+          (puthash table nil schema))
+        (puthash conn schema clutch--schema-cache)
+        (puthash conn '(:state ready) clutch--schema-status-cache)
+        (dolist (case
+                 '((short "x" nil preserve (:exact ("xaccounts")) nil)
+                   (no-from "select * from users;\nselect users" nil preserve
+                            (:exact ("users")) nil)
+                   (no-source "select user_r" nil preserve
+                              (:exact ("user_roles")) nil)
+                   (from "select * from or" nil preserve
+                         (:exact ("orders")) nil)
+                   (qualified
+                    "select * from users u join posts p on u."
+                    nil preserve (:exact ("id" "name")) t)
+                   (keyword "sele from users" "sele" preserve
+                            (:members ("SELECT")) nil)
+                   (cache-miss
+                    "select ord from users join orders on users.id = orders.user_id"
+                    "ord" preserve (:members ("ORDER BY" "order_id")) nil)
+                   (lowercase "select con from APP_CONFIG" "con" lower
+                              (:members ("concat" "constraint" "config_id" "config_name")
+                                        :absent ("CONFIG_ID" "CONFIG_NAME"))
+                              nil)))
+          (pcase-let ((`(,label ,sql ,needle ,style ,expected ,company) case))
+            (ert-info ((format "case: %s" label))
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert sql)
+                (if needle
+                    (progn
+                      (goto-char (point-min))
+                      (search-forward needle))
+                  (goto-char (point-max)))
+                (let* ((clutch-sql-completion-case-style style)
+                       (captured nil)
+                       (completion-in-region-function
+                        (lambda (start end collection &optional predicate)
+                          (setq captured
+                                (all-completions
+                                 (buffer-substring-no-properties start end)
+                                 collection predicate))
+                          t)))
+                  (should (completion-at-point))
+                  (if-let* ((exact (plist-get expected :exact)))
+                      (should (equal captured exact))
+                    (dolist (candidate (plist-get expected :members))
+                      (should (member candidate captured))))
+                  (dolist (candidate (plist-get expected :absent))
+                    (should-not (member candidate captured)))
+                  (when company
+                    (should
+                     (eq (plist-get (nthcdr 3 (clutch-completion-at-point))
+                                    :company-prefix-length)
+                         t))))))))
+        (should-not (gethash "xaccounts" schema))
+        (should (equal (gethash "orders" schema) '("order_id" "user_id")))))))
 
 (ert-deftest clutch-test-completion-backend-source-effect-matrix ()
   "Keep cached, direct-table, and direct-column completion sources distinct."
