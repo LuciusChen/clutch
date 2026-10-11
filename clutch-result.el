@@ -103,6 +103,14 @@ quotes or line breaks, and configure the importer to recognize it."
   :type 'string
   :group 'clutch)
 
+(defcustom clutch-csv-delimiter ?,
+  "Character that separates fields in CSV copy and export.
+Fields that contain it are quoted.  Use a single ASCII character other
+than a double quote or a line break, such as a semicolon for spreadsheets
+that expect one."
+  :type 'character
+  :group 'clutch)
+
 (defcustom clutch-export-default-directory nil
   "Default directory offered for file exports.
 When nil, use the current buffer's `default-directory'."
@@ -3054,7 +3062,8 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
   (let ((lines
          (pcase kind
            ('tsv (clutch--delimited-lines-for-rows rows col-indices ?\t))
-           ('csv (clutch--delimited-lines-for-rows rows col-indices ?,))
+           ('csv (clutch--delimited-lines-for-rows
+                  rows col-indices clutch-csv-delimiter))
            ('org-table (clutch--org-table-lines-for-rows rows col-indices))
            ('insert
             (clutch-result--build-insert-statements-for-rows rows col-indices))
@@ -3291,7 +3300,7 @@ When OMIT-HEADER is non-nil, omit the column header."
 (defun clutch--export-csv-content (rows &optional omit-header)
   "Return CSV export text for ROWS using current visible result columns.
 When OMIT-HEADER is non-nil, omit the column header."
-  (clutch--export-delimited-content rows ?, omit-header))
+  (clutch--export-delimited-content rows clutch-csv-delimiter omit-header))
 
 (defun clutch--export-tsv-content (rows &optional omit-header)
   "Return TSV export text for ROWS using current visible result columns.
@@ -3689,7 +3698,8 @@ stops it.  Replace the destination only after the whole export succeeds."
             ;; add nothing.
             (lambda (outcome)
               (clutch-db-delimited-export-async
-               clutch-connection sql (if (eq kind 'tsv) ?\t ?,) t
+               clutch-connection sql
+               (if (eq kind 'tsv) ?\t clutch-csv-delimiter) t
                clutch-export-null-value-text emit outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)

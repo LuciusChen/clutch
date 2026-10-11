@@ -377,6 +377,9 @@ presents Header as enabled by default."
       (should (string-suffix-p "4,\n5,\"\"\n6,NULL\n" csv)))
     (should (equal (clutch--export-csv-content '((1 "a,b")) t)
                    "1,\"a,b\"\n"))
+    (let ((clutch-csv-delimiter ?\;))
+      (should (equal (clutch--export-csv-content '((1 "a;b") (2 "c,d")))
+                     "id;display,name\n1;\"a;b\"\n2;c,d\n")))
     (setq-local clutch--result-columns '("null" "empty" "marker" "comma" "quote"))
     (let ((clutch-export-null-value-text "NULL"))
       (should (equal (clutch--export-csv-content
@@ -1841,6 +1844,21 @@ SQLite finds main.parents first for the bare name, with a row of the same key."
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf))
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-copy-csv-separates-fields-with-the-delimiter ()
+  "CSV copy separates fields with `clutch-csv-delimiter' and quotes it."
+  (clutch-test--with-result-state
+      (:columns '("id" "name")
+       :rows '((1 "a;b") (2 "c,d"))
+       :render t)
+    (let ((clutch-csv-delimiter ?\;)
+          kill-ring kill-ring-yank-pointer)
+      (clutch-test--select-cells '(0 0) '(1 1))
+      (cl-letf (((symbol-function 'transient-args) (lambda (_prefix) nil))
+                ((symbol-function 'transient-arg-value)
+                 (lambda (_flag _args) nil)))
+        (clutch-result-copy-csv)
+        (should (equal (current-kill 0) "id;name\n1;\"a;b\"\n2;c,d"))))))
 
 (provide 'clutch-test-result)
 
