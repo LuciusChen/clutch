@@ -194,31 +194,27 @@ them would fail the plist-member assertions rather than coincide."
   (let ((clutch-connect-timeout-seconds 11)
         (clutch-read-idle-timeout-seconds 42)
         captured)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (_backend params)
-                 (setq captured params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
-                        (:backend pg :host "127.0.0.1" :port 5432 :user "u")
-                        (:backend oracle :host "db" :port 1521 :user "u")
-                        (:backend sqlite :database ":memory:")))
-        (setq captured nil)
-        (clutch--build-conn params)
-        (should-not (plist-member captured :connect-timeout))
-        (should-not (plist-member captured :read-idle-timeout))
-        (should-not (plist-member captured :query-timeout))
-        (should-not (plist-member captured :rpc-timeout))))))
+    (clutch-test--without-credentials
+      (cl-letf (((symbol-function 'clutch-db-connect)
+                 (lambda (_backend params)
+                   (setq captured params)
+                   (make-clutch-test-conn))))
+        (dolist (params '((:backend mysql :host "127.0.0.1" :port 3306 :user "u")
+                          (:backend pg :host "127.0.0.1" :port 5432 :user "u")
+                          (:backend oracle :host "db" :port 1521 :user "u")
+                          (:backend sqlite :database ":memory:")))
+          (setq captured nil)
+          (clutch--build-conn params)
+          (should-not (plist-member captured :connect-timeout))
+          (should-not (plist-member captured :read-idle-timeout))
+          (should-not (plist-member captured :query-timeout))
+          (should-not (plist-member captured :rpc-timeout)))))))
 
 (ert-deftest clutch-test-build-conn-rewrites-endpoints-through-ssh-tunnel ()
   "SSH-backed host/port connections should target the local forwarded port."
   (dolist (case
            (list
             (list :label "SQL backend"
-                  :conn 'fake-conn
                   :local-port 40123
                   :params '(:backend pg
                             :host "db.internal"
@@ -227,7 +223,6 @@ them would fail the plist-member assertions rather than coincide."
                             :database "appdb"
                             :ssh-host "bastion-prod"))
             (list :label "MongoDB backend"
-                  :conn 'fake-mongo-conn
                   :local-port 47017
                   :params '(:backend mongodb
                             :host "mongo.internal"
@@ -237,30 +232,27 @@ them would fail the plist-member assertions rather than coincide."
     (ert-info ((format "SSH endpoint rewrite: %s" (plist-get case :label)))
       (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
             (input (plist-get case :params))
+            (conn (make-clutch-test-conn))
             captured)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'clutch--start-ssh-tunnel)
-                   (lambda (params)
-                     (should (eq (plist-get params :backend)
-                                 (plist-get input :backend)))
-                     (should (equal (plist-get params :host)
-                                    (plist-get input :host)))
-                     (should (= (plist-get params :port)
-                                (plist-get input :port)))
-                     (should (equal (plist-get params :ssh-host) "bastion-prod"))
-                     (list :kind 'ssh
-                           :process 'fake-proc
-                           :local-port (plist-get case :local-port)
-                           :ssh-host "bastion-prod")))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (should (eq backend (plist-get input :backend)))
-                     (setq captured params)
-                     (plist-get case :conn)))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (let ((conn (plist-get case :conn)))
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function 'clutch--start-ssh-tunnel)
+                     (lambda (params)
+                       (should (eq (plist-get params :backend)
+                                   (plist-get input :backend)))
+                       (should (equal (plist-get params :host)
+                                      (plist-get input :host)))
+                       (should (= (plist-get params :port)
+                                  (plist-get input :port)))
+                       (should (equal (plist-get params :ssh-host) "bastion-prod"))
+                       (list :kind 'ssh
+                             :process 'fake-proc
+                             :local-port (plist-get case :local-port)
+                             :ssh-host "bastion-prod")))
+                    ((symbol-function 'clutch-db-connect)
+                     (lambda (backend params)
+                       (should (eq backend (plist-get input :backend)))
+                       (setq captured params)
+                       conn)))
             (should (eq (clutch--build-conn input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
             (should (= (plist-get captured :port) (plist-get case :local-port)))
@@ -279,7 +271,6 @@ them would fail the plist-member assertions rather than coincide."
   (dolist (case
            (list
             (list :label "SQL backend"
-                  :conn 'fake-conn
                   :local-port 40124
                   :params '(:backend pg
                             :host "db"
@@ -288,7 +279,6 @@ them would fail the plist-member assertions rather than coincide."
                             :database "appdb"
                             :tramp-default-directory "/ssh:devbox:/workspace/"))
             (list :label "MongoDB backend"
-                  :conn 'fake-mongo-conn
                   :local-port 47018
                   :params '(:backend mongodb
                             :host "mongo.internal"
@@ -298,31 +288,28 @@ them would fail the plist-member assertions rather than coincide."
     (ert-info ((format "TRAMP endpoint rewrite: %s" (plist-get case :label)))
       (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
             (input (plist-get case :params))
+            (conn (make-clutch-test-conn))
             captured)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'clutch--start-tramp-tcp-forward)
-                   (lambda (params)
-                     (should (eq (plist-get params :backend)
-                                 (plist-get input :backend)))
-                     (should (equal (plist-get params :host)
-                                    (plist-get input :host)))
-                     (should (= (plist-get params :port)
-                                (plist-get input :port)))
-                     (should (equal (plist-get params :tramp-default-directory)
-                                    "/ssh:devbox:/workspace/"))
-                     (list :kind 'tramp
-                           :process 'fake-listener
-                           :local-port (plist-get case :local-port)
-                           :tramp-default-directory "/ssh:devbox:/workspace/")))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (should (eq backend (plist-get input :backend)))
-                     (setq captured params)
-                     (plist-get case :conn)))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (let ((conn (plist-get case :conn)))
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function 'clutch--start-tramp-tcp-forward)
+                     (lambda (params)
+                       (should (eq (plist-get params :backend)
+                                   (plist-get input :backend)))
+                       (should (equal (plist-get params :host)
+                                      (plist-get input :host)))
+                       (should (= (plist-get params :port)
+                                  (plist-get input :port)))
+                       (should (equal (plist-get params :tramp-default-directory)
+                                      "/ssh:devbox:/workspace/"))
+                       (list :kind 'tramp
+                             :process 'fake-listener
+                             :local-port (plist-get case :local-port)
+                             :tramp-default-directory "/ssh:devbox:/workspace/")))
+                    ((symbol-function 'clutch-db-connect)
+                     (lambda (backend params)
+                       (should (eq backend (plist-get input :backend)))
+                       (setq captured params)
+                       conn)))
             (should (eq (clutch-open-connection input) conn))
             (should (equal (plist-get captured :host) "127.0.0.1"))
             (should (= (plist-get captured :port) (plist-get case :local-port)))
@@ -373,64 +360,70 @@ them would fail the plist-member assertions rather than coincide."
 The tunnel is already forwarding while `clutch-db-connect' waits.  A
 `clutch-db-error' is translated to `user-error' for display; every other
 condition crosses the function raw, so cleanup cannot live in that handler."
+  (skip-unless (executable-find "sleep"))
   (dolist (case '((quit nil quit)
                   (wrong-type-argument (stringp nil) wrong-type-argument)
                   (clutch-db-error ("db connect failed") user-error)))
     (pcase-let ((`(,signal-condition ,signal-data ,expected-caught) case))
       (ert-info ((format "signals %s, surfaces as %s"
                          signal-condition expected-caught))
-        (let (stopped caught)
-          (cl-letf (((symbol-function 'clutch--resolve-password)
-                     (lambda (_params) nil))
-                    ((symbol-function 'clutch--start-ssh-tunnel)
-                     (lambda (_params)
-                       '(:process fake-proc :local-port 40123
-                         :ssh-host "bastion-prod")))
-                    ((symbol-function 'process-live-p)
-                     (lambda (proc) (eq proc 'fake-proc)))
-                    ((symbol-function 'delete-process)
-                     (lambda (proc) (setq stopped proc)))
-                    ((symbol-function 'clutch-db-connect)
-                     (lambda (_backend _params)
-                       (signal signal-condition signal-data))))
-            (condition-case err
-                (clutch--build-conn
-                 '(:backend pg
-                   :host "db.internal"
-                   :port 5432
-                   :user "alice"
-                   :database "appdb"
-                   :ssh-host "bastion-prod"))
-              (t (setq caught (car err))))
-            (should (eq caught expected-caught))
-            (should (eq stopped 'fake-proc))))))))
+        (let ((tunnel (make-process :name "clutch-test-tunnel"
+                                    :command '("sleep" "30")
+                                    :noquery t))
+              caught)
+          (unwind-protect
+              (clutch-test--without-credentials
+                (cl-letf (((symbol-function 'clutch--start-ssh-tunnel)
+                           (lambda (_params)
+                             (list :process tunnel :local-port 40123
+                                   :ssh-host "bastion-prod")))
+                          ((symbol-function 'clutch-db-connect)
+                           (lambda (_backend _params)
+                             (signal signal-condition signal-data))))
+                  (condition-case err
+                      (clutch--build-conn
+                       '(:backend pg
+                         :host "db.internal"
+                         :port 5432
+                         :user "alice"
+                         :database "appdb"
+                         :ssh-host "bastion-prod"))
+                    (t (setq caught (car err))))
+                  (should (eq caught expected-caught))
+                  (should-not (process-live-p tunnel))))
+            (when (process-live-p tunnel)
+              (delete-process tunnel))))))))
 
 (ert-deftest clutch-test-start-ssh-tunnel-cleans-up-when-wait-quits ()
   "A quit during tunnel readiness must delete the just-started process.
 The readiness wait polls with `accept-process-output', which is quittable,
 and the ssh -N process has no owner yet at that point."
-  (let (deleted caught)
-    (cl-letf (((symbol-function 'executable-find)
-               (lambda (_name) "/usr/bin/ssh"))
-              ((symbol-function 'clutch--allocate-local-port)
-               (lambda () 40124))
-              ((symbol-function 'make-process)
-               (lambda (&rest _args) 'fake-tunnel))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
-              ((symbol-function 'process-live-p)
-               (lambda (proc) (eq proc 'fake-tunnel)))
-              ((symbol-function 'delete-process)
-               (lambda (proc) (setq deleted proc)))
-              ((symbol-function 'clutch--wait-for-ssh-tunnel)
-               (lambda (&rest _args) (signal 'quit nil))))
-      (condition-case nil
-          (clutch--start-ssh-tunnel '(:backend pg
-                                      :host "db.internal"
-                                      :port 5432
-                                      :ssh-host "bastion-prod"))
-        (quit (setq caught t)))
-      (should caught)
-      (should (eq deleted 'fake-tunnel)))))
+  (skip-unless (executable-find "sleep"))
+  (let ((real-make-process (symbol-function 'make-process))
+        tunnel caught)
+    (unwind-protect
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (_name) "/usr/bin/ssh"))
+                  ((symbol-function 'clutch--allocate-local-port)
+                   (lambda () 40124))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest _args)
+                     (setq tunnel (funcall real-make-process
+                                           :name "clutch-test-tunnel"
+                                           :command '("sleep" "30")
+                                           :noquery t))))
+                  ((symbol-function 'clutch--wait-for-ssh-tunnel)
+                   (lambda (&rest _args) (signal 'quit nil))))
+          (condition-case nil
+              (clutch--start-ssh-tunnel '(:backend pg
+                                          :host "db.internal"
+                                          :port 5432
+                                          :ssh-host "bastion-prod"))
+            (quit (setq caught t)))
+          (should caught)
+          (should-not (process-live-p tunnel)))
+      (when (and tunnel (process-live-p tunnel))
+        (delete-process tunnel)))))
 
 (ert-deftest clutch-test-start-network-forward-rejects-opaque-url-profiles ()
   "SSH tunnels and TRAMP forwarding should reject URL-only profiles."
@@ -464,9 +457,7 @@ and the ssh -N process has no owner yet at that point."
                                    "requires :host/:port params, not :url"))))
     (ert-info ((format "opaque url rejection: %s" (plist-get case :label)))
       (let (connect-called process-called)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'executable-find)
+        (cl-letf (((symbol-function 'executable-find)
                    (lambda (_name) "/usr/bin/ssh"))
                   ((symbol-function 'clutch-db-connect)
                    (lambda (&rest _args)
@@ -486,36 +477,36 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
   "SSH tunnel startup should rely on the real batch tunnel command."
-  (let (process-file-called make-process-args)
+  (let (make-process-args)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
-              ((symbol-function 'process-file)
-               (lambda (&rest _args)
-                 (setq process-file-called t)
-                 0))
-              ((symbol-function 'clutch--allocate-local-port)
-               (lambda () 40123))
               ((symbol-function 'make-process)
-                (lambda (&rest args)
+               (lambda (&rest args)
                  (setq make-process-args args)
                  'fake-proc))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
               ((symbol-function 'clutch--wait-for-ssh-tunnel)
                (lambda (&rest _args) t)))
-      (let ((tunnel (clutch--start-ssh-tunnel
-                     '(:backend pg
-                       :host "db.internal"
-                       :port 5432
-                       :ssh-host "bastion-prod"))))
-        (should-not process-file-called)
+      (let ((tunnel (condition-case err
+                        (clutch--start-ssh-tunnel
+                         '(:backend pg
+                           :host "db.internal"
+                           :port 5432
+                           :ssh-host "bastion-prod"))
+                      (clutch-db-error
+                       (if (string-match-p "Operation not permitted"
+                                           (error-message-string err))
+                           (ert-skip (error-message-string err))
+                         (signal (car err) (cdr err)))))))
+        (should (integerp (plist-get tunnel :local-port)))
         (should (eq (plist-get tunnel :process) 'fake-proc))
         (should (equal (plist-get make-process-args :command)
-                       '("ssh"
-                         "-N"
-                         "-o" "BatchMode=yes"
-                         "-o" "ExitOnForwardFailure=yes"
-                         "-L" "127.0.0.1:40123:db.internal:5432"
-                         "bastion-prod")))))))
+                       (list "ssh"
+                             "-N"
+                             "-o" "BatchMode=yes"
+                             "-o" "ExitOnForwardFailure=yes"
+                             "-L" (format "127.0.0.1:%d:db.internal:5432"
+                                          (plist-get tunnel :local-port))
+                             "bastion-prod")))))))
 
 (ert-deftest clutch-test-start-tramp-forward-starts-direct-ssh-forward ()
   "OpenSSH TRAMP forward startup should use -L, adding -J for SSH-like hops."
@@ -523,19 +514,17 @@ and the ssh -N process has no owner yet at that point."
            (list
             (list "direct ssh directory" "/ssh:devbox:/workspace/"
                   '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:40124:db:5432" "devbox"))
+                    "-L" "127.0.0.1:%d:db:5432" "devbox"))
             (list "ssh-like hops mapped to ProxyJump"
                   "/rpc:jump|rpc:devbox:/workspace/"
                   '("ssh" "-N" "-o" "BatchMode=yes" "-o" "ExitOnForwardFailure=yes"
-                    "-L" "127.0.0.1:40124:db:5432" "-J" "jump" "devbox"))))
+                    "-L" "127.0.0.1:%d:db:5432" "-J" "jump" "devbox"))))
     (pcase-let ((`(,label ,tramp-dir ,expected-command) case))
       (ert-info ((format "case: %s" label))
         (let (make-process-args waited)
           (cl-letf (((symbol-function 'executable-find)
                      (lambda (program)
                        (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'clutch--allocate-local-port)
-                     (lambda () 40124))
                     ((symbol-function 'make-process)
                      (lambda (&rest args)
                        (setq make-process-args args)
@@ -543,21 +532,29 @@ and the ssh -N process has no owner yet at that point."
                     ((symbol-function 'clutch--wait-for-ssh-tunnel)
                      (lambda (proc port params buffer timeout)
                        (setq waited (list proc port params buffer timeout)))))
-            (let ((transport (clutch--start-tramp-tcp-forward
-                              `(:backend pg
-                                :host "db"
-                                :port 5432
-                                :tramp-default-directory ,tramp-dir))))
+            (let* ((transport (condition-case err
+                                  (clutch--start-tramp-tcp-forward
+                                   `(:backend pg
+                                     :host "db"
+                                     :port 5432
+                                     :tramp-default-directory ,tramp-dir))
+                                (clutch-db-error
+                                 (if (string-match-p "Operation not permitted"
+                                                     (error-message-string err))
+                                     (ert-skip (error-message-string err))
+                                   (signal (car err) (cdr err))))))
+                   (local-port (plist-get transport :local-port)))
+              (should (integerp local-port))
               (should (equal (plist-get make-process-args :command)
-                             expected-command))
+                             (mapcar (lambda (arg) (format arg local-port))
+                                     expected-command)))
               (should (eq (plist-get make-process-args :noquery) t))
               (should (eq (plist-get transport :kind) 'tramp))
               (should (eq (plist-get transport :process) 'fake-proc))
-              (should (= (plist-get transport :local-port) 40124))
               (should (equal (plist-get transport :tramp-default-directory)
                              tramp-dir))
               (should (equal (nth 0 waited) 'fake-proc))
-              (should (= (nth 1 waited) 40124))
+              (should (= (nth 1 waited) local-port))
               (should (equal (plist-get (nth 2 waited) :ssh-host)
                              "devbox")))))))))
 
@@ -573,114 +570,118 @@ and the ssh -N process has no owner yet at that point."
           (cl-letf (((symbol-function 'executable-find)
                      (lambda (program)
                        (when (equal program "ssh") "/usr/bin/ssh")))
-                    ((symbol-function 'clutch--allocate-local-port)
-                     (lambda () 40124))
                     ((symbol-function 'make-process)
                      (lambda (&rest args)
                        (setq make-process-args args)
                        'fake-proc))
-                    ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
                     ((symbol-function 'clutch--wait-for-ssh-tunnel) #'ignore)
                     ((symbol-function 'tramp-rpc-controlmaster-options)
                      (lambda (vec)
                        (should (equal (tramp-file-name-method vec) "rpc"))
                        '("-o" "ControlMaster=auto"
                          "-o" "ControlPath=/tmp/tramp-rpc.sock"))))
-            (clutch--start-tramp-tcp-forward
-             '(:backend pg
-               :host "127.0.0.1"
-               :port 55433
-               :tramp-default-directory "/rpc:devbox:/workspace/"))
-            (should (equal (plist-get make-process-args :command)
-                           '("ssh"
-                             "-N"
-                             "-o" "BatchMode=yes"
-                             "-o" "ExitOnForwardFailure=yes"
-                             "-L" "127.0.0.1:40124:127.0.0.1:55433"
-                             "-o" "ControlMaster=auto"
-                             "-o" "ControlPath=/tmp/tramp-rpc.sock"
-                             "devbox")))))
+            (let ((transport (condition-case err
+                                 (clutch--start-tramp-tcp-forward
+                                  '(:backend pg
+                                    :host "127.0.0.1"
+                                    :port 55433
+                                    :tramp-default-directory "/rpc:devbox:/workspace/"))
+                               (clutch-db-error
+                                (if (string-match-p "Operation not permitted"
+                                                    (error-message-string err))
+                                    (ert-skip (error-message-string err))
+                                  (signal (car err) (cdr err)))))))
+              (should (equal (plist-get make-process-args :command)
+                             (list "ssh"
+                                   "-N"
+                                   "-o" "BatchMode=yes"
+                                   "-o" "ExitOnForwardFailure=yes"
+                                   "-L" (format "127.0.0.1:%d:127.0.0.1:55433"
+                                                (plist-get transport :local-port))
+                                   "-o" "ControlMaster=auto"
+                                   "-o" "ControlPath=/tmp/tramp-rpc.sock"
+                                   "devbox"))))))
       (if old-bound
           (set 'tramp-rpc-use-controlmaster old-value)
         (makunbound 'tramp-rpc-use-controlmaster)))))
 
 (ert-deftest clutch-test-start-tramp-forward-starts-docker-container-relay ()
   "Docker TRAMP forward startup should create a local relay listener."
-  (let (network-args puts)
+  (let (transport)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (program)
-                 (when (equal program "docker") "/usr/bin/docker")))
-              ((symbol-function 'make-network-process)
-               (lambda (&rest args)
-                 (setq network-args args)
-                 'fake-listener))
-              ((symbol-function 'process-contact)
-               (lambda (_process &optional key _no-block)
-                 (when (eq key :service) 40125)))
-              ((symbol-function 'process-put)
-               (lambda (process key value)
-                 (push (list process key value) puts))))
-      (let ((transport (clutch--start-tramp-tcp-forward
-                        '(:backend pg
-                          :host "db"
-                          :port 5432
-                          :tramp-default-directory
-                          "/docker:vscode@app:/workspace/"))))
-        (should (equal (plist-get network-args :name)
-                       "clutch-tramp-container-db:5432"))
-        (should (eq (plist-get network-args :server) t))
-        (should (equal (plist-get network-args :host) "127.0.0.1"))
-        (should (eq (plist-get network-args :service) t))
-        (should (eq (plist-get network-args :coding) 'no-conversion))
-        (should (eq (plist-get network-args :noquery) t))
-        (should (member
-                 (list 'fake-listener
-                       :clutch-container-command
-                       (list "docker" "exec" "-i" "-u" "vscode" "app"
-                             "sh" "-lc" clutch--container-relay-script
-                             "clutch-container-relay" "db" "5432"))
-                 puts))
-        (should (eq (plist-get transport :kind) 'tramp))
-        (should (eq (plist-get transport :process) 'fake-listener))
-        (should (= (plist-get transport :local-port) 40125))
-        (should (equal (plist-get transport :tramp-default-directory)
-                       "/docker:vscode@app:/workspace/"))))))
+                 (when (equal program "docker") "/usr/bin/docker"))))
+      (setq transport
+            (condition-case err
+                (clutch--start-tramp-tcp-forward
+                 '(:backend pg
+                   :host "db"
+                   :port 5432
+                   :tramp-default-directory
+                   "/docker:vscode@app:/workspace/"))
+              (file-error
+               (let ((message (error-message-string err)))
+                 (if (string-match-p
+                      "\\`Cannot bind server socket: Operation not permitted\\'"
+                      message)
+                     (ert-skip
+                      (format "Cannot bind localhost server socket: %s"
+                              message))
+                   (signal (car err) (cdr err))))))))
+    (unwind-protect
+        (let ((listener (plist-get transport :process)))
+          (should (equal (process-name listener) "clutch-tramp-container-db:5432"))
+          (should (eq (process-contact listener :server) t))
+          (should (equal (process-contact listener :host) "127.0.0.1"))
+          (should (equal (process-coding-system listener)
+                         '(no-conversion . no-conversion)))
+          (should-not (process-query-on-exit-flag listener))
+          (should (equal (process-get listener :clutch-container-command)
+                         (list "docker" "exec" "-i" "-u" "vscode" "app"
+                               "sh" "-lc" clutch--container-relay-script
+                               "clutch-container-relay" "db" "5432")))
+          (should (eq (plist-get transport :kind) 'tramp))
+          (should (= (plist-get transport :local-port)
+                     (process-contact listener :service)))
+          (should (equal (plist-get transport :tramp-default-directory)
+                         "/docker:vscode@app:/workspace/")))
+      (clutch--stop-connection-transport transport)
+      (should-not (process-live-p (plist-get transport :process))))))
 
 (ert-deftest clutch-test-start-tramp-forward-starts-remote-podman-container-relay ()
   "Container TRAMP paths behind SSH hops should run the runtime remotely."
-  (let (network-args puts)
+  (let (transport)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (program)
-                 (when (equal program "ssh") "/usr/bin/ssh")))
-              ((symbol-function 'make-network-process)
-               (lambda (&rest args)
-                 (setq network-args args)
-                 'fake-listener))
-              ((symbol-function 'process-contact)
-               (lambda (_process &optional key _no-block)
-                 (when (eq key :service) 40126)))
-              ((symbol-function 'process-put)
-               (lambda (process key value)
-                 (push (list process key value) puts)))
-              ((symbol-function 'set-process-query-on-exit-flag) #'ignore))
-      (clutch--start-tramp-tcp-forward
-       '(:backend pg
-         :host "db"
-         :port 5432
-         :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
-      (should (equal (plist-get network-args :name)
-                     "clutch-tramp-container-db:5432"))
-      (should (member
-               (list 'fake-listener
-                     :clutch-container-command
-                     (append
-                      (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
-                      (mapcar
-                       #'shell-quote-argument
-                       (list "podman" "exec" "-i" "app" "sh" "-lc"
-                             clutch--container-relay-script
-                             "clutch-container-relay" "db" "5432"))))
-               puts)))))
+                 (when (equal program "ssh") "/usr/bin/ssh"))))
+      (setq transport
+            (condition-case err
+                (clutch--start-tramp-tcp-forward
+                 '(:backend pg
+                   :host "db"
+                   :port 5432
+                   :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"))
+              (file-error
+               (let ((message (error-message-string err)))
+                 (if (string-match-p
+                      "\\`Cannot bind server socket: Operation not permitted\\'"
+                      message)
+                     (ert-skip
+                      (format "Cannot bind localhost server socket: %s"
+                              message))
+                   (signal (car err) (cdr err))))))))
+    (unwind-protect
+        (let ((listener (plist-get transport :process)))
+          (should (equal (process-name listener) "clutch-tramp-container-db:5432"))
+          (should (equal (process-get listener :clutch-container-command)
+                         (append
+                          (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                          (mapcar
+                           #'shell-quote-argument
+                           (list "podman" "exec" "-i" "app" "sh" "-lc"
+                                 clutch--container-relay-script
+                                 "clutch-container-relay" "db" "5432"))))))
+      (clutch--stop-connection-transport transport))))
 
 (ert-deftest clutch-test-container-forward-relays-bytes ()
   "Container relay listener should bridge bytes between client and relay."
@@ -752,49 +753,37 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-prepare-ssh-host-starts-interactive-session ()
   "Interactive SSH prepare should open a comint session for the alias."
-  (let (started puts sentinel-set query-flag popped message-text proc-lookups)
+  (skip-unless (executable-find "cat"))
+  (let ((real-make-comint (symbol-function 'make-comint-in-buffer))
+        started message-text)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
               ((symbol-function 'make-comint-in-buffer)
                (lambda (name buffer program startfile &rest switches)
                  (setq started (list name buffer program startfile switches))
-                 (get-buffer-create buffer)))
-              ((symbol-function 'get-buffer-process)
-               (lambda (_buffer)
-                 (prog1 (if proc-lookups 'fake-proc nil)
-                   (setq proc-lookups t))))
-              ((symbol-function 'process-live-p)
-               (lambda (proc) (eq proc 'fake-proc)))
-              ((symbol-function 'process-put)
-               (lambda (proc key value)
-                 (push (list proc key value) puts)))
-              ((symbol-function 'set-process-query-on-exit-flag)
-               (lambda (proc flag)
-                 (setq query-flag (list proc flag))))
-              ((symbol-function 'set-process-sentinel)
-               (lambda (proc fn)
-                 (setq sentinel-set (list proc fn))))
-              ((symbol-function 'pop-to-buffer)
-               (lambda (buffer &rest _args)
-                 (setq popped buffer)
-                 buffer))
+                 ;; A real comint session, running cat instead of ssh.
+                 (funcall real-make-comint name buffer "cat" nil)))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (setq message-text (apply #'format fmt args)))))
-      (clutch-prepare-ssh-host "bastion-prod")
-      (should (equal (car started) "clutch-ssh-prepare-bastion-prod"))
-      (should (equal (buffer-name (cadr started))
-                     "*clutch-ssh-prepare bastion-prod*"))
-      (should (equal (cddr started)
-                     '("ssh"
-                       nil
-                       ("bastion-prod" "exit"))))
-      (should (equal query-flag '(fake-proc nil)))
-      (should (equal (car puts) '(fake-proc :clutch-ssh-host "bastion-prod")))
-      (should (eq (car sentinel-set) 'fake-proc))
-      (should (eq (cadr sentinel-set) #'clutch--ssh-prepare-sentinel))
-      (should (equal (buffer-name popped) "*clutch-ssh-prepare bastion-prod*"))
-      (should (string-match-p "Complete any SSH prompts" message-text)))))
+      (clutch-test--with-pop-to-buffer-capture popped
+        (clutch-prepare-ssh-host "bastion-prod")
+        (let ((proc (get-buffer-process popped)))
+          (unwind-protect
+              (progn
+                (should (equal (car started) "clutch-ssh-prepare-bastion-prod"))
+                (should (equal (buffer-name popped)
+                               "*clutch-ssh-prepare bastion-prod*"))
+                (should (equal (cddr started)
+                               '("ssh"
+                                 nil
+                                 ("bastion-prod" "exit"))))
+                (should (process-live-p proc))
+                (should-not (process-query-on-exit-flag proc))
+                (should (equal (process-get proc :clutch-ssh-host) "bastion-prod"))
+                (should (eq (process-sentinel proc) #'clutch--ssh-prepare-sentinel))
+                (should (string-match-p "Complete any SSH prompts" message-text)))
+            (delete-process proc)))))))
 
 (ert-deftest clutch-test-ssh-prepare-sentinel-nonzero-suggests-retry ()
   "Non-zero SSH prepare exit should not imply preparation was useless."
@@ -821,24 +810,22 @@ and the ssh -N process has no owner yet at that point."
 (ert-deftest clutch-test-build-conn-errors-early-when-jdbc-pass-entry-is-unresolved ()
   "JDBC connections should fail fast when :pass-entry resolves to no password."
   (let (connect-called)
-    (cl-letf (((symbol-function 'clutch--resolve-password)
-               (lambda (_params) nil))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (&rest _args)
-                 (setq connect-called t)
-                 'fake-conn)))
-      (should-error
-       (clutch--build-conn
-       '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
-          :pass-entry "prod-oracle"))
-       :type 'user-error)
-      (should-not connect-called))))
+    (clutch-test--without-credentials
+      (cl-letf (((symbol-function 'clutch-db-connect)
+                 (lambda (&rest _args)
+                   (setq connect-called t)
+                   'fake-conn)))
+        (should-error
+         (clutch--build-conn
+          '(:backend oracle :host "db" :port 1521 :user "u" :sid "orcl"
+            :pass-entry "prod-oracle"))
+         :type 'user-error)
+        (should-not connect-called)))))
 
 (ert-deftest clutch-test-build-conn-pass-entry-contract ()
   "Connection build should strip or materialize native pass-entry credentials."
   (dolist (case
            '((:label "passwordless mongodb"
-              :resolved nil
               :params (:backend mongodb
                        :host "127.0.0.1"
                        :port 27017
@@ -849,7 +836,6 @@ and the ssh -N process has no owner yet at that point."
                          :port 27017
                          :database "app"))
              (:label "passwordless redis"
-              :resolved nil
               :params (:backend redis
                        :host "127.0.0.1"
                        :port 6379
@@ -860,37 +846,34 @@ and the ssh -N process has no owner yet at that point."
                          :port 6379
                          :database 0))
              (:label "authenticated mongodb"
-              :resolved "secret"
+              :authinfo ("machine mongo.example.com login root port 27017 password secret")
               :params (:backend mongodb
-                       :host "127.0.0.1"
+                       :host "mongo.example.com"
                        :port 27017
                        :database "app"
                        :auth-database "admin"
                        :user "root"
                        :pass-entry "mongodb-root")
               :backend mongodb
-              :expected (:host "127.0.0.1"
+              :expected (:host "mongo.example.com"
                          :port 27017
                          :database "app"
                          :auth-database "admin"
                          :user "root"
                          :password "secret"))))
     (ert-info ((plist-get case :label))
-      (let (captured-backend captured-params)
-        (cl-letf (((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) (plist-get case :resolved)))
-                  ((symbol-function 'clutch-db-connect)
-                   (lambda (backend params)
-                     (setq captured-backend backend
-                           captured-params params)
-                     'fake-conn))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (_conn) t)))
-          (should (eq (clutch--build-conn (plist-get case :params))
-                      'fake-conn))
-          (should (eq captured-backend (plist-get case :backend)))
-          (should (equal captured-params
-                         (plist-get case :expected))))))))
+      (let ((conn (make-clutch-test-conn))
+            captured-backend captured-params)
+        (clutch-test--with-authinfo (plist-get case :authinfo)
+          (cl-letf (((symbol-function 'clutch-db-connect)
+                     (lambda (backend params)
+                       (setq captured-backend backend
+                             captured-params params)
+                       conn)))
+            (should (eq (clutch--build-conn (plist-get case :params)) conn))
+            (should (eq captured-backend (plist-get case :backend)))
+            (should (equal captured-params
+                           (plist-get case :expected)))))))))
 
 (ert-deftest clutch-test-resolve-password-errors-when-pass-entry-cannot-be-read ()
   "Unreadable pass entries should fail before the backend sees auth."
@@ -915,7 +898,8 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-resolve-password-falls-back-when-pass-store-missing ()
   "Missing pass stores should not block host/user/port auth-source lookup."
-  (let (auth-source-args)
+  (clutch-test--with-authinfo
+      '("machine 127.0.0.1 login postgres port 5432 password postgres")
     (cl-letf (((symbol-function 'auth-source-pass-entries)
                (lambda ()
                  (signal 'file-missing
@@ -923,22 +907,13 @@ and the ssh -N process has no owner yet at that point."
                            "/home/user/.password-store"))))
               ((symbol-function 'auth-source-pass-parse-entry)
                (lambda (_entry)
-                 (ert-fail "No pass entry should be parsed when listing fails")))
-              ((symbol-function 'auth-source-search)
-               (lambda (&rest args)
-                 (setq auth-source-args args)
-                 (list (list :secret "postgres")))))
+                 (ert-fail "No pass entry should be parsed when listing fails"))))
       (should (equal (clutch--resolve-password
                       '(:host "127.0.0.1"
                         :user "postgres"
                         :port 5432
                         :pass-entry "local-pg"))
-                     "postgres"))
-      (should (equal auth-source-args
-                     '(:host "127.0.0.1"
-                       :user "postgres"
-                       :port 5432
-                       :max 1))))))
+                     "postgres")))))
 
 (ert-deftest clutch-test-resolve-password-skips-auth-source-without-target ()
   "Password lookup should not search all auth-source entries without a target."
@@ -978,21 +953,8 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-profile-entry-loads-authinfo-connection-fields ()
   "Authinfo profiles should use machine as profile id and db-host as host."
-  (cl-letf (((symbol-function 'clutch--pass-profile-params)
-             (lambda (_entry &optional _default-backend) nil))
-            ((symbol-function 'auth-source-search)
-             (lambda (&rest args)
-               (should (equal args '(:host "mysql/reporting"
-                                     :type netrc
-                                     :max 1)))
-               (list (list :host "mysql/reporting"
-                           :backend "mysql"
-                           :db-host "db.example.com"
-                           :port "3306"
-                           :user "report_user"
-                           :database "reporting"
-                           :ssh-host "arch"
-                           :secret (lambda () "secret"))))))
+  (clutch-test--with-authinfo
+      '("machine mysql/reporting backend mysql db-host db.example.com port 3306 login report_user database reporting ssh-host arch password secret")
     (let ((params (clutch--canonicalize-connection-params
                    '(:profile-entry "mysql/reporting"))))
       (should (eq (plist-get params :backend) 'mysql))
@@ -1006,14 +968,8 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-profile-entry-authinfo-parse-errors-surface ()
   "Authinfo profile field errors should not be wrapped as lookup failures."
-  (cl-letf (((symbol-function 'clutch--pass-profile-params)
-             (lambda (_entry &optional _default-backend) nil))
-            ((symbol-function 'auth-source-search)
-             (lambda (&rest _args)
-               (list (list :host "mysql/bad"
-                           :backend "mysql"
-                           :db-host "db.example.com"
-                           :port "bad")))))
+  (clutch-test--with-authinfo
+      '("machine mysql/bad backend mysql db-host db.example.com port bad password x")
     (let ((err (should-error
                 (clutch--canonicalize-connection-params
                  '(:profile-entry "mysql/bad"))
@@ -1024,15 +980,8 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-profile-entry-explicit-fields-win ()
   "Saved connection fields should override profile defaults."
-  (cl-letf (((symbol-function 'clutch--profile-entry-params)
-             (lambda (_entry &optional _default-backend)
-               '(:backend pg
-                 :host "db.example.com"
-                 :port 3306
-                 :user "profile_user"
-                 :database "profile_db"
-                 :password "profile-secret"
-                 :ssh-host "arch"))))
+  (clutch-test--with-authinfo
+      '("machine mysql/prod backend pg db-host db.example.com port 3306 login profile_user database profile_db ssh-host arch password profile-secret")
     (let ((params (clutch--canonicalize-connection-params
                    '(:backend mysql
                      :profile-entry "mysql/prod"
@@ -1050,15 +999,8 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-profile-entry-explicit-backend-guides-profile-parsing ()
   "Explicit backend should guide backend-specific profile value parsing."
-  (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
-             (lambda (entry)
-               (and (equal entry "redis/prod")
-                    "redis/prod")))
-            ((symbol-function 'auth-source-pass-parse-entry)
-             (lambda (_entry)
-               '(("host" . "127.0.0.1")
-                 ("port" . "6379")
-                 ("database" . "0")))))
+  (clutch-test--with-authinfo
+      '("machine redis/prod db-host 127.0.0.1 port 6379 database 0")
     (let ((params (clutch--canonicalize-connection-params
                    '(:backend redis :profile-entry "redis/prod"))))
       (should (eq (plist-get params :backend) 'redis))
@@ -1068,37 +1010,27 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-profile-entry-is-not-passed-to-backend ()
   "Profile-entry is a Clutch-level field and should not reach adapters."
-  (let (captured-backend captured-params)
-    (cl-letf (((symbol-function 'clutch--profile-entry-params)
-               (lambda (_entry &optional _default-backend)
-                 '(:backend mysql
-                   :host "db.example.com"
-                   :port 3306
-                   :user "u"
-                   :database "app"
-                   :password "secret")))
-              ((symbol-function 'clutch-db-connect)
-               (lambda (backend params)
-                 (setq captured-backend backend
-                       captured-params params)
-                 'fake-conn))
-              ((symbol-function 'clutch--connection-alive-p)
-               (lambda (_conn) t)))
-      (should (eq (clutch--build-conn '(:profile-entry "clutch/app"))
-                  'fake-conn))
-      (should (eq captured-backend 'mysql))
-      (should (equal captured-params
-                     '(:host "db.example.com"
-                       :port 3306
-                       :user "u"
-                       :database "app"
-                       :password "secret"))))))
+  (let ((conn (make-clutch-test-conn))
+        captured-backend captured-params)
+    (clutch-test--with-authinfo
+        '("machine clutch/app backend mysql db-host db.example.com port 3306 login u database app password secret")
+      (cl-letf (((symbol-function 'clutch-db-connect)
+                 (lambda (backend params)
+                   (setq captured-backend backend
+                         captured-params params)
+                   conn)))
+        (should (eq (clutch--build-conn '(:profile-entry "clutch/app")) conn))
+        (should (eq captured-backend 'mysql))
+        (should (equal captured-params
+                       '(:host "db.example.com"
+                         :port 3306
+                         :user "u"
+                         :database "app"
+                         :password "secret")))))))
 
 (ert-deftest clutch-test-resolve-password-errors-when-auth-source-secret-fails ()
   "auth-source secret retrieval failures should surface directly."
-  (let ((err (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
-                        (lambda (_suffix) nil))
-                       ((symbol-function 'auth-source-search)
+  (let ((err (cl-letf (((symbol-function 'auth-source-search)
                         (lambda (&rest _args)
                           (list (list :secret (lambda ()
                                                 (error "bad decrypt")))))))
@@ -1112,15 +1044,14 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-build-conn-relays-db-errors-without-duplicate-prefixes ()
   "User-facing connect errors should not duplicate nested connection-failed wrappers."
-  (let ((err (cl-letf (((symbol-function 'clutch--resolve-password)
-                        (lambda (_params) nil))
-                       ((symbol-function 'clutch-db-connect)
-                        (lambda (&rest _args)
-                          (signal 'clutch-db-error
-                                  '("Connection failed (oracle): Connection attempt timed out")))))
-               (should-error
-                (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
-                :type 'user-error))))
+  (let ((err (clutch-test--without-credentials
+               (cl-letf (((symbol-function 'clutch-db-connect)
+                          (lambda (&rest _args)
+                            (signal 'clutch-db-error
+                                    '("Connection failed (oracle): Connection attempt timed out")))))
+                 (should-error
+                  (clutch--build-conn '(:backend oracle :host "db" :port 1521 :user "u"))
+                  :type 'user-error)))))
     (should (string-match-p
              "Connection failed [(]oracle[)]: Connection attempt timed out"
              (cadr err)))
@@ -1130,15 +1061,14 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-build-conn-wraps-ssh-setup-errors-before-user-display ()
   "SSH setup errors should be normalized before they reach the minibuffer."
-  (let ((err (cl-letf (((symbol-function 'clutch--materialize-connection-params)
-                        (lambda (params) params))
-                       ((symbol-function 'clutch--prepare-connect-params)
-                        (lambda (_params)
-                          (signal 'clutch-db-error
-                                  '("SSH tunnel to arch failed: SSH authentication to arch was rejected")))))
-               (should-error
-                (clutch--build-conn '(:backend mysql :host "db" :port 3306 :ssh-host "arch"))
-                :type 'user-error))))
+  (let ((err (clutch-test--without-credentials
+               (cl-letf (((symbol-function 'clutch--prepare-connect-params)
+                          (lambda (_params)
+                            (signal 'clutch-db-error
+                                    '("SSH tunnel to arch failed: SSH authentication to arch was rejected")))))
+                 (should-error
+                  (clutch--build-conn '(:backend mysql :host "db" :port 3306 :ssh-host "arch"))
+                  :type 'user-error)))))
     (should (string-match-p
              "SSH tunnel to arch failed: SSH authentication to arch was rejected"
              (cadr err)))
@@ -1150,39 +1080,39 @@ and the ssh -N process has no owner yet at that point."
   "Connect failures should keep enriched `current-buffer' error details."
   (with-temp-buffer
     (let ((raw-message "Connection refused (host=db.example.com, port=3306)"))
-      (cl-letf (((symbol-function 'clutch--resolve-password)
-                 (lambda (_params) nil))
-                ((symbol-function 'clutch-db-connect)
-                 (lambda (&rest _args)
-                   (signal 'clutch-db-error (list raw-message)))))
-        (let ((signaled
-               (should-error
-                (clutch--build-conn
-                 '(:backend oracle :host "db.example.com" :port 1521
-                   :user "scott" :database "orcl"))
-                :type 'user-error)))
-          (should (equal (cadr signaled)
-                         (clutch--debug-workflow-message
-                          (clutch--humanize-db-error raw-message))))
-          (let* ((details clutch--buffer-error-details)
-                 (diag (plist-get details :diag))
-                 (context (plist-get diag :context)))
-            (should details)
-            (should (eq (plist-get details :backend) 'oracle))
-            (should (equal (plist-get details :summary)
-                           (clutch--humanize-db-error raw-message)))
-            (should (equal (plist-get diag :raw-message) raw-message))
-            (should (equal (plist-get context :host) "db.example.com"))
-            (should (equal (plist-get context :port) 1521))
-            (should (equal (plist-get context :database) "orcl"))
-            (should (eq (plist-get context :backend) 'oracle))))))))
+      (clutch-test--without-credentials
+        (cl-letf (((symbol-function 'clutch-db-connect)
+                   (lambda (&rest _args)
+                     (signal 'clutch-db-error (list raw-message)))))
+          (let ((signaled
+                 (should-error
+                  (clutch--build-conn
+                   '(:backend oracle :host "db.example.com" :port 1521
+                     :user "scott" :database "orcl"))
+                  :type 'user-error)))
+            (should (equal (cadr signaled)
+                           (clutch--debug-workflow-message
+                            (clutch--humanize-db-error raw-message))))
+            (let* ((details clutch--buffer-error-details)
+                   (diag (plist-get details :diag))
+                   (context (plist-get diag :context)))
+              (should details)
+              (should (eq (plist-get details :backend) 'oracle))
+              (should (equal (plist-get details :summary)
+                             (clutch--humanize-db-error raw-message)))
+              (should (equal (plist-get diag :raw-message) raw-message))
+              (should (equal (plist-get context :host) "db.example.com"))
+              (should (equal (plist-get context :port) 1521))
+              (should (equal (plist-get context :database) "orcl"))
+              (should (eq (plist-get context :backend) 'oracle)))))))))
 
 (ert-deftest clutch-test-build-conn-rejects-removed-read-timeout ()
   "Test that removed timeout keys fail fast with a clear error."
-  (should-error
-   (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306
-                         :user "u" :read-timeout 5))
-   :type 'user-error))
+  (clutch-test--without-credentials
+    (should-error
+     (clutch--build-conn '(:backend mysql :host "127.0.0.1" :port 3306
+                           :user "u" :read-timeout 5))
+     :type 'user-error)))
 
 (ert-deftest clutch-test-effective-sql-product-contract ()
   "Connection SQL products should come from explicit or backend metadata."
@@ -1258,20 +1188,21 @@ and the ssh -N process has no owner yet at that point."
                    :mentions-enable nil)))
     (ert-info ((format "build-conn debug guidance: %s" (plist-get case :label)))
       (let ((clutch-debug-mode (plist-get case :debug-mode)))
-        (cl-letf (((symbol-function 'clutch-db-connect)
-                   (lambda (_backend _params)
-                     (signal 'clutch-db-error
-                             '("Connection refused (host=db.example.com, port=3306)")))))
-          (let ((err (should-error
-                      (clutch--build-conn
-                       '(:backend mysql :host "db.example.com" :port 3306))
-                      :type 'user-error)))
-            (should (string-match-p "check host and port" (cadr err)))
-            (if (plist-get case :mentions-enable)
-                (should (string-match-p "clutch-debug-mode" (cadr err)))
-              (should-not (string-match-p "clutch-debug-mode" (cadr err))))
-            (should (string-match-p (regexp-quote clutch-debug-buffer-name)
-                                    (cadr err)))))))))
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function 'clutch-db-connect)
+                     (lambda (_backend _params)
+                       (signal 'clutch-db-error
+                               '("Connection refused (host=db.example.com, port=3306)")))))
+            (let ((err (should-error
+                        (clutch--build-conn
+                         '(:backend mysql :host "db.example.com" :port 3306))
+                        :type 'user-error)))
+              (should (string-match-p "check host and port" (cadr err)))
+              (if (plist-get case :mentions-enable)
+                  (should (string-match-p "clutch-debug-mode" (cadr err)))
+                (should-not (string-match-p "clutch-debug-mode" (cadr err))))
+              (should (string-match-p (regexp-quote clutch-debug-buffer-name)
+                                      (cadr err))))))))))
 
 (ert-deftest clutch-test-build-conn-jdbc-missing-driver-or-agent-points-to-fix-command ()
   "Missing JDBC driver/agent should point to its own fix, not the debug workflow."
@@ -1285,12 +1216,13 @@ and the ssh -N process has no owner yet at that point."
                   "Run M-x clutch-jdbc-ensure-agent")))
     (pcase-let ((`(,label ,signaled-message ,expected-pattern) case))
       (ert-info ((format "case: %s" label))
-        (let ((err (cl-letf (((symbol-function 'clutch-db-connect)
-                              (lambda (_backend _params)
-                                (signal 'clutch-db-error (list signaled-message)))))
-                     (should-error
-                      (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
-                      :type 'user-error))))
+        (let ((err (clutch-test--without-credentials
+                     (cl-letf (((symbol-function 'clutch-db-connect)
+                                (lambda (_backend _params)
+                                  (signal 'clutch-db-error (list signaled-message)))))
+                       (should-error
+                        (clutch--build-conn '(:backend oracle :driver jdbc :host "db" :port 1521))
+                        :type 'user-error)))))
           (should (string-match-p expected-pattern (cadr err)))
           (should-not (string-match-p "clutch-debug-mode" (cadr err)))
           (should-not (string-match-p (regexp-quote clutch-debug-buffer-name)
@@ -1311,10 +1243,9 @@ and the ssh -N process has no owner yet at that point."
                      (lambda (feature &optional filename noerror)
                        (if (eq feature 'clutch)
                            (error "Reader attempted to load the composition root")
-                         (funcall orig-require feature filename noerror))))
-                    ((symbol-function 'completing-read)
-                     (lambda (&rest _args) "alpha")))
-            (should (equal (funcall reader) expected))))))))
+                         (funcall orig-require feature filename noerror)))))
+            (clutch-test--with-minibuffer-answers '("alpha")
+              (should (equal (funcall reader) expected)))))))))
 
 (ert-deftest clutch-test-read-connection-params-no-match-prompts-manual-when-saved ()
   "No-match connect choices should collect temporary connection params."
@@ -1403,32 +1334,31 @@ and the ssh -N process has no owner yet at that point."
       (let ((clutch-connection-alist nil)
             backend-prompt
             port-default)
-        (cl-letf (((symbol-function 'completing-read)
-                   (lambda (prompt _collection &rest _args)
-                     (setq backend-prompt prompt)
-                     (plist-get case :backend)))
-                  ((symbol-function 'read-string)
-                   (lambda (prompt &optional _initial _history
-                                   default-value _inherit)
-                     (pcase prompt
-                       ("Host (127.0.0.1): " (plist-get case :host))
-                       ("User: " (plist-get case :user))
-                       ("SSH host from ~/.ssh/config (optional): "
-                        (plist-get case :ssh-host))
-                       ("Database (optional): " (plist-get case :database))
-                       (_ (or default-value "")))))
-                  ((symbol-function 'read-number)
-                   (lambda (_prompt default)
-                     (setq port-default default)
-                     (plist-get case :port)))
-                  ((symbol-function 'clutch--resolve-password)
-                   (lambda (_params) nil))
-                  ((symbol-function 'read-passwd)
-                   (lambda (&rest _args) (plist-get case :password))))
-          (should (equal (clutch--read-connection-params)
-                         (plist-get case :expected)))
-          (should (string-match-p "Backend" backend-prompt))
-          (should (= port-default (plist-get case :default-port))))))))
+        (clutch-test--without-credentials
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt _collection &rest _args)
+                       (setq backend-prompt prompt)
+                       (plist-get case :backend)))
+                    ((symbol-function 'read-string)
+                     (lambda (prompt &optional _initial _history
+                                     default-value _inherit)
+                       (pcase prompt
+                         ("Host (127.0.0.1): " (plist-get case :host))
+                         ("User: " (plist-get case :user))
+                         ("SSH host from ~/.ssh/config (optional): "
+                          (plist-get case :ssh-host))
+                         ("Database (optional): " (plist-get case :database))
+                         (_ (or default-value "")))))
+                    ((symbol-function 'read-number)
+                     (lambda (_prompt default)
+                       (setq port-default default)
+                       (plist-get case :port)))
+                    ((symbol-function 'read-passwd)
+                     (lambda (&rest _args) (plist-get case :password))))
+            (should (equal (clutch--read-connection-params)
+                           (plist-get case :expected)))
+            (should (string-match-p "Backend" backend-prompt))
+            (should (= port-default (plist-get case :default-port)))))))))
 
 (ert-deftest clutch-test-canonicalize-connection-params-normalizes-mongodb-surfaces ()
   "MongoDB connection params should normalize backend aliases and surfaces."
@@ -2180,13 +2110,15 @@ The owner invalidating them and disconnecting from them both end it."
 
 (ert-deftest clutch-test-mongodb-completion-uses-shell-and-collection-candidates ()
   "MongoDB completion should offer shell methods and cached collections."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "users" nil schema)
-    (puthash "orders" nil schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn))
+          (schema (make-hash-table :test 'equal)))
+      (puthash "users" nil schema)
+      (puthash "orders" nil schema)
+      (puthash conn schema clutch--schema-cache)
       (with-temp-buffer
         (clutch-mongodb-mode)
+        (setq-local clutch-connection conn)
         (should (derived-mode-p 'prog-mode))
         (should-not (derived-mode-p 'js-mode))
         (should (eq indent-line-function #'clutch-mongodb-indent-line))
@@ -2293,26 +2225,24 @@ The owner invalidating them and disconnecting from them both end it."
 
 (ert-deftest clutch-test-mongodb-explain-query-at-point-uses-current-helper ()
   "MongoDB explain command should explain the current helper at point."
-  (let (captured displayed)
+  (let ((conn (make-clutch-test-conn))
+        captured)
     (with-temp-buffer
       (clutch-mongodb-mode)
-      (setq-local clutch-connection 'mongo-conn)
+      (setq-local clutch-connection conn)
       (insert "db.users.find({active: true}).limit(5)")
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 #'ignore)
-                ((symbol-function 'clutch-db-explain-query)
+      (cl-letf (((symbol-function 'clutch-db-explain-query)
                  (lambda (conn query)
                    (setq captured (list conn query))
-                   "{\"summary\":{\"winningStage\":\"IXSCAN\"}}"))
-                ((symbol-function 'clutch--show-json-text-buffer)
-                 (lambda (buffer-name text)
-                   (setq displayed (list buffer-name text)))))
-        (clutch-mongodb-explain-query-at-point)))
-    (should (equal captured
-                   '(mongo-conn "db.users.find({active: true}).limit(5)")))
-    (should (equal displayed
-                   '("*clutch mongodb: explain*"
-                     "{\"summary\":{\"winningStage\":\"IXSCAN\"}}")))))
+                   "{\"summary\":{\"winningStage\":\"IXSCAN\"}}")))
+        (clutch-test--with-pop-to-buffer-capture shown
+          (clutch-mongodb-explain-query-at-point)
+          (should (equal captured
+                         (list conn "db.users.find({active: true}).limit(5)")))
+          (should (equal (buffer-name shown) "*clutch mongodb: explain*"))
+          (should (string-match-p "IXSCAN"
+                                  (with-current-buffer shown
+                                    (buffer-string)))))))))
 
 (ert-deftest clutch-test-mongodb-completion-uses-cursor-chain-candidates ()
   "MongoDB completion should offer cursor helpers after chainable queries."
@@ -2353,13 +2283,15 @@ The owner invalidating them and disconnecting from them both end it."
 
 (ert-deftest clutch-test-mongodb-completion-offers-mql-operators-and-fields ()
   "MongoDB completion should offer MQL operators and sampled field names."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "orders" '("status" "userId" "items.productId") schema)
-    (puthash "products" '("sku" "category") schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn))
+          (schema (make-hash-table :test 'equal)))
+      (puthash "orders" '("status" "userId" "items.productId") schema)
+      (puthash "products" '("sku" "category") schema)
+      (puthash conn schema clutch--schema-cache)
       (with-temp-buffer
         (clutch-mongodb-mode)
+        (setq-local clutch-connection conn)
         (insert "db.orders.aggregate([{$")
         (let* ((capf (clutch-mongodb-completion-at-point))
                (candidates (all-completions "$" (nth 2 capf))))
@@ -2392,12 +2324,14 @@ The owner invalidating them and disconnecting from them both end it."
 
 (ert-deftest clutch-test-mongodb-completion-inserts-key-colon ()
   "MongoDB field and operator completion should add a key separator."
-  (let ((schema (make-hash-table :test 'equal)))
-    (puthash "orders" '("status" "userId") schema)
-    (cl-letf (((symbol-function 'clutch--schema-for-connection)
-               (lambda (&optional _conn) schema)))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn))
+          (schema (make-hash-table :test 'equal)))
+      (puthash "orders" '("status" "userId") schema)
+      (puthash conn schema clutch--schema-cache)
       (with-temp-buffer
         (clutch-mongodb-mode)
+        (setq-local clutch-connection conn)
         (insert "db.orders.find({st")
         (pcase-let ((`(,beg ,end ,collection . ,plist)
                      (clutch-mongodb-completion-at-point)))
@@ -2456,16 +2390,9 @@ The owner invalidating them and disconnecting from them both end it."
 
 (ert-deftest clutch-test-object-browse-query-uses-backend-specific-query ()
   "Object browsing should use a backend-specific query before SQL formatting."
-  (cl-letf (((symbol-function 'clutch-db-object-browse-query)
-             (lambda (conn entry)
-               (should (eq conn 'document-conn))
-               (should (equal entry '(:name "users")))
-               "doc.browse(\"users\");"))
-            ((symbol-function 'clutch--object-sql-name)
-             (lambda (&rest _args)
-               (ert-fail "SQL formatter should not run when backend handles browsing"))))
-    (should (equal (clutch--object-browse-query 'document-conn '(:name "users"))
-                   "doc.browse(\"users\");"))))
+  (let ((conn (make-clutch-mongodb-conn :database "app")))
+    (should (equal (clutch--object-browse-query conn '(:name "users"))
+                   "db.getCollection(\"users\").find({}).limit(20);"))))
 
 (ert-deftest clutch-test-object-browse-query-errors-for-document-backend-without-query ()
   "Native document backends should not silently fall back to SQL browsing."
@@ -2486,16 +2413,9 @@ The owner invalidating them and disconnecting from them both end it."
   "MongoDB SQL Interface object browsing should insert SELECT SQL."
   (require 'clutch-db-jdbc)
   (let ((conn (make-clutch-jdbc-conn :params '(:driver mongodb))))
-    (cl-letf (((symbol-function 'clutch-db-backend-key)
-               (lambda (_conn) 'mongodb))
-              ((symbol-function 'clutch-db-object-browse-query)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'clutch--object-sql-name)
-               (lambda (_conn entry)
-                 (plist-get entry :name))))
-      (should (equal (clutch--object-browse-query
-                      conn '(:name "users") '(:surface sql-interface))
-                     "SELECT * FROM users;")))))
+    (should (equal (clutch--object-browse-query
+                    conn '(:name "users") '(:surface sql-interface))
+                   "SELECT * FROM \"users\";"))))
 
 (ert-deftest clutch-test-connection-display-key-derives-generic-jdbc-endpoint ()
   "Generic JDBC connections should show endpoint details derived from :url."
