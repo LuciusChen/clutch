@@ -775,14 +775,18 @@ connection."
 
 (ert-deftest clutch-test-query-export-streams-when-the-backend-can ()
   "Direct export streams formatted text when the backend offers it.
-It sends no paged query, writes each part in the chosen encoding and
-reports the rows the backend counted, and a failed or cancelled stream
-leaves the destination and no temporary file behind."
-  (dolist (outcome '(success error cancelled))
-    (ert-info ((symbol-name outcome))
+It sends no paged query, asks for the format's delimiter, writes each part
+in the chosen encoding and reports the rows the backend counted, and a
+failed or cancelled stream leaves the destination and no temporary file
+behind."
+  (pcase-dolist (`(,outcome ,kind)
+                 '((success "tsv") (error "tsv") (cancelled "tsv")
+                   (success "csv")))
+    (ert-info ((format "%s %s" outcome kind))
       (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
              (path (expand-file-name "out.tsv" dir))
              (source (generate-new-buffer " *clutch-query-export*"))
+             (clutch-csv-delimiter ?\;)
              stream interrupted messages)
         (unwind-protect
             (clutch-test--with-async-statements finishes
@@ -802,13 +806,14 @@ leaves the destination and no temporary file behind."
                           ((symbol-function 'message)
                            (lambda (format &rest arguments)
                              (push (apply #'format format arguments) messages))))
-                  (clutch-test--with-minibuffer-answers '("tsv" "utf-8-bom")
+                  (clutch-test--with-minibuffer-answers (list kind "utf-8-bom")
                     (clutch-export-query (point-min) (point-max)))
                   (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
                                        ,function ,callback)
                                stream))
                     (should (equal (list conn sql delimiter header null-text)
-                                   (list 'async-conn "SELECT id, name FROM t" ?\t t
+                                   (list 'async-conn "SELECT id, name FROM t"
+                                         (if (equal kind "tsv") ?\t ?\;) t
                                          clutch-export-null-value-text)))
                     (funcall function "id\tname\n1\ta\n" 1)
                     (funcall function "2\t中文\n" 1)
