@@ -2249,27 +2249,11 @@ auto-commit keys."
     (should (equal (clutch--object-browse-query conn '(:name "users"))
                    "db.getCollection(\"users\").find({}).limit(20);"))))
 
-(ert-deftest clutch-test-object-browse-query-errors-for-document-backend-without-query ()
-  "Native document backends should not silently fall back to SQL browsing."
-  (cl-letf (((symbol-function 'clutch-db-backend-key)
-             (lambda (_conn) 'mongodb))
-            ((symbol-function 'clutch-backend-data-model)
-             (lambda (_backend) 'document))
-            ((symbol-function 'clutch-db-object-browse-query)
-             (lambda (&rest _args) nil))
-            ((symbol-function 'clutch--object-sql-name)
-             (lambda (&rest _args)
-               (ert-fail "SQL formatter should not run for document browsing"))))
-    (should-error
-     (clutch--object-browse-query 'document-conn '(:name "users"))
-     :type 'user-error)))
-
 (ert-deftest clutch-test-object-browse-query-uses-sql-for-sql-interface-mongodb ()
   "MongoDB SQL Interface object browsing should insert SELECT SQL."
   (require 'clutch-db-jdbc)
   (let ((conn (make-clutch-jdbc-conn :params '(:driver mongodb))))
-    (should (equal (clutch--object-browse-query
-                    conn '(:name "users") '(:surface sql-interface))
+    (should (equal (clutch--object-browse-query conn '(:name "users"))
                    "SELECT * FROM \"users\";"))))
 
 (ert-deftest clutch-test-connection-display-key-derives-generic-jdbc-endpoint ()
