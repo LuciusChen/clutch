@@ -1256,7 +1256,9 @@ tracks, and a disconnect no longer asked first."
                  nil)
         (should (equal (clutch-db-result-rows (caar outcomes)) '((1))))
         (funcall finish nil server-error)
-        (should (equal (cadar outcomes) '(clutch-db-error "boom"))))
+        (should (equal (cadar outcomes)
+                       '(clutch-db-error "boom" (:diag (:sql-state "XX000")
+                                                 :debug (:sqlstate "XX000"))))))
       (cl-letf (((symbol-function 'pgsql-exec-async) nil))
         (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
 
@@ -1578,31 +1580,50 @@ tracks, and a disconnect no longer asked first."
   "A client library's error should reach Clutch as its message, not its printing.
 `error-message-string' quoted the message after the library's label and
 appended the data some libraries attach, so error pages showed a
-PostgreSQL error's fields and SQLite's list of message parts."
-  (pcase-dolist (`(,err ,message)
+PostgreSQL error's fields and SQLite's list of message parts.  A
+PostgreSQL server error's detail and hint follow its message, as psql
+prints them, and its fields stay with the error for the diagnostics."
+  (pcase-dolist (`(,err ,data)
                  '(((mysql-query-error "[1146] (42S02) Table 'a.b' doesn't exist")
-                    "[1146] (42S02) Table 'a.b' doesn't exist")
+                    ("[1146] (42S02) Table 'a.b' doesn't exist"))
                    ((pgsql-server-error "ERROR: relation \"b\" does not exist: [42P01]"
                                         (:severity "ERROR" :sqlstate "42P01"))
-                    "ERROR: relation \"b\" does not exist: [42P01]")
+                    ("ERROR: relation \"b\" does not exist: [42P01]"
+                     (:diag (:sql-state "42P01")
+                      :debug (:severity "ERROR" :sqlstate "42P01"))))
+                   ((pgsql-server-error "ERROR: review error: [P0001]"
+                                        (:severity "ERROR" :sqlstate "P0001"
+                                         :detail "review detail" :hint "review hint"
+                                         :where "PL/pgSQL function line 1 at RAISE"))
+                    ("ERROR: review error: [P0001]\nDETAIL: review detail\nHINT: review hint"
+                     (:diag (:sql-state "P0001")
+                      :debug (:severity "ERROR" :sqlstate "P0001"
+                              :detail "review detail" :hint "review hint"
+                              :where "PL/pgSQL function line 1 at RAISE"))))
                    ((redis-error "WRONGTYPE Operation against a key")
-                    "WRONGTYPE Operation against a key")
+                    ("WRONGTYPE Operation against a key"))
                    ((mongodb-error "E11000 duplicate key"
                                    :error-labels ("RetryableWriteError"))
-                    "E11000 duplicate key")
+                    ("E11000 duplicate key"))
                    ((sqlite-error ("SQL logic error" "no such table: t" 1 1))
-                    "no such table: t")
+                    ("no such table: t"))
                    ((sqlite-error "UNIQUE constraint failed: u.id")
-                    "UNIQUE constraint failed: u.id")
+                    ("UNIQUE constraint failed: u.id"))
                    ;; Text beyond one message stays as Emacs prints it.
                    ((file-missing "Opening input file" "No such file or directory" "/x")
-                    "Opening input file: No such file or directory, /x")))
+                    ("Opening input file: No such file or directory, /x"))))
     (ert-info ((format "%S" err))
-      (should (equal (cdr (should-error
-                           (clutch-db--translate-library-error error
-                             (signal (car err) (cdr err)))
-                           :type 'clutch-db-error))
-                     (list message))))))
+      (let ((translated (should-error
+                         (clutch-db--translate-library-error error
+                           (signal (car err) (cdr err)))
+                         :type 'clutch-db-error)))
+        (should (equal (cdr translated) data))
+        ;; The diagnostics of a failed statement keep what the error carries.
+        (let ((details (clutch--make-buffer-query-error-details
+                        nil "SELECT 1" translated)))
+          (should (equal (plist-get details :debug) (plist-get (nth 1 data) :debug)))
+          (should (equal (plist-get (plist-get details :diag) :sql-state)
+                         (plist-get (plist-get (nth 1 data) :diag) :sql-state))))))))
 
 (ert-deftest clutch-db-test-sqlite-errors-carry-the-sqlite-message ()
   "SQLite query errors should carry SQLite's own message."

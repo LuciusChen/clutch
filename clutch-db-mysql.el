@@ -409,8 +409,7 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
     (mysql-timeout
      (clutch-db-mysql--handle-query-timeout conn err))
     (mysql-error
-     (signal 'clutch-db-error
-             (list (clutch-db--error-message err))))))
+     (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 (cl-defmethod clutch-db-query-async ((conn mysql-conn) sql callback)
   "Start SQL on MySQL CONN and pass the outcome to CALLBACK.
@@ -426,7 +425,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
          (funcall callback
                   (and result (clutch-db-mysql--wrap-result result))
                   (and error
-                       (list 'clutch-db-error (clutch-db--error-message error)))))))
+                       (cons 'clutch-db-error (clutch-db--error-data error)))))))
     t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
@@ -472,8 +471,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
     (when timeout-error
       (clutch-db-mysql--handle-query-timeout conn timeout-error stmt))
     (if pending-error
-        (signal 'clutch-db-error
-                (list (clutch-db--error-message pending-error)))
+        (signal 'clutch-db-error (clutch-db--error-data pending-error))
       result)))
 
 ;;;; SQL dialect methods

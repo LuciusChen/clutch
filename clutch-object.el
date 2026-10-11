@@ -366,7 +366,7 @@ GENERATION rejects stale work."
                (clutch--remember-recoverable-metadata-warning
                 conn "object-warmup" err (list :object-category next))
                (clutch--warn-completion-metadata-error-once
-                (error-message-string err))
+                (clutch-db--error-message err))
                (when (clutch-db-live-p conn)
                  (clutch--store-object-cache-type-entries
                   conn (clutch--object-category-type next) nil)
