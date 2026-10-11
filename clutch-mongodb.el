@@ -118,12 +118,6 @@ Emacs result contract from materializing an unbounded collection."
 (defconst clutch-mongodb--source-document-column "clutch__document"
   "Hidden result column name that stores the original MongoDB document.")
 
-(defun clutch-mongodb--error-message (err)
-  "Return the primary MongoDB error message from ERR."
-  (if (stringp (cadr err))
-      (cadr err)
-    (error-message-string err)))
-
 (defun clutch-mongodb--error-details (err)
   "Return Clutch details plist for MongoDB ERR."
   (when-let* ((labels (mongodb-error-labels err)))
@@ -136,7 +130,7 @@ Emacs result contract from materializing an unbounded collection."
   `(condition-case err
        (progn ,@body)
      (mongodb-error
-      (let ((message (clutch-mongodb--error-message err))
+      (let ((message (clutch-db--error-message err))
             (details (clutch-mongodb--error-details err)))
         (signal 'clutch-db-error
                 (if details
