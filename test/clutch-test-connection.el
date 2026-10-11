@@ -836,8 +836,11 @@ command quoted for the remote shell."
 
 (ert-deftest clutch-test-resolve-password-falls-back-when-pass-store-missing ()
   "Missing pass stores should not block host/user/port auth-source lookup."
+  ;; Entries that differ only in user or port come first.
   (clutch-test--with-authinfo
-      '("machine 127.0.0.1 login postgres port 5432 password postgres")
+      '("machine 127.0.0.1 login other port 5432 password wrong-user"
+        "machine 127.0.0.1 login postgres port 5433 password wrong-port"
+        "machine 127.0.0.1 login postgres port 5432 password postgres")
     (cl-letf (((symbol-function 'auth-source-pass-entries)
                (lambda ()
                  (signal 'file-missing
@@ -888,6 +891,26 @@ command quoted for the remote shell."
       (should (= (plist-get params :connect-timeout) 8))
       (should (equal (plist-get params :password) "secret"))
       (should-not (plist-member params :profile-entry)))))
+
+(ert-deftest clutch-test-profile-entry-explicit-backend-guides-profile-parsing ()
+  "Explicit backend should guide backend-specific profile value parsing.
+A pass profile is converted apart from an authinfo one, so each is given
+the backend; `clutch-test-profile-entry-authinfo-contract' covers authinfo."
+  (cl-letf (((symbol-function 'clutch--pass-entry-by-suffix)
+             (lambda (entry)
+               (and (equal entry "redis/prod")
+                    "redis/prod")))
+            ((symbol-function 'auth-source-pass-parse-entry)
+             (lambda (_entry)
+               '(("host" . "127.0.0.1")
+                 ("port" . "6379")
+                 ("database" . "0")))))
+    (let ((params (clutch--canonicalize-connection-params
+                   '(:backend redis :profile-entry "redis/prod"))))
+      (should (eq (plist-get params :backend) 'redis))
+      (should (equal (plist-get params :host) "127.0.0.1"))
+      (should (= (plist-get params :port) 6379))
+      (should (= (plist-get params :database) 0)))))
 
 (ert-deftest clutch-test-profile-entry-authinfo-contract ()
   "Authinfo profiles should fill connection fields before backend setup.
