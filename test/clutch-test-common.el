@@ -449,6 +449,20 @@ them does.  Without TO, only move point to FROM's cell."
           (equal (oref suffix key) key)))
    (transient-suffixes prefix)))
 
+(defmacro clutch-test--with-sqlite-connection (conn &rest body)
+  "Run BODY with CONN bound to a fresh in-memory SQLite connection.
+Stop the refresh timer and close CONN, even when BODY fails."
+  (declare (indent 1) (debug (symbolp body)))
+  `(progn
+     (skip-unless (sqlite-available-p))
+     (let ((,conn (clutch-db-sqlite-connect '(:database ":memory:")))
+           (clutch--execution-refresh-timer nil))
+       (unwind-protect
+           (progn ,@body)
+         (clutch--execution-refresh-stop)
+         (when (clutch-db-live-p ,conn)
+           (clutch-db-disconnect ,conn))))))
+
 (defmacro clutch-test--with-sqlite-result (bindings setup sql &rest body)
   "Run SQL over SETUP in a fresh SQLite console, then evaluate BODY.
 BINDINGS is (CONN RESULT).  SETUP is a list of SQL statements.
