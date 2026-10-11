@@ -144,10 +144,11 @@
               :source "/ssh:devbox:/workspace/"
               :params (:backend sqlite :database "/tmp/app.db")
               :absent :tramp-default-directory)
-             (:label "raw url is not forwardable"
+             (:label "raw url is not forwardable, even with host and port"
               :policy auto
               :source "/ssh:devbox:/workspace/"
-              :params (:backend oracle :url "jdbc:oracle:thin:@//db:1521/ORCL")
+              :params (:backend oracle :url "jdbc:oracle:thin:@//db:1521/ORCL"
+                       :host "db" :port 1521)
               :absent :tramp-default-directory)))
     (ert-info ((plist-get case :label))
       (let ((clutch-tramp-context-policy (plist-get case :policy))
