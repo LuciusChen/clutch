@@ -26,13 +26,16 @@
 ;;;; Test helpers
 
 (cl-defstruct clutch-test-conn
-  "A single-table metadata backend for result workflows, with no SQL engine.
-TABLE and COLUMNS declare the available metadata.  Other tables and every
-query fail the test rather than silently supplying empty results.
+  "A small connection backend for workflow tests, with no SQL engine.
+TABLE and COLUMNS declare the available metadata.  Other tables and
+unexpected queries fail the test rather than supplying empty results.
+QUERIES is a queue of (SQL . RESPONSE), checked in order.  RESPONSE is a
+result or a function of the connection, for faults during execution.
+PARAMS supplies the endpoint metadata used by the real connection UI.
 COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
 `manual'.  BACKEND, when non-nil, is the backend key it answers to, for
 features such as DEFAULT in an UPDATE."
-  (live t) table columns commit-mode backend)
+  (live t) table columns commit-mode backend params queries)
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-test-conn))
   "Return the backend CONN declares, or nil."
@@ -71,9 +74,31 @@ features such as DEFAULT in an UPDATE."
   (should (equal table (clutch-test-conn-table conn)))
   (clutch-test-conn-columns conn))
 
-(cl-defmethod clutch-db-query ((_conn clutch-test-conn) sql)
-  "Fail on unexpected SQL instead of pretending to execute SQL."
-  (ert-fail (format "Unexpected test-backend query: %S" sql)))
+(cl-defmethod clutch-db-query ((conn clutch-test-conn) sql)
+  "Consume CONN's next expected SQL and return its declared response."
+  (should (clutch-db-live-p conn))
+  (unless (clutch-test-conn-queries conn)
+    (ert-fail (format "Unexpected test-backend query: %S" sql)))
+  (pcase-let ((`(,expected . ,response) (car (clutch-test-conn-queries conn))))
+    (should (equal sql expected))
+    (pop (clutch-test-conn-queries conn))
+    (if (functionp response) (funcall response conn) response)))
+
+(cl-defmethod clutch-db-user ((conn clutch-test-conn))
+  "Return CONN's configured username."
+  (plist-get (clutch-test-conn-params conn) :user))
+
+(cl-defmethod clutch-db-host ((conn clutch-test-conn))
+  "Return CONN's configured host."
+  (plist-get (clutch-test-conn-params conn) :host))
+
+(cl-defmethod clutch-db-port ((conn clutch-test-conn))
+  "Return CONN's configured port."
+  (plist-get (clutch-test-conn-params conn) :port))
+
+(cl-defmethod clutch-db-database ((conn clutch-test-conn))
+  "Return CONN's configured database."
+  (plist-get (clutch-test-conn-params conn) :database))
 
 (cl-defmethod clutch-db-escape-identifier ((_conn clutch-test-conn) name)
   "Quote NAME using standard SQL identifier syntax."

@@ -1873,302 +1873,218 @@ call when a backend interrupt succeeds."
             (kill-buffer clutch--last-result-buffer)))))))
 
 (ert-deftest clutch-test-replacement-connection-keeps-the-commit-mode ()
-  "A connection that replaces another should keep its commit mode.
-A console in Manual mode came back in Auto mode after the automatic
-reconnect, so each statement after it was committed on its own.  A new
-connection that cannot take the mode is discarded, and one that has no
-Manual mode is left as it is."
+  "Replacement preserves commit mode and discards an unusable new connection."
   (clutch-test--with-isolated-metadata-caches
-    (let ((old-conn (list 'old-connection))
-          (new-conn (list 'new-connection))
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          modes set discarded)
-      (cl-letf (((symbol-function 'clutch--build-conn) (lambda (_params) new-conn))
-                ((symbol-function 'clutch-db-manual-commit-supported-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch-db-manual-commit-p)
-                 (lambda (conn) (alist-get conn modes)))
-                ((symbol-function 'clutch-db-set-auto-commit)
-                 (lambda (conn auto-commit)
-                   (push (list conn auto-commit) set)
-                   (setf (alist-get conn modes) (not auto-commit))))
-                ((symbol-function 'clutch--discard-unbound-connection)
-                 (lambda (conn) (push conn discarded))))
-        (cl-flet ((replace (old-manual new-manual)
-                    (setq modes (list (cons old-conn old-manual)
-                                      (cons new-conn new-manual))
-                          set nil)
-                    (should (eq (clutch--build-replacement-conn old-conn nil)
-                                new-conn))
-                    set))
-          (should (equal (replace t nil) (list (list new-conn nil))))
-          ;; Oracle starts in manual mode, which a session may have left.
-          (should (equal (replace nil t) (list (list new-conn t))))
-          (should-not (replace t t))
-          (should-not (replace nil nil))
-          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (conn) (eq conn old-conn))))
-            (should-not (replace t nil)))
-          (cl-letf (((symbol-function 'clutch-db-manual-commit-supported-p)
-                     (lambda (conn) (eq conn new-conn))))
-            (should (equal (replace t t) (list (list new-conn t))))))
+    (let* ((old (make-clutch-test-conn))
+           (new (make-clutch-test-conn))
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
+           calls
+           (record (lambda (conn auto) (push (list conn auto) calls))))
+      (cl-letf (((symbol-function 'clutch--build-conn) (lambda (_params) new)))
+        (advice-add 'clutch-db-set-auto-commit :before record)
+        (unwind-protect
+            (progn
+              (pcase-dolist (`(,old-mode ,new-mode ,expected)
+                             '((manual auto (nil)) (auto manual (t))
+                               (manual manual nil) (auto auto nil)
+                               (manual nil nil) (nil manual (t))))
+                (ert-info ((format "%s -> %s" old-mode new-mode))
+                  (setf (clutch-test-conn-commit-mode old) old-mode
+                        (clutch-test-conn-commit-mode new) new-mode)
+                  (setq calls nil)
+                  (should (eq (clutch--build-replacement-conn old nil) new))
+                  (should (equal calls
+                                 (mapcar (lambda (auto) (list new auto)) expected)))
+                  (should (eq (clutch-test-conn-commit-mode new)
+                              (and new-mode (if (eq old-mode 'manual) 'manual 'auto))))))
+              ;; Schema-switch replacement uses the same mode-preserving path.
+              (setf (clutch-test-conn-commit-mode old) 'manual
+                    (clutch-test-conn-commit-mode new) 'auto)
+              (setq calls nil)
+              (cl-letf (((symbol-function 'clutch--finalize-rebound-connection) #'ignore))
+                (should (eq (clutch--replace-connection old nil 'postgres) new)))
+              (should (equal calls (list (list new nil))))
+              (should (clutch-db-manual-commit-p new))
+              (should-not (clutch-db-live-p old)))
+          (advice-remove 'clutch-db-set-auto-commit record))
         (dolist (failure '((clutch-db-error "Lost connection") (quit)))
-          (setq modes (list (cons old-conn t) (cons new-conn nil))
-                discarded nil)
+          (setf (clutch-test-conn-live old) t
+                (clutch-test-conn-commit-mode old) 'manual
+                (clutch-test-conn-commit-mode new) 'auto
+                (clutch-test-conn-live new) t)
           (cl-letf (((symbol-function 'clutch-db-set-auto-commit)
-                     (lambda (_conn _auto-commit)
-                       (signal (car failure) (cdr failure)))))
-            (should (eq (car (condition-case err
-                                 (clutch--build-replacement-conn old-conn nil)
-                               ((error quit) err)))
-                        (car failure))))
-          (should (equal discarded (list new-conn))))
-        ;; A schema switch that reconnects goes through it too.
-        (setq modes (list (cons old-conn t) (cons new-conn nil))
-              set nil)
-        (cl-letf (((symbol-function 'clutch--connection-alive-p) #'ignore)
-                  ((symbol-function 'clutch--require-live-connection) #'ignore)
-                  ((symbol-function 'clutch--finalize-rebound-connection) #'ignore))
-          (clutch--replace-connection old-conn nil 'postgres))
-        (should (equal set (list (list new-conn nil))))))))
+                     (lambda (_conn _auto) (signal (car failure) (cdr failure)))))
+            (should (equal (condition-case err
+                               (clutch--build-replacement-conn old nil)
+                             ((error quit) err))
+                           failure)))
+          (should-not (clutch-db-live-p new))
+          (should (clutch-db-live-p old)))))))
 
 (ert-deftest clutch-test-dead-query-reconnects-on-next-command-without-replay ()
-  "A dead query should preserve its session anchor until the next command."
+  "A dead query preserves its session anchor and is never replayed."
   (clutch-test--with-isolated-metadata-caches
-    (let* ((old-conn (list 'old-connection))
-           (new-conn (list 'new-connection))
-           (params '(:backend oracle :database "ORCL"))
+    (let* ((params '(:backend oracle :database "ORCL"))
+           (first "UPDATE items SET n = 1 WHERE id = 1")
+           (next "UPDATE items SET n = 2 WHERE id = 1")
+           (old (make-clutch-test-conn
+                 :params params
+                 :queries (list (cons first (lambda (conn)
+                                              (clutch-db-disconnect conn)
+                                              (signal 'clutch-db-error '("socket lost")))))))
+           (new (make-clutch-test-conn
+                 :params params
+                 :queries (list (cons next (make-clutch-db-result :affected-rows 1)))))
            (source (generate-new-buffer " *clutch-reconnect-source*"))
            (attached (generate-new-buffer " *clutch-reconnect-attached*"))
            (clutch--tx-state-cache (make-hash-table :test 'eq))
            (clutch--problem-records-by-conn (make-hash-table :test 'eq))
-           (clutch--schema-cache-updated-hook
-            '(clutch--handle-schema-cache-updated))
-           (clutch--metadata-state-changed-hook
-            '(clutch--refresh-schema-status-ui))
-           (old-live t)
+           (clutch--schema-cache-updated-hook '(clutch--handle-schema-cache-updated))
+           (clutch--metadata-state-changed-hook '(clutch--refresh-schema-status-ui))
            allow-revert
            (builds 0)
-           (reverts 0)
-           executions)
+           (reverts 0))
       (unwind-protect
-          (progn
+          (clutch-test--with-result-buffer (" *clutch-dead-query-result*")
             (dolist (buffer (list source attached))
               (with-current-buffer buffer
-                (setq-local clutch-connection old-conn
+                (setq-local clutch-connection old
                             clutch--connection-params params
                             clutch--conn-sql-product 'oracle)))
-            (with-current-buffer source
-              (setq-local clutch--query-buffer-local-p t))
+            (with-current-buffer source (setq-local clutch--query-buffer-local-p t))
             (with-current-buffer attached
               (setq-local revert-buffer-function
-                          (lambda (&rest _args)
-                            (unless allow-revert
-                              (ert-fail "Dead-session cleanup must not revert"))
+                          (lambda (&rest _)
+                            (should allow-revert)
                             (cl-incf reverts))))
-            (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                       (lambda (connection)
-                         (if (eq connection old-conn)
-                             old-live
-                           (eq connection new-conn))))
-                      ((symbol-function 'clutch--build-conn)
-                       (lambda (reconnect-params)
-                         (should (equal reconnect-params params))
+            (cl-letf (((symbol-function 'clutch--build-conn)
+                       (lambda (actual-params)
+                         (should (equal actual-params params))
                          (cl-incf builds)
-                         new-conn))
-                      ((symbol-function 'clutch--execute-statement)
-                       (lambda (sql connection _present-result-p _region k
-                                    &rest _args)
-                         (push (list sql connection) executions)
-                         (funcall
-                          k
-                          (if (eq connection old-conn)
-                              (progn
-                                (setq old-live nil)
-                                (list :error '(clutch-db-error "socket lost")
-                                      :connection connection
-                                      :source-buffer source))
-                            (list :result (make-clutch-db-result :affected-rows 1)
-                                  :result-query-p nil
-                                  :connection connection
-                                  :source-buffer source)))))
-                      ((symbol-function 'clutch--show-execution-error)
-                       (lambda (&rest _args) "socket lost"))
-                      ((symbol-function 'clutch-result--display) #'ignore)
-                      ((symbol-function 'clutch-db-clear-error-details) #'ignore)
-                      ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                      ((symbol-function 'clutch--refresh-transaction-ui) #'ignore)
-                      ((symbol-function 'clutch--refresh-connection-render-state)
-                       #'ignore)
-                      ((symbol-function 'clutch--execution-refresh-start) #'ignore)
-                      ((symbol-function 'clutch--update-mode-line) #'ignore)
-                      ((symbol-function 'redisplay) #'ignore)
-                      ((symbol-function 'clutch--connection-key)
-                       (lambda (_connection) "oracle@test"))
-                      ((symbol-function 'message) #'ignore))
+                         new))
+                      ((symbol-function 'clutch--prime-schema-cache) #'ignore))
               (with-current-buffer source
-                (clutch--execute "SELECT once")
-                (should (= (length executions) 1))
+                (clutch--execute first)
+                (should-not (clutch-test-conn-queries old))
                 (should (= builds 0))
                 (should (= reverts 0))
-                (should (eq clutch-connection old-conn))
+                (should (eq clutch-connection old))
+                (should-not (clutch-db-live-p old))
                 (setq allow-revert t)
-                (clutch--execute "SELECT next")))
+                (clutch--execute next)))
             (should (= builds 1))
             (should (= reverts 1))
-            (should (equal (nreverse executions)
-                           `(("SELECT once" ,old-conn)
-                             ("SELECT next" ,new-conn))))
+            (should-not (clutch-test-conn-queries new))
             (dolist (buffer (list source attached))
-              (should (eq (buffer-local-value 'clutch-connection buffer)
-                          new-conn))))
+              (should (eq (buffer-local-value 'clutch-connection buffer) new))))
         (dolist (buffer (list source attached))
-          (when (buffer-live-p buffer)
-            (kill-buffer buffer)))))))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest clutch-test-execute-retries-only-safe-clean-preflight-failures ()
-  "Retry once only when JDBC proves execution did not start and tx is clean.
-A transaction begun with BEGIN in Auto mode holds uncommitted work too,
-and a namespace a new connection cannot return to is not retried."
-  (dolist (case '((auto nil nil 2 1 new-conn nil)
-                  (manual-clean t nil 2 1 new-conn nil)
-                  (manual-dirty t t 1 0 old-conn clutch-db-execution-not-started)
-                  (auto-dirty nil t 1 0 old-conn clutch-db-execution-not-started)
-                  (unreachable nil nil 1 0 old-conn clutch-db-execution-not-started)
-                  (ambiguous-first-failure nil nil 1 0 old-conn clutch-db-error)
-                  (second-failure nil nil 2 1 new-conn clutch-db-error)))
-    (pcase-let ((`(,label ,manual ,dirty ,expected-runs ,expected-reconnects
-                         ,expected-connection ,expected-error)
-                 case))
-      (with-temp-buffer
-        (let ((clutch-connection 'old-conn)
-              (clutch--tx-state-cache (make-hash-table :test 'eq))
-              (old-live t)
-              (runs 0)
-              (confirmations 0)
-              (reconnects 0)
-              (clutch-db--foreground-connections
-               (make-hash-table :test 'eq)))
-          (when dirty
-            (puthash 'old-conn 'dirty clutch--tx-state-cache))
-          (cl-letf (((symbol-function 'clutch--confirm-query-execution)
-                     (lambda (_sql) (cl-incf confirmations)))
-                    ((symbol-function 'clutch-db-result-query-p)
-                     (lambda (&rest _args) nil))
-                    ((symbol-function 'clutch-db-unreachable-namespace)
-                     (lambda (_conn) (and (eq label 'unreachable) "att.main")))
-                    ((symbol-function 'clutch-db-manual-commit-p)
-                     (lambda (_conn) manual))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn)
-                       (if (eq conn 'old-conn) old-live t)))
-                    ((symbol-function 'clutch--run-db-query)
-                     (lambda (conn _sql)
-                       (should (clutch-db--foreground-busy-p conn))
-                       (cl-incf runs)
-                       (cond
-                        ((eq conn 'old-conn)
-                         (setq old-live nil)
-                         (signal (if (eq label 'ambiguous-first-failure)
-                                     'clutch-db-error
-                                   'clutch-db-execution-not-started)
-                                 '("idle validation failed")))
-                        ((eq label 'second-failure)
-                         (signal 'clutch-db-error '("second attempt failed")))
-                        (t
-                         (make-clutch-db-result :affected-rows 1)))))
-                    ((symbol-function 'clutch--try-reconnect)
-                     (lambda ()
-                       (cl-incf reconnects)
-                       (setq clutch-connection 'new-conn))))
-            (let ((outcome
-                   (clutch-test--await-outcome
-                    (lambda (k)
-                      (clutch--execute-statement
-                       "SELECT side_effect_free" 'old-conn nil nil k)))))
-              (ert-info ((format "case: %s" label))
-                (should (= runs expected-runs))
-                ;; Callers confirm once; neither attempt asks again.
-                (should (= confirmations 0))
+  "Retry once only after a proven pre-execution failure in a clean session."
+  (dolist (case '((auto auto nil 1 nil)
+                  (manual-clean manual nil 1 nil)
+                  (manual-dirty manual dirty 0 clutch-db-execution-not-started)
+                  (auto-dirty auto dirty 0 clutch-db-execution-not-started)
+                  (unreachable auto nil 0 clutch-db-execution-not-started)
+                  (ambiguous-first-failure auto nil 0 clutch-db-error)
+                  (second-failure auto nil 1 clutch-db-error)))
+    (pcase-let ((`(,label ,mode ,state ,expected-reconnects ,expected-error) case))
+      (ert-info ((format "case: %s" label))
+        (with-temp-buffer
+          (let* ((sql "UPDATE items SET n = 1")
+                 (old (make-clutch-test-conn :commit-mode mode))
+                 (new (make-clutch-test-conn :commit-mode mode))
+                 (clutch-connection old)
+                 (clutch--tx-state-cache (make-hash-table :test 'eq))
+                 (clutch-db--foreground-connections (make-hash-table :test 'eq))
+                 (reconnects 0))
+            (puthash old state clutch--tx-state-cache)
+            (setf (clutch-test-conn-queries old)
+                  (list (cons sql (lambda (conn)
+                                    (should (clutch-db--foreground-busy-p conn))
+                                    (clutch-db-disconnect conn)
+                                    (signal (if (eq label 'ambiguous-first-failure)
+                                                'clutch-db-error
+                                              'clutch-db-execution-not-started)
+                                            '("idle validation failed")))))
+                  (clutch-test-conn-queries new)
+                  (list (cons sql (lambda (conn)
+                                    (should (clutch-db--foreground-busy-p conn))
+                                    (if (eq label 'second-failure)
+                                        (signal 'clutch-db-error '("second attempt failed"))
+                                      (make-clutch-db-result :affected-rows 1))))))
+            (cl-letf (((symbol-function 'clutch--confirm-query-execution)
+                       (lambda (&rest _) (ert-fail "Retry must not confirm again")))
+                      ((symbol-function 'clutch-db-unreachable-namespace)
+                       (lambda (_conn) (and (eq label 'unreachable) "att.main")))
+                      ((symbol-function 'clutch--try-reconnect)
+                       (lambda () (cl-incf reconnects) (setq clutch-connection new))))
+              (let ((outcome (clutch-test--await-outcome
+                              (lambda (k)
+                                (clutch--execute-statement sql old nil nil k)))))
                 (should (= reconnects expected-reconnects))
+                (should-not (clutch-test-conn-queries old))
+                (should (= (length (clutch-test-conn-queries new))
+                           (- 1 expected-reconnects)))
                 (should (eq (plist-get outcome :connection)
-                            expected-connection))
-                (should (eq (car-safe (plist-get outcome :error))
-                            expected-error))))))))))
+                            (if (zerop expected-reconnects) old new)))
+                (should (eq (car-safe (plist-get outcome :error)) expected-error))
+                (should-not (clutch-db--foreground-busy-p old))
+                (should-not (clutch-db--foreground-busy-p new))))))))))
 
 (ert-deftest clutch-test-batch-continues-on-the-reconnected-connection ()
   "Statements after an idle reconnect in a batch should use the new connection."
   (with-temp-buffer
-    (let ((clutch-connection 'old-conn)
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch-db--foreground-connections (make-hash-table :test 'eq))
-          (old-live t)
-          executions)
-      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
-                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-result-query-p) #'ignore)
-                ((symbol-function 'clutch--forget-row-identities) #'ignore)
-                ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
-                ((symbol-function 'clutch--execution-refresh-start) #'ignore)
-                ((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'message) #'ignore)
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (conn) (symbol-name conn)))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (if (eq conn 'old-conn) old-live t)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (conn sql &rest _args)
-                   (push (list sql conn) executions)
-                   (if (eq conn 'old-conn)
-                       (progn
-                         (setq old-live nil)
-                         (signal 'clutch-db-execution-not-started
-                                 '("idle validation failed")))
-                     (make-clutch-db-result :affected-rows 1))))
-                ((symbol-function 'clutch--try-reconnect)
-                 (lambda ()
-                   (setq clutch-connection 'new-conn))))
-        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
-        (should (equal (nreverse executions)
-                       '(("UPDATE a SET n = 1" old-conn)
-                         ("UPDATE a SET n = 1" new-conn)
-                         ("UPDATE b SET n = 2" new-conn))))))))
+    (let* ((first "UPDATE a SET n = 1")
+           (second "UPDATE b SET n = 2")
+           (old (make-clutch-test-conn
+                 :queries (list (cons first (lambda (conn)
+                                              (clutch-db-disconnect conn)
+                                              (signal 'clutch-db-execution-not-started
+                                                      '("idle validation failed")))))))
+           (new (make-clutch-test-conn
+                 :queries (list (cons first (make-clutch-db-result :affected-rows 1))
+                                (cons second (make-clutch-db-result :affected-rows 1)))))
+           (clutch-connection old)
+           (clutch-high-risk-query-confirmation nil)
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
+           (clutch-db--foreground-connections (make-hash-table :test 'eq)))
+      (cl-letf (((symbol-function 'clutch--try-reconnect)
+                 (lambda () (setq clutch-connection new))))
+        (clutch--execute-statements (list first second)))
+      (should-not (clutch-test-conn-queries old))
+      (should-not (clutch-test-conn-queries new))
+      (should (eq clutch-connection new))
+      (should-not (clutch-db--foreground-busy-p old))
+      (should-not (clutch-db--foreground-busy-p new)))))
 
 (ert-deftest clutch-test-batch-stops-when-its-buffer-moves-during-a-synchronous-statement ()
-  "A batch should stop when its buffer moves while a statement runs synchronously.
-A backend that waits on the network synchronously runs timers, and one of
-them can move the buffer to another connection before the reply arrives."
+  "A batch must stop if its buffer moves while synchronous SQL waits."
   (with-temp-buffer
-    (let ((clutch-connection 'conn-a)
-          (clutch--tx-state-cache (make-hash-table :test 'eq))
-          (clutch-db--foreground-connections (make-hash-table :test 'eq))
-          (source (current-buffer))
-          executions messages)
-      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
-                ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-                ((symbol-function 'clutch-db-result-query-p) #'ignore)
-                ((symbol-function 'clutch--forget-row-identities) #'ignore)
-                ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
-                ((symbol-function 'clutch--execution-refresh-start) #'ignore)
-                ((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (conn) (symbol-name conn)))
-                ((symbol-function 'message)
+    (let* ((source (current-buffer))
+           (other (make-clutch-test-conn))
+           (conn (make-clutch-test-conn
+                  :queries
+                  (list (cons "UPDATE a SET n = 1"
+                              (lambda (_conn)
+                                (with-current-buffer source
+                                  (setq clutch-connection other))
+                                (make-clutch-db-result :affected-rows 1))))))
+           (clutch-connection conn)
+           (clutch-high-risk-query-confirmation nil)
+           (clutch--tx-state-cache (make-hash-table :test 'eq))
+           (clutch-db--foreground-connections (make-hash-table :test 'eq))
+           messages)
+      (cl-letf (((symbol-function 'message)
                  (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) messages)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (conn sql &rest _args)
-                   (push (list sql conn) executions)
-                   ;; A timer that runs while the statement waits moves the buffer.
-                   (with-current-buffer source
-                     (setq clutch-connection 'conn-b))
-                   (make-clutch-db-result :affected-rows 1))))
-        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2"))
-        (should (equal executions '(("UPDATE a SET n = 1" conn-a))))
-        (should (member "1 statement executed, then stopped: the connection changed"
-                        messages))
-        (should-not (clutch-db--foreground-busy-p 'conn-a))))))
+                   (push (apply #'format format-string args) messages))))
+        (clutch--execute-statements '("UPDATE a SET n = 1" "UPDATE b SET n = 2")))
+      (should-not (clutch-test-conn-queries conn))
+      (should (eq clutch-connection other))
+      (should (member "1 statement executed, then stopped: the connection changed"
+                      messages))
+      (should-not (clutch-db--foreground-busy-p conn)))))
 
 (ert-deftest clutch-test-batch-stops-when-its-buffer-switches-connection ()
   "A batch should stop rather than follow its buffer to another connection."
@@ -2258,45 +2174,34 @@ a retry that fails before it runs ends the statement with its error.  A
 buffer that the reconnect's wait killed or moved elsewhere is not retried
 on, and a statement it started elsewhere keeps its marker."
   (with-temp-buffer
-    (let ((clutch-connection 'old-conn)
-          (old-live t)
-          executions prepared-connections)
-      (cl-letf (((symbol-function 'clutch--confirm-query-execution) #'ignore)
-                ((symbol-function 'clutch-db-result-query-p)
-                 (lambda (&rest _args) t))
-                ((symbol-function 'clutch-db-query-result-context)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'clutch--prepare-row-identity-query)
-                 (lambda (connection _sql)
-                   (push connection prepared-connections)
+    (let* ((old (make-clutch-test-conn
+                 :queries (list (cons "stale-plan"
+                                      (lambda (conn)
+                                        (clutch-db-disconnect conn)
+                                        (signal 'clutch-db-execution-not-started
+                                                '("idle validation failed")))))))
+           (new (make-clutch-test-conn
+                 :queries (list (cons "fresh-plan"
+                                      (make-clutch-db-result :columns ["id"] :rows '((1)))))))
+           (clutch-connection old)
+           prepared-connections)
+      (cl-letf (((symbol-function 'clutch--prepare-row-identity-query)
+                 (lambda (conn sql)
+                   (should (equal sql "SELECT * FROM items"))
+                   (push conn prepared-connections)
                    '(:sql "fresh-plan")))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (connection)
-                   (if (eq connection 'old-conn) old-live t)))
-                ((symbol-function 'clutch--run-db-query)
-                 (lambda (connection sql)
-                   (push (list connection sql) executions)
-                   (if (eq connection 'old-conn)
-                       (progn
-                         (setq old-live nil)
-                         (signal 'clutch-db-execution-not-started
-                                 '("idle validation failed")))
-                     (make-clutch-db-result :columns ["id"] :rows '((1))))))
                 ((symbol-function 'clutch--try-reconnect)
-                 (lambda ()
-                   (setq clutch-connection 'new-conn))))
+                 (lambda () (setq clutch-connection new))))
         (let ((outcome
                (clutch-test--await-outcome
                 (lambda (k)
                   (clutch--execute-statement
-                   "SELECT * FROM items" 'old-conn t nil k
-                   '(:row-identity-prep (:sql "stale-plan")
-                     :server-pageable nil))))))
-          (should (eq (plist-get outcome :connection) 'new-conn))
-          (should (equal (nreverse executions)
-                         '((old-conn "stale-plan")
-                           (new-conn "fresh-plan"))))
-          (should (equal prepared-connections '(new-conn)))))))
+                   "SELECT * FROM items" old t nil k
+                   '(:row-identity-prep (:sql "stale-plan") :server-pageable nil))))))
+          (should (eq (plist-get outcome :connection) new))
+          (should-not (clutch-test-conn-queries old))
+          (should-not (clutch-test-conn-queries new))
+          (should (equal prepared-connections (list new)))))))
   (dolist (failing '(reconnect retry))
     (with-temp-buffer
       (insert "SELECT 1")

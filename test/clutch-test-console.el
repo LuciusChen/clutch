@@ -233,150 +233,123 @@
   "REPL should print not-connected message when no live connection."
   (with-temp-buffer
     (let (captured)
-      (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 (lambda ()
-                   (user-error "Not connected.  Use C-c C-e to connect")))
-                ((symbol-function 'clutch-repl--output)
+      (cl-letf (((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq captured text))))
         (clutch-repl--execute-and-print "SELECT 1")
         (should (string-match-p "Not connected" captured))
         (should (string-match-p "db> $" captured))
-        (should (eq (clutch-test-console--face-at-match "ERROR" captured)
-                    'error))
+        (should (eq (clutch-test-console--face-at-match "ERROR" captured) 'error))
         (should (eq (clutch-test-console--face-at-match "db>" captured)
                     'minibuffer-prompt))))))
 
 (ert-deftest clutch-test-repl-execute-and-print-ensures-connection ()
   "REPL should use the shared reconnect path before querying."
   (with-temp-buffer
-    (let (ensured confirmed
-          captured-conn
-          output)
-      (setq-local clutch-connection 'stale-conn)
+    (let* ((sql "UPDATE t SET x = 1;")
+           (old (make-clutch-test-conn :live nil))
+           (new (make-clutch-test-conn
+                 :queries (list (cons sql (make-clutch-db-result :affected-rows 3)))))
+           ensured confirmed output)
+      (setq-local clutch-connection old)
       (cl-letf (((symbol-function 'clutch--ensure-connection)
-                 (lambda ()
-                   (setq ensured t)
-                   (setq-local clutch-connection 'new-conn)))
-                ((symbol-function 'clutch-db-query)
-                 (lambda (conn _sql)
-                   (setq captured-conn conn)
-                   (make-clutch-db-result :affected-rows 3)))
+                 (lambda () (setq ensured t clutch-connection new)))
                 ((symbol-function 'clutch--confirm-high-risk-query)
-                 (lambda (sql) (setq confirmed sql)))
+                 (lambda (query) (setq confirmed query)))
                 ((symbol-function 'clutch-repl--output)
                  (lambda (text) (setq output text))))
-        (clutch-repl--execute-and-print "UPDATE t SET x = 1;")
-        (should ensured)
-        (should (equal confirmed "UPDATE t SET x = 1;"))
-        (should (eq captured-conn 'new-conn))
-        (should (string-match-p "Affected rows" output))
-        (should (eq (clutch-test-console--face-at-match "Affected rows" output)
-                    'font-lock-keyword-face))
-        (should (eq (clutch-test-console--face-at-match "3" output)
-                    'font-lock-constant-face))
-        (should (eq (clutch-test-console--face-at-match "db>" output)
-                    'minibuffer-prompt))))))
+        (clutch-repl--execute-and-print sql))
+      (should ensured)
+      (should (equal confirmed sql))
+      (should-not (clutch-test-conn-queries new))
+      (should (string-match-p "Affected rows" output))
+      (should (eq (clutch-test-console--face-at-match "Affected rows" output)
+                  'font-lock-keyword-face))
+      (should (eq (clutch-test-console--face-at-match "3" output)
+                  'font-lock-constant-face))
+      (should (eq (clutch-test-console--face-at-match "db>" output)
+                  'minibuffer-prompt)))))
 
 (ert-deftest clutch-test-repl-ddl-success-does-not-revert-non-file-buffer ()
-  "Successful DDL should submit schema refresh without reverting the REPL."
+  "Successful DDL should refresh metadata without reverting the REPL."
   (clutch-test--with-isolated-metadata-caches
     (with-temp-buffer
       (clutch-repl-mode)
-      (let ((conn (list 'fake-conn))
-            (clutch--metadata-state-changed-hook
-             '(clutch--refresh-schema-status-ui))
-            (clutch-db--foreground-connections (make-hash-table :test 'eq))
-            executed
-            submitted)
-        (unwind-protect
-            (progn
-              (setq-local clutch-connection conn)
-              (should-not buffer-file-name)
-              (should-not (local-variable-p 'revert-buffer-function))
-              (cl-letf (((symbol-function 'clutch--run-db-query)
-                         (lambda (actual-conn sql)
-                           (setq executed (list actual-conn sql))
-                           (make-clutch-db-result :affected-rows 0)))
-                        ((symbol-function 'clutch-db-eager-schema-refresh-p)
-                         (lambda (_conn) nil))
-                        ((symbol-function 'clutch-db-refresh-schema-async)
-                         (lambda (actual-conn &rest _args)
-                           (setq submitted actual-conn)
-                           t))
-                        ((symbol-function 'clutch--refresh-connection-render-state)
-                         #'ignore))
-                (let ((outcome
-                       (clutch-test--await-outcome
-                        (lambda (k)
-                          (clutch--execute-statement
-                           "CREATE TABLE users (id INT)" conn nil nil k)))))
-                  (should (clutch-db-result-p
-                           (plist-get outcome :result)))))
-              (should (equal executed
-                             (list conn "CREATE TABLE users (id INT)")))
-              (should (eq submitted conn)))
-          (setq-local clutch-connection nil))))))
+      (let* ((sql "CREATE TABLE users (id INT)")
+             (conn (make-clutch-test-conn
+                    :queries (list (cons sql (make-clutch-db-result :affected-rows 0)))))
+             (clutch--metadata-state-changed-hook '(clutch--refresh-schema-status-ui))
+             (clutch-db--foreground-connections (make-hash-table :test 'eq))
+             submitted)
+        (setq-local clutch-connection conn)
+        (should-not buffer-file-name)
+        (should-not (local-variable-p 'revert-buffer-function))
+        (cl-letf (((symbol-function 'clutch-db-eager-schema-refresh-p) #'ignore)
+                  ((symbol-function 'clutch-db-refresh-schema-async)
+                   (lambda (actual-conn &rest _)
+                     (setq submitted actual-conn)
+                     t)))
+          (let ((outcome (clutch-test--await-outcome
+                          (lambda (k) (clutch--execute-statement sql conn nil nil k)))))
+            (should (clutch-db-result-p (plist-get outcome :result)))))
+        (should-not (clutch-test-conn-queries conn))
+        (should (eq submitted conn))))))
 
 (ert-deftest clutch-test-repl-dead-query-retains-reconnect-anchor ()
-  "REPL errors should retire a dead session without dropping its anchor."
-  (with-temp-buffer
-    (let ((conn (list 'dead-connection))
-          preserved
-          output)
-      (setq-local clutch-connection conn)
-      (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                ((symbol-function 'clutch--execute-statement)
-                 (lambda (_sql _conn _present-result-p _region k &rest _args)
-                   (funcall k (list :error '(clutch-db-error "socket lost")
-                                    :connection conn))))
-                ((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_connection) nil))
-                ((symbol-function 'clutch--remember-execute-error)
-                 (lambda (&rest _args) '("socket lost" . "socket lost")))
-                ((symbol-function 'clutch--preserve-dead-connection-for-reconnect)
-                 (lambda (connection) (setq preserved connection)))
-                ((symbol-function 'clutch-db-clear-error-details) #'ignore)
-                ((symbol-function 'clutch-repl--output)
-                 (lambda (text) (setq output text))))
-        (clutch-repl--execute-and-print "SELECT once")
-        (should (eq preserved conn))
-        (should (eq clutch-connection conn))
-        (should (string-match-p "socket lost" output))))))
+  "REPL errors retire dead state while preserving every attached session anchor."
+  (clutch-test--with-isolated-metadata-caches
+    (with-temp-buffer
+      (let* ((repl (current-buffer))
+             (sql "UPDATE t SET x = 1 WHERE id = 1")
+             (conn (make-clutch-test-conn
+                    :queries (list (cons sql (lambda (connection)
+                                               (clutch-db-disconnect connection)
+                                               (signal 'clutch-db-error '("socket lost")))))))
+             (params '(:backend pg :database "test"))
+             output)
+        (setq-local clutch-connection conn clutch--connection-params params)
+        (puthash conn '("old_table") clutch--schema-cache)
+        ;; A full cleanup would leave this attached buffer unable to reconnect
+        ;; with the REPL, even though the current buffer keeps its connection.
+        (with-temp-buffer
+          (setq-local clutch-connection conn clutch--connection-params params)
+          (with-current-buffer repl
+            (cl-letf (((symbol-function 'clutch-repl--output)
+                       (lambda (text) (setq output text))))
+              (clutch-repl--execute-and-print sql))
+            (should-not (clutch-test-conn-queries conn))
+            (should-not (clutch-db-live-p conn))
+            (should (eq clutch-connection conn))
+            (should (equal clutch--connection-params params))
+            (should-not (gethash conn clutch--schema-cache))
+            (should (string-match-p "socket lost" output)))
+          (should (eq clutch-connection conn))
+          (should (equal clutch--connection-params params)))))))
 
 (ert-deftest clutch-test-repl-execute-and-print-returning-result ()
-  "REPL should show DML RETURNING rows in a result buffer."
+  "REPL shows RETURNING rows, then writes its prompt in the original buffer."
   (with-temp-buffer
-    (let ((clutch-connection 'fake-conn)
-          (repl-buffer (current-buffer))
-          (result-buffer-name " *clutch-test-result*")
-          displayed
-          output)
+    (let* ((sql "INSERT INTO demo VALUES (1) RETURNING id;")
+           (clutch-connection
+            (make-clutch-test-conn
+             :queries (list (cons sql (make-clutch-db-result
+                                       :columns '((:name "id")) :rows '((1)))))))
+           (repl-buffer (current-buffer))
+           (result-buffer (generate-new-buffer " *clutch-test-returning*"))
+           displayed output)
       (unwind-protect
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (_conn) t))
-                    ((symbol-function 'clutch-result--check-pending-changes)
-                     #'ignore)
-                    ((symbol-function 'clutch-db-result-query-p)
-                     (lambda (_conn _sql) nil))
-                    ((symbol-function 'clutch-db-query)
-                     (lambda (_conn _sql)
-                       (make-clutch-db-result
-                        :columns '((:name "id"))
-                        :rows '((1)))))
-                    ((symbol-function 'clutch-result--display-select)
-                     (lambda (_conn sql result elapsed &rest _args)
-                       (setq displayed (list result sql elapsed))
-                       (set-buffer (get-buffer-create result-buffer-name))
-                       'result-buffer))
+          (cl-letf (((symbol-function 'clutch-result--display-select)
+                     (lambda (conn query result elapsed &rest _)
+                       (should (eq conn clutch-connection))
+                       (setq displayed (list result query elapsed))
+                       (set-buffer result-buffer)))
                     ((symbol-function 'clutch-repl--output)
                      (lambda (text)
                        (should (eq (current-buffer) repl-buffer))
                        (setq output text))))
-            (clutch-repl--execute-and-print
-             "INSERT INTO demo VALUES (1) RETURNING id;")
-            (should displayed)
-            (should (equal (nth 1 displayed)
-                           "INSERT INTO demo VALUES (1) RETURNING id;"))
+            (clutch-repl--execute-and-print sql)
+            (should-not (clutch-test-conn-queries clutch-connection))
+            (should (equal (nth 1 displayed) sql))
+            (should (equal (clutch-db-result-rows (car displayed)) '((1))))
             (should (string-match-p "1 row" output))
             (should (string-match-p "result buffer" output))
             (should (string-match-p "db> $" output))
@@ -386,8 +359,7 @@
                         'clutch-field-name-face))
             (should (eq (clutch-test-console--face-at-match "db>" output)
                         'minibuffer-prompt)))
-        (when-let* ((buf (get-buffer result-buffer-name)))
-          (kill-buffer buf))))))
+        (kill-buffer result-buffer)))))
 
 
 ;;;; REPL — input completeness
