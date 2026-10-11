@@ -30,8 +30,13 @@
 TABLE and COLUMNS declare the available metadata.  Other tables and every
 query fail the test rather than silently supplying empty results.
 COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
-`manual'."
-  (live t) table columns commit-mode)
+`manual'.  BACKEND, when non-nil, is the backend key it answers to, for
+features such as DEFAULT in an UPDATE."
+  (live t) table columns commit-mode backend)
+
+(cl-defmethod clutch-db-backend-key ((conn clutch-test-conn))
+  "Return the backend CONN declares, or nil."
+  (clutch-test-conn-backend conn))
 
 (cl-defmethod clutch-db-live-p ((conn clutch-test-conn))
   "Return whether CONN is open."
@@ -153,6 +158,13 @@ outlast the caller."
           (buffer-string))
       (execute-kbd-macro (kbd "C-g")))))
 
+(defun clutch-test--type-keys (keys)
+  "Type KEYS in the current buffer, shown in the selected window.
+Driving a Transient menu this way runs its real suffixes and switches."
+  (save-window-excursion
+    (switch-to-buffer (current-buffer))
+    (execute-kbd-macro (kbd keys))))
+
 (defun clutch-test--await-outcome (start)
   "Call START with a continuation and return the value passed to it."
   (let (outcome done)
@@ -264,16 +276,6 @@ SPEC is (CONN BACKEND MODEL)."
                     (should (eq backend clutch-test--backend))
                     clutch-test--model)))
          ,@body))))
-
-(defmacro clutch-test--with-native-document-result-buffer (&rest body)
-  "Run BODY in a temporary result buffer for a native document surface."
-  (declare (indent 0) (debug (body)))
-  `(with-temp-buffer
-     (setq-local clutch-connection 'document-conn
-                 clutch--connection-params nil)
-     (clutch-test--with-connection-data-model
-         ('document-conn 'mongodb 'document)
-       ,@body)))
 
 (defun clutch-test--init-result-state (spec)
   "Initialize the current buffer as a small result buffer.
@@ -501,15 +503,16 @@ both buffers, and stop the refresh timer, even when BODY fails."
 (defmacro clutch-test--with-pop-to-buffer-capture (var &rest body)
   "Bind VAR to the buffer passed to `pop-to-buffer' while running BODY."
   (declare (indent 1) (debug (symbolp body)))
-  `(let (,var)
-     (unwind-protect
-         (cl-letf (((symbol-function 'pop-to-buffer)
-                    (lambda (buf &rest _args)
-                      (setq ,var buf)
-                      buf)))
-           ,@body)
-       (when (and ,var (buffer-live-p ,var))
-         (kill-buffer ,var)))))
+  (let ((popped (make-symbol "popped")))
+    `(let (,var)
+       (unwind-protect
+           (cl-letf (((symbol-function 'pop-to-buffer)
+                      (lambda (,popped &rest _args)
+                        (setq ,var ,popped)
+                        ,popped)))
+             ,@body)
+         (when (and ,var (buffer-live-p ,var))
+           (kill-buffer ,var))))))
 
 (defmacro clutch-test--with-insert-result-buffer (var spec &rest body)
   "Bind VAR to a result buffer initialized for insert tests by SPEC."
