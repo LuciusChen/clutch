@@ -277,16 +277,6 @@ SPEC is (CONN BACKEND MODEL)."
                     clutch-test--model)))
          ,@body))))
 
-(defmacro clutch-test--with-native-document-result-buffer (&rest body)
-  "Run BODY in a temporary result buffer for a native document surface."
-  (declare (indent 0) (debug (body)))
-  `(with-temp-buffer
-     (setq-local clutch-connection 'document-conn
-                 clutch--connection-params nil)
-     (clutch-test--with-connection-data-model
-         ('document-conn 'mongodb 'document)
-       ,@body)))
-
 (defun clutch-test--init-result-state (spec)
   "Initialize the current buffer as a small result buffer.
 SPEC is a plist.  Common keys are :columns, :column-defs, :rows,
