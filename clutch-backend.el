@@ -142,6 +142,21 @@ actionable hints for known error patterns."
         (format "%s [%s]" summary hint)
       summary)))
 
+(defun clutch-db--error-message (err)
+  "Return the message of database error ERR as plain text.
+Client libraries signal their message as the first datum, which
+`error-message-string' prints quoted after the error's label and before
+any structured data, such as a PostgreSQL error's fields.  Emacs's SQLite
+errors carry their message second in a list.  An error with more text
+than one message, such as a file error, keeps `error-message-string'."
+  (pcase (cdr err)
+    (`((,(pred stringp) ,(and (pred stringp) message) . ,_)) message)
+    (`(,(and (pred stringp) message) . ,rest)
+     (if (seq-some #'stringp rest)
+         (error-message-string err)
+       message))
+    (_ (error-message-string err))))
+
 (defmacro clutch-db--translate-library-error (condition &rest body)
   "Run BODY and translate backend CONDITION errors to `clutch-db-error'."
   (declare (indent 1) (debug t))
@@ -149,7 +164,7 @@ actionable hints for known error patterns."
        (progn ,@body)
      (,condition
       (signal 'clutch-db-error
-              (list (error-message-string err))))))
+              (list (clutch-db--error-message err))))))
 
 (defun clutch-db--ensure-client-api (feature label functions)
   "Load FEATURE and verify that its public FUNCTIONS are available.
@@ -1414,10 +1429,10 @@ PHASE is `recovery'."
    (list
     (if recovery-error
         (format "Mutation batch failed (%s); recovery also failed (%s); outcome is uncertain"
-                (error-message-string original-error)
-                (error-message-string recovery-error))
+                (clutch-db--error-message original-error)
+                (clutch-db--error-message recovery-error))
       (format "Mutation batch commit failed (%s); commit outcome is uncertain"
-              (error-message-string original-error)))
+              (clutch-db--error-message original-error)))
     :phase phase
     :original original-error
     :recovery recovery-error)))
@@ -1629,7 +1644,7 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
                        (funcall callback (apply fn conn args))
                      (error
                       (when errback
-                        (funcall errback (error-message-string err)))))
+                        (funcall errback (clutch-db--error-message err)))))
                  (remhash conn clutch-db--idle-metadata-connections)))
            (when errback
              (funcall errback "Connection closed")))))

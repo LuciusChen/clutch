@@ -379,7 +379,7 @@ transaction included, so a COMMIT tag committed the path."
         (funcall thunk))
     (pgsql-error
      (signal 'clutch-db-error
-             (list (error-message-string err))))))
+             (list (clutch-db--error-message err))))))
 
 ;;;; Connect function
 
@@ -434,7 +434,7 @@ backend such as XTDB that speaks the PostgreSQL protocol."
        (when client
          (pgsql-disconnect client))
        (signal 'clutch-db-error
-               (list (error-message-string err)))))))
+               (list (clutch-db--error-message err)))))))
 
 (defun clutch-db-pg--rewrite-param-sql (sql &optional param-count)
   "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form.
@@ -795,7 +795,7 @@ Decline when the installed pgsql.el cannot execute asynchronously."
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error
                         (list 'clutch-db-error
-                              (error-message-string error))))))))
+                              (clutch-db--error-message error))))))))
     t))
 
 (cl-defmethod clutch-db-delimited-export-async
@@ -830,7 +830,7 @@ COPY."
                      (and result (clutch-db-pg--wrap-result conn result))
                      (and error
                           (list 'clutch-db-error
-                                (error-message-string error))))))))
+                                (clutch-db--error-message error))))))))
       t)))
 
 (cl-defmethod clutch-db-execute-params
