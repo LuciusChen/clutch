@@ -108,7 +108,7 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 (defun clutch-db-mysql--timeout-error-message (err recovered)
   "Return a user-facing timeout message for ERR.
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
-  (concat (error-message-string err)
+  (concat (clutch-db--error-message err)
           (if recovered
               "; interrupted running query and restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
@@ -281,7 +281,7 @@ itself succeeded."
            (clutch-db-mysql--handle-query-timeout conn timeout)))
       ((clutch-db-error mysql-error)
        (message "Could not read the current database back: %s"
-                (error-message-string err))))))
+                (clutch-db--error-message err))))))
 
 ;;;; Lifecycle methods
 
@@ -336,7 +336,7 @@ itself succeeded."
       (mysql-query conn "SET NAMES utf8mb4")
     (mysql-error
      (signal 'clutch-db-error
-             (list (format "Init failed: %s" (error-message-string err)))))))
+             (list (format "Init failed: %s" (clutch-db--error-message err)))))))
 
 (cl-defmethod clutch-db-eager-schema-refresh-p ((_conn mysql-conn))
   "MySQL schema refresh should not block connect."
@@ -409,8 +409,7 @@ AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
     (mysql-timeout
      (clutch-db-mysql--handle-query-timeout conn err))
     (mysql-error
-     (signal 'clutch-db-error
-             (list (error-message-string err))))))
+     (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 (cl-defmethod clutch-db-query-async ((conn mysql-conn) sql callback)
   "Start SQL on MySQL CONN and pass the outcome to CALLBACK.
@@ -426,7 +425,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
          (funcall callback
                   (and result (clutch-db-mysql--wrap-result result))
                   (and error
-                       (list 'clutch-db-error (error-message-string error)))))))
+                       (cons 'clutch-db-error (clutch-db--error-data error)))))))
     t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
@@ -472,8 +471,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
     (when timeout-error
       (clutch-db-mysql--handle-query-timeout conn timeout-error stmt))
     (if pending-error
-        (signal 'clutch-db-error
-                (list (error-message-string pending-error)))
+        (signal 'clutch-db-error (clutch-db--error-data pending-error))
       result)))
 
 ;;;; SQL dialect methods
