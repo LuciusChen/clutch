@@ -2082,7 +2082,8 @@ Backends may add cheap, caller-facing metadata used by object pickers.")
 
 (cl-defgeneric clutch-db-object-browse-query (conn entry)
   "Return query-console text to browse object ENTRY on CONN.
-Return nil when CONN does not provide a backend-specific browse query.")
+Return nil to browse it with SQL, as `SELECT * FROM' its name; a backend
+that does not run SQL defines a method.")
 
 (cl-defmethod clutch-db-object-browse-query ((_conn t) _entry)
   "Default: object browsing is built by the Clutch UI."
