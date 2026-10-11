@@ -8374,7 +8374,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
   (let* ((dir (make-temp-file "clutch-export-test-" t))
          (path (expand-file-name (concat "out.csv" suffix) dir))
          (target (when target-suffix (concat "target.csv" target-suffix)))
-         (rows '((1 "中文,a") (2 "x\ny") (3 "z\uFEFF😀"))))
+         (rows '((1 "中文,a") (2 "x\ny") (3 "z\uFEFF😀")))
+         ;; Write each batch on its own, so later ones take the appending
+         ;; coding system.
+         (clutch-result--export-write-size 0))
     (unwind-protect
         (with-temp-buffer
           (auto-compression-mode 1)
@@ -8443,6 +8446,38 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 (ert-deftest clutch-test-streamed-export-preserves-content-and-file ()
   "Check ordinary-file encoding, batching and failure preservation."
   (clutch-test--check-file-export ""))
+
+(ert-deftest clutch-test-file-export-writes-collected-batches-together ()
+  "File export writes its batches once enough text has collected.
+Each write opens the file and creates and deletes its lock file, so a
+stream that wrote each small part, one per network read, was slow."
+  (let* ((dir (make-temp-file "clutch-export-writes-" t))
+         (path (expand-file-name "out.csv" dir))
+         (clutch-result--export-write-size 8)
+         (writes 0)
+         (count-write (lambda (start &rest _)
+                        ;; `make-temp-file' first writes an empty string.
+                        (unless (equal start "") (cl-incf writes)))))
+    (advice-add 'write-region :before count-write)
+    (unwind-protect
+        (progn
+          (clutch-result--write-export-file
+           'csv (cdr (assq 'csv clutch--result-export-kinds)) path #'ignore
+           :coding 'utf-8-with-signature
+           :map-batches (lambda (emit done)
+                          (dolist (part '("id\n" "1\n" "2\n" "3\n" "4\n" "5\n"))
+                            (funcall emit part 1))
+                          (funcall done nil)))
+          ;; Nine characters reach the write size; the rest wait for the end.
+          (should (= writes 2))
+          (should (equal (with-temp-buffer
+                           (set-buffer-multibyte nil)
+                           (insert-file-contents-literally path)
+                           (buffer-string))
+                         (encode-coding-string "id\n1\n2\n3\n4\n5\n"
+                                               'utf-8-with-signature))))
+      (advice-remove 'write-region count-write)
+      (delete-directory dir t))))
 
 (ert-deftest clutch-test-file-export-preserves-compression ()
   "Check gzip encoding, batching and failure preservation."
