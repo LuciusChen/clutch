@@ -1643,11 +1643,15 @@ fails signals before any SQL is sent."
                            (format "\\`Statement %d failed: .*%s"
                                    statement-index missing)
                            (cadr signaled)))
-                  (with-current-buffer result
-                    (should (string-match-p missing (buffer-string))))
                   (let* ((details clutch--buffer-error-details)
                          (diag (plist-get details :diag))
                          (debug-text (clutch-test--debug-buffer-string)))
+                    ;; The page leads with the summary of the database's message.
+                    (with-current-buffer result
+                      (should (string-prefix-p
+                               (clutch--humanize-db-error
+                                (plist-get diag :raw-message))
+                               (buffer-string))))
                     (should (eq (plist-get details :backend) 'sqlite))
                     (should (string-match-p missing
                                             (plist-get diag :raw-message)))
