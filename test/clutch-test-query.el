@@ -334,7 +334,9 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
   (let* ((dir (make-temp-file "clutch-export-test-" t))
          (path (expand-file-name (concat "out.csv" suffix) dir))
          (target (when target-suffix (concat "target.csv" target-suffix)))
-         (rows '((1 "中文,a") (2 "x\ny") (3 "z\uFEFF😀"))))
+         (rows '((1 "中文,a") (2 "x\ny") (3 "z\uFEFF😀")))
+         ;; Force separate writes here to check the appending coding system.
+         (clutch-result--export-write-size 0))
     (unwind-protect
         (with-temp-buffer
           (auto-compression-mode 1)
@@ -794,14 +796,18 @@ connection."
 
 (ert-deftest clutch-test-query-export-streams-when-the-backend-can ()
   "Direct export streams formatted text when the backend offers it.
-It sends no paged query, writes each part in the chosen encoding and
-reports the rows the backend counted, and a failed or cancelled stream
-leaves the destination and no temporary file behind."
-  (dolist (outcome '(success error cancelled))
-    (ert-info ((symbol-name outcome))
+It sends no paged query, asks for the format's delimiter, writes each part
+in the chosen encoding and reports the rows the backend counted, and a
+failed or cancelled stream leaves the destination and no temporary file
+behind."
+  (pcase-dolist (`(,outcome ,kind)
+                 '((success "tsv") (error "tsv") (cancelled "tsv")
+                   (success "csv")))
+    (ert-info ((format "%s %s" outcome kind))
       (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
              (path (expand-file-name "out.tsv" dir))
              (source (generate-new-buffer " *clutch-query-export*"))
+             (clutch-csv-delimiter ?\;)
              stream interrupted messages)
         (unwind-protect
             (clutch-test--with-async-statements finishes
@@ -821,13 +827,14 @@ leaves the destination and no temporary file behind."
                           ((symbol-function 'message)
                            (lambda (format &rest arguments)
                              (push (apply #'format format arguments) messages))))
-                  (clutch-test--with-minibuffer-answers '("tsv" "utf-8-bom")
+                  (clutch-test--with-minibuffer-answers (list kind "utf-8-bom")
                     (clutch-export-query (point-min) (point-max)))
                   (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
                                        ,function ,callback)
                                stream))
                     (should (equal (list conn sql delimiter header null-text)
-                                   (list 'async-conn "SELECT id, name FROM t" ?\t t
+                                   (list 'async-conn "SELECT id, name FROM t"
+                                         (if (equal kind "tsv") ?\t ?\;) t
                                          clutch-export-null-value-text)))
                     (funcall function "id\tname\n1\ta\n" 1)
                     (funcall function "2\t中文\n" 1)
@@ -3505,6 +3512,36 @@ here exercises the asynchronous refresh a non-eager backend gets."
                        '(("users"))))
         (should (eq (plist-get (clutch--schema-status-entry conn) :state)
                     'stale))))))
+
+(ert-deftest clutch-test-file-export-writes-collected-batches-together ()
+  "File export writes its batches once enough text has collected.
+Each write opens the file and creates and deletes its lock file, so a
+stream that wrote each small part, one per network read, was slow."
+  (let* ((dir (make-temp-file "clutch-export-writes-" t))
+         (path (expand-file-name "out.csv" dir))
+         (clutch-result--export-write-size 8)
+         (writes 0)
+         (count-write (lambda (&rest _) (cl-incf writes))))
+    (advice-add 'write-region :before count-write)
+    (unwind-protect
+        (progn
+          (clutch-result--write-export-file
+           'csv (cdr (assq 'csv clutch--result-export-kinds)) path #'ignore
+           :coding 'utf-8-with-signature
+           :map-batches (lambda (emit done)
+                          (dolist (part '("id\n" "1\n" "2\n" "3\n" "4\n" "5\n"))
+                            (funcall emit part 1))
+                          (funcall done nil)))
+          ;; Nine characters reach the write size; the rest wait for the end.
+          (should (= writes 2))
+          (should (equal (with-temp-buffer
+                           (set-buffer-multibyte nil)
+                           (insert-file-contents-literally path)
+                           (buffer-string))
+                         (encode-coding-string "id\n1\n2\n3\n4\n5\n"
+                                               'utf-8-with-signature))))
+      (advice-remove 'write-region count-write)
+      (delete-directory dir t))))
 
 (provide 'clutch-test-query)
 
