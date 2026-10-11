@@ -28,6 +28,8 @@ This runs the main and backend ERT suites, byte compilation, package-lint, check
 
 During iteration, use the affected target or selector from [README](README.md#testing). The full gate is for code/test commits; documentation-only work uses diff and reference checks instead.
 
+Query workflow tests can use `clutch-test-conn` from `test/clutch-test-common.el`: its `:queries` queue holds `(SQL . RESPONSE)` pairs in execution order, where a response is a result or a function of the connection for execution faults. Unexpected SQL fails; assert that expected queues are consumed so a missing query fails too. Keep connection liveness and commit mode in the fixture, and use focused stubs for construction, timing, faults and UI input rather than replacing the query runner or session cleanup. See the reconnect and REPL tests for examples.
+
 ## Dependency and surface checks
 
 For code commits, check the applicable boundaries below. A clean search has no matches (rg exit status 1). Inspect a match against the contract rather than deleting legitimate code blindly. The architecture suite checks module dependencies; these searches also cover external private APIs and public configuration/documentation residue.
