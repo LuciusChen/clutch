@@ -163,7 +163,9 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
        (unwind-protect
            (progn ,@body)
          (when-let* ((buf (get-buffer clutch-test--result-name)))
-           (kill-buffer buf))))))
+           (with-current-buffer buf
+             (let ((kill-buffer-query-functions nil))
+               (kill-buffer buf))))))))
 
 (defun clutch-test--execute-live-select (conn sql)
   "Execute SQL through the result UI path for live connection CONN."
@@ -3166,6 +3168,11 @@ A quote inside the CTE's quoted name must not hide the modification."
                         (when (buffer-live-p record-buf)
                           (kill-buffer record-buf)))))
                   (should clutch--pending-edits)
+                  (let ((staged clutch--pending-edits))
+                    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+                      (should-not (kill-buffer (current-buffer))))
+                    (should (buffer-live-p (get-buffer result-name)))
+                    (should (equal clutch--pending-edits staged)))
                   (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
                   (should (equal (clutch-test--live-row-prefix-strings

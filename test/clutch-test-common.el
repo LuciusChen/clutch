@@ -405,7 +405,9 @@ SPEC has the same shape as `clutch-test--init-result-state'."
              (clutch-test--init-result-state (list ,@spec)))
            ,@body)
        (when (buffer-live-p ,var)
-         (kill-buffer ,var)))))
+         (with-current-buffer ,var
+           (let ((kill-buffer-query-functions nil))
+             (kill-buffer ,var)))))))
 
 (defmacro clutch-test--with-result-buffer (spec &rest body)
   "Run BODY with result rendering isolated to buffer NAME.
@@ -424,7 +426,9 @@ REFRESH-FN, when non-nil, replaces `clutch--refresh-display'."
          (unwind-protect
              (progn ,@body)
            (when-let* ((buf (get-buffer clutch-test--result-name)))
-             (kill-buffer buf)))))))
+             (with-current-buffer buf
+               (let ((kill-buffer-query-functions nil))
+                 (kill-buffer buf)))))))))
 
 (defun clutch-test--setup-rendered-result (&optional rows)
   "Populate the current buffer with a rendered three-column result table.
@@ -528,7 +532,10 @@ both buffers, and stop the refresh timer, even when BODY fails."
                  (set-window-buffer (selected-window) ,result)
                  (with-current-buffer ,result ,@body))
              (clutch--execution-refresh-stop)
-             (when (buffer-live-p ,result) (kill-buffer ,result))
+             (when (buffer-live-p ,result)
+               (with-current-buffer ,result
+                 (let ((kill-buffer-query-functions nil))
+                   (kill-buffer ,result))))
              (when (buffer-live-p ,source) (kill-buffer ,source))
              (when (clutch-db-live-p ,conn) (clutch-db-disconnect ,conn)))
            (should-not clutch--execution-refresh-timer))))))
@@ -545,7 +552,9 @@ both buffers, and stop the refresh timer, even when BODY fails."
                         ,popped)))
              ,@body)
          (when (and ,var (buffer-live-p ,var))
-           (kill-buffer ,var))))))
+           (with-current-buffer ,var
+             (let ((kill-buffer-query-functions nil))
+               (kill-buffer ,var))))))))
 
 (defmacro clutch-test--with-insert-result-buffer (var spec &rest body)
   "Bind VAR to a result buffer initialized for insert tests by SPEC."

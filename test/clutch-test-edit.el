@@ -897,6 +897,52 @@ redraw."
           (clutch-result-discard-pending-at-point)
           (should-not (symbol-value state)))))))
 
+(ert-deftest clutch-test-kill-result-confirms-staged-changes ()
+  "Closing a result preserves staged changes unless their discard is confirmed."
+  (dolist (spec '((:pending-edits ((([1] . 1) . "changed")))
+                  (:pending-deletes ([1]))
+                  (:pending-inserts ((("name" . "new"))))
+                  ()))
+    (ert-info ((format "staged state: %S" spec))
+      (let ((buf (generate-new-buffer " *clutch-kill-result-test*")))
+        (unwind-protect
+            (with-current-buffer buf
+              (clutch-test--init-result-state spec)
+              (let ((before (list clutch--pending-edits
+                                  clutch--pending-deletes
+                                  clutch--pending-inserts))
+                    (prompts 0))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (_) (cl-incf prompts) nil)))
+                  (if spec
+                      (progn
+                        (should-not (kill-buffer buf))
+                        (should (buffer-live-p buf))
+                        (should (equal before
+                                       (list clutch--pending-edits
+                                             clutch--pending-deletes
+                                             clutch--pending-inserts))))
+                    (should (kill-buffer buf))))
+                (should (= prompts (if spec 1 0)))
+                (when spec
+                  (cl-letf (((symbol-function 'yes-or-no-p)
+                             (lambda (_) (signal 'quit nil))))
+                    (should (eq (condition-case nil
+                                    (kill-buffer buf)
+                                  (quit 'cancelled))
+                                'cancelled)))
+                  (should (buffer-live-p buf))
+                  (should (equal before
+                                 (list clutch--pending-edits
+                                       clutch--pending-deletes
+                                       clutch--pending-inserts)))
+                  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+                    (should (kill-buffer buf))))))
+          (when (buffer-live-p buf)
+            (with-current-buffer buf
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buf)))))))))
+
 (ert-deftest clutch-test-check-pending-changes-blocks-when-deletes-pending ()
   "`clutch-result--check-pending-changes' should signal when discard is declined."
   (clutch-test--with-sqlite-result (conn result)
@@ -1558,7 +1604,9 @@ from closing."
             (should (= (get-text-property (point) 'clutch-col-idx) 4))
             (should (= (window-hscroll) 40)))
         (when (buffer-live-p result-buf)
-          (kill-buffer result-buf))
+          (with-current-buffer result-buf
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer result-buf))))
         (when (buffer-live-p edit-buf)
           (kill-buffer edit-buf))))))
 
