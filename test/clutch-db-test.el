@@ -4834,31 +4834,23 @@ retired after a quit came back in Auto mode."
       (should (eq (clutch-db-pg--type-category oid) expected)))))
 
 (ert-deftest clutch-db-test-pg-convert-columns ()
-  "Test PostgreSQL column conversion."
+  "PostgreSQL column conversion should preserve names, categories and types."
   (require 'clutch-db-pg)
-  (let* ((pg-cols '((:name "id" :type-oid 23)
+  (let* ((pg-cols `((:name "id" :type-oid 23)
                     (:name "data" :type-oid 3802)
-                    (:name "created" :type-oid 1114)))
+                    (:name "created" :type-oid 1114)
+                    (:name "precision" :type-oid ,clutch-db-test--pg-oid-int4-array)))
          (converted (clutch-db-pg--result-columns
                      (clutch-db-test--make-pg-connection) pg-cols)))
-    (should (= (length converted) 3))
-    (should (equal (plist-get (nth 0 converted) :name) "id"))
-    (should (eq (plist-get (nth 0 converted) :type-category) 'numeric))
-    (should (equal (plist-get (nth 1 converted) :name) "data"))
-    (should (eq (plist-get (nth 1 converted) :type-category) 'json))
-    (should (equal (plist-get (nth 2 converted) :name) "created"))
-    (should (eq (plist-get (nth 2 converted) :type-category) 'datetime))))
-
-(ert-deftest clutch-db-test-pg-convert-columns-preserves-backend-type ()
-  "PostgreSQL column conversion should keep backend type metadata."
-  (require 'clutch-db-pg)
-  (let ((converted
-         (clutch-db-pg--result-columns
-          (clutch-db-test--make-pg-connection)
-          `((:name "precision"
-             :type-oid ,clutch-db-test--pg-oid-int4-array)))))
-    (should (equal (plist-get (car converted) :name) "precision"))
-    (should (equal (plist-get (car converted) :backend-type) "_int4"))))
+    (should (= (length converted) 4))
+    (cl-loop for column in converted
+             for (name category) in '(("id" numeric) ("data" json)
+                                      ("created" datetime))
+             do (ert-info (name)
+                  (should (equal (plist-get column :name) name))
+                  (should (eq (plist-get column :type-category) category))))
+    (should (equal (plist-get (nth 3 converted) :name) "precision"))
+    (should (equal (plist-get (nth 3 converted) :backend-type) "_int4"))))
 
 (ert-deftest clutch-db-test-pg-array-params-use-postgresql-literals ()
   "PostgreSQL array params should render and execute as array literals."
@@ -5485,20 +5477,27 @@ out, which broke the Oracle statement and left SQL Server unpaged."
     (should (equal (clutch-db-display-name conn) "MySQL"))))
 
 (ert-deftest clutch-db-test-mysql-symbol-help-parses-help-result ()
-  "MySQL HELP parsing should live behind the backend interface."
+  "MySQL HELP should parse descriptions and escape its lookup argument."
   (require 'clutch-db-mysql)
-  (let ((conn (make-mysql-conn :host "localhost"))
-        captured-sql)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-mysql-result
-                  :rows '(("ABS"
-                           "Syntax:\n\nABS(X)\n\nReturns absolute value.\nURL: https://example.invalid"
-                           ""))))))
-      (should (equal (clutch-db-symbol-help conn "abs")
-                     '(:sig "ABS(X)" :desc "Returns absolute value.")))
-      (should (equal captured-sql "HELP 'ABS'")))))
+  (require 'mysql)
+  (pcase-dolist
+      (`(,symbol ,rows ,expected-sql ,expected)
+       `(("abs"
+          (("ABS"
+            "Syntax:\n\nABS(X)\n\nReturns absolute value.\nURL: https://example.invalid"
+            ""))
+          "HELP 'ABS'" (:sig "ABS(X)" :desc "Returns absolute value."))
+         ("x' UNION SELECT 1 -- " nil
+          ,(concat "HELP " (mysql-escape-literal "X' UNION SELECT 1 -- ")) nil)))
+    (ert-info (symbol)
+      (let ((conn (make-mysql-conn :host "localhost"))
+            captured-sql)
+        (cl-letf (((symbol-function 'mysql-query)
+                   (lambda (_conn sql)
+                     (setq captured-sql sql)
+                     (make-mysql-result :rows rows))))
+          (should (equal (clutch-db-symbol-help conn symbol) expected))
+          (should (equal captured-sql expected-sql)))))))
 
 (ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
   "MySQL table discovery should return comments with table entries."
@@ -9702,21 +9701,6 @@ that file, or in a new, empty in-memory database, without a word."
        (clutch-db-list-schemas
         (make-clutch-jdbc-conn
          :params '(:driver jdbc :url "jdbc:duckdb:")))))))
-
-(ert-deftest clutch-db-test-mysql-symbol-help-escapes-symbol ()
-  "MySQL HELP lookup should escape the symbol instead of interpolating it."
-  (require 'clutch-db-mysql)
-  (require 'mysql)
-  (let ((conn (make-mysql-conn :host "localhost"))
-        captured-sql)
-    (cl-letf (((symbol-function 'mysql-query)
-               (lambda (_conn sql)
-                 (setq captured-sql sql)
-                 (make-mysql-result :rows nil))))
-      (clutch-db-symbol-help conn "x' UNION SELECT 1 -- ")
-      (should (equal captured-sql
-                     (concat "HELP "
-                             (mysql-escape-literal "X' UNION SELECT 1 -- ")))))))
 
 (ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
   "MySQL timeout recovery should cover query and prepared execution paths."
