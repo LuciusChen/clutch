@@ -92,23 +92,16 @@
       (ert-info ((symbol-name label))
         (let ((clutch--connection-transport-cache
                (make-hash-table :test 'eq))
-              (conn 'fake-conn))
+              (conn (make-clutch-test-conn
+                     :backend backend
+                     :params (list :user user :host host :port port
+                                   :database database))))
           (when remote
             (puthash conn remote clutch--connection-transport-cache))
-          (cl-letf (((symbol-function 'clutch-db-backend-key)
-                     (lambda (_conn) backend))
-                    ((symbol-function 'clutch-db-user)
-                     (lambda (_conn) user))
-                    ((symbol-function 'clutch-db-host)
-                     (lambda (_conn) host))
-                    ((symbol-function 'clutch-db-port)
-                     (lambda (_conn) port))
-                    ((symbol-function 'clutch-db-database)
-                     (lambda (_conn) database)))
-            (when expected-key
-              (should (equal (clutch--connection-key conn) expected-key)))
-            (should (equal (clutch--connection-display-key conn)
-                           expected-display))))))))
+          (when expected-key
+            (should (equal (clutch--connection-key conn) expected-key)))
+          (should (equal (clutch--connection-display-key conn)
+                         expected-display)))))))
 
 (ert-deftest clutch-test-prepare-origin-params-contract ()
   "TRAMP source origin inference should obey policy and transport constraints."
@@ -1723,13 +1716,14 @@ commit an empty transaction instead of reporting the loss."
 (ert-deftest clutch-test-session-teardown-releases-transport-when-close-fails ()
   "A failing backend disconnect must still release the transport."
   (clutch-test--with-isolated-metadata-caches
-    (let ((conn (make-clutch-test-conn))
+    (let ((conn (make-clutch-test-conn
+                 :on-disconnect
+                 (lambda (_conn)
+                   (signal 'clutch-db-error '("close failed")))))
           (clutch--connection-transport-cache (make-hash-table :test 'eq)))
       (puthash conn '(:host "db" :port 1) clutch--connection-transport-cache)
-      (cl-letf (((symbol-function 'clutch-db-disconnect)
-                 (lambda (_conn) (signal 'clutch-db-error '("close failed")))))
-        (should-error (clutch--do-disconnect conn) :type 'clutch-db-error)
-        (should-not (gethash conn clutch--connection-transport-cache))))))
+      (should-error (clutch--do-disconnect conn) :type 'clutch-db-error)
+      (should-not (gethash conn clutch--connection-transport-cache)))))
 
 (ert-deftest clutch-test-transaction-commands-refuse-a-dead-session ()
   "Transaction commands must not run on a replacement of a dead session.
@@ -2646,42 +2640,46 @@ it is quit."
                    ("quit while disconnecting the orphan"
                     signal quit quit t)))
     (ert-info (label)
-      (let ((alive '(old-conn new-conn))
-            (builds 0)
-            released rebound disconnected)
-        (cl-letf (((symbol-function 'clutch--build-conn)
-                   (lambda (_params) (cl-incf builds) 'new-conn))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (memq conn alive)))
-                  ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                  ((symbol-function 'clutch-db-disconnect)
+      (let* (disconnected
+             (new (make-clutch-test-conn
+                   :on-disconnect
                    (lambda (conn)
-                     (if (eq conn 'old-conn)
-                         (pcase old-teardown
-                           ('kill-new (setq alive '(old-conn)))
-                           ('signal
-                            (signal 'clutch-db-error '("old teardown failed")))
-                           ('kill-all-and-signal
-                            (setq alive nil)
-                            (signal 'clutch-db-error '("old teardown failed"))))
-                       (setq disconnected conn)
-                       (when (eq new-teardown 'quit)
-                         (signal 'quit nil)))))
-                  ((symbol-function 'clutch--release-connection-transport)
-                   (lambda (conn) (push conn released)))
-                  ((symbol-function 'clutch--rebind-connection-buffers)
-                   (lambda (&rest _args) (setq rebound t))))
-          (should (eq (car (condition-case err
-                               (progn (clutch--replace-connection
-                                       'old-conn '(:backend pg) 'pg)
-                                      nil)
-                             ((error quit) err)))
-                      error))
+                     (setq disconnected conn)
+                     (when (eq new-teardown 'quit)
+                       (signal 'quit nil)))))
+             (old (make-clutch-test-conn
+                   :on-disconnect
+                   (lambda (conn)
+                     (pcase old-teardown
+                       ('kill-new (setf (clutch-test-conn-live new) nil))
+                       ('signal
+                        (signal 'clutch-db-error '("old teardown failed")))
+                       ('kill-all-and-signal
+                        (setf (clutch-test-conn-live conn) nil
+                              (clutch-test-conn-live new) nil)
+                        (signal 'clutch-db-error '("old teardown failed")))))))
+             (clutch--connection-transport-cache (make-hash-table :test 'eq))
+             (clutch--tx-state-cache (make-hash-table :test 'eq))
+             (builds 0))
+        (dolist (conn (list old new))
+          (puthash conn '(:host "db" :port 1)
+                   clutch--connection-transport-cache))
+        (with-temp-buffer
+          (setq-local clutch-connection old)
+          (cl-letf (((symbol-function 'clutch--build-conn)
+                     (lambda (_params) (cl-incf builds) new)))
+            (should (eq (car (condition-case err
+                                 (progn (clutch--replace-connection
+                                         old '(:backend pg) 'pg)
+                                        nil)
+                               ((error quit) err)))
+                        error)))
           (should (= builds 1))
-          (should-not rebound)
-          (should (eq disconnected (and new-closed 'new-conn)))
-          (should (memq 'new-conn released))
-          (should (memq 'old-conn released)))))))
+          (should (eq clutch-connection old))
+          (should (eq disconnected (and new-closed new)))
+          (should (eq (clutch-db-live-p new) (eq new-teardown 'quit)))
+          (should-not (gethash new clutch--connection-transport-cache))
+          (should-not (gethash old clutch--connection-transport-cache)))))))
 
 (ert-deftest clutch-test-derived-buffers-reconnect-using-inherited-context ()
   "Derived buffers reconnect their logical session without losing local state."
@@ -2736,24 +2734,19 @@ it is quit."
 
 (ert-deftest clutch-test-connect-failure-preserves-old-live-connection ()
   "Interactive connect should not drop the old live session on failure."
-  (let ((clutch-connection 'old-conn)
-        disconnected)
+  (let ((old (make-clutch-test-conn)))
     (with-temp-buffer
-      (setq-local clutch-connection 'old-conn)
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (_conn) t))
-                ((symbol-function 'clutch--confirm-session-close)
-                 #'ignore)
-                ((symbol-function 'clutch--read-connection-params)
-                 (lambda () '(:backend mysql :database "newdb")))
-                ((symbol-function 'clutch--build-conn)
+      (setq-local clutch-connection old
+                  clutch--console-name "candidate"
+                  clutch--console-ad-hoc-params
+                  '(:backend mysql :database "newdb" :password "secret"))
+      (cl-letf (((symbol-function 'clutch--build-conn)
                  (lambda (_params)
-                   (signal 'clutch-db-error '("connect failed"))))
-                ((symbol-function 'clutch-db-disconnect)
-                 (lambda (_conn) (setq disconnected t))))
-        (should-error (clutch-connect) :type 'clutch-db-error)
-        (should (eq clutch-connection 'old-conn))
-        (should-not disconnected)))))
+                   (signal 'clutch-db-error '("connect failed")))))
+        (should (equal (should-error (clutch-connect) :type 'clutch-db-error)
+                       '(clutch-db-error "connect failed")))
+        (should (eq clutch-connection old))
+        (should (clutch-db-live-p old))))))
 
 (ert-deftest clutch-test-connect-discards-a-candidate-it-cannot-activate ()
   "`clutch-connect' should discard a candidate it cannot activate, without retrying.
@@ -2764,33 +2757,33 @@ orphan the new connection."
                  '(("the candidate died during the old teardown" nil nil)
                    ("the old teardown signals" t t)))
     (ert-info (label)
-      (let (built released disconnected activated)
-        (with-temp-buffer
-          (setq-local clutch-connection 'old-conn)
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (if (eq conn 'new-conn) new-alive t)))
-                    ((symbol-function 'clutch--connect-params-for-current-buffer)
-                     (lambda () '(:backend jdbc :database "newdb")))
-                    ((symbol-function 'clutch--effective-sql-product)
-                     (lambda (_params) 'jdbc))
-                    ((symbol-function 'clutch--build-conn)
-                     (lambda (params) (push params built) 'new-conn))
-                    ((symbol-function 'clutch--do-disconnect)
+      (clutch-test--with-isolated-metadata-caches
+        (let* (disconnected
+               (new (make-clutch-test-conn
+                     :on-disconnect (lambda (conn) (setq disconnected conn))))
+               (old (make-clutch-test-conn
+                     :on-disconnect
                      (lambda (_conn)
-                       (when old-teardown-signals
-                         (signal 'clutch-db-error '("old teardown failed")))))
-                    ((symbol-function 'clutch-db-disconnect)
-                     (lambda (conn) (setq disconnected conn)))
-                    ((symbol-function 'clutch--release-connection-transport)
-                     (lambda (conn) (push conn released)))
-                    ((symbol-function 'clutch--activate-current-buffer-connection)
-                     (lambda (conn params product)
-                       (setq activated (list conn params product)))))
-            (should-error (clutch-connect) :type 'clutch-db-error)
-            (should (equal built '((:backend jdbc :database "newdb"))))
-            (should-not activated)
-            (should (eq disconnected (and new-alive 'new-conn)))
-            (should (memq 'new-conn released))))))))
+                       (if old-teardown-signals
+                           (signal 'clutch-db-error '("old teardown failed"))
+                         (setf (clutch-test-conn-live new) nil)))))
+               (params '(:backend mysql :database "newdb" :password "secret"))
+               (clutch--connection-transport-cache (make-hash-table :test 'eq))
+               built)
+          (puthash new '(:host "db" :port 1)
+                   clutch--connection-transport-cache)
+          (with-temp-buffer
+            (setq-local clutch-connection old
+                        clutch--console-name "candidate"
+                        clutch--console-ad-hoc-params params)
+            (cl-letf (((symbol-function 'clutch--build-conn)
+                       (lambda (actual) (push actual built) new)))
+              (should-error (clutch-connect) :type 'clutch-db-error))
+            (should (equal built (list params)))
+            (should (eq clutch-connection old))
+            (should (eq disconnected (and new-alive new)))
+            (should-not (clutch-db-live-p new))
+            (should-not (gethash new clutch--connection-transport-cache))))))))
 
 (defmacro clutch-test--with-connect-build-stubs (spec &rest body)
   "Run BODY with connection construction recorded.
@@ -2941,30 +2934,29 @@ carried onto it."
 
 (ert-deftest clutch-test-connect-resolves-password-once ()
   "Interactive connect should not query the password source twice."
-  (with-temp-buffer
-    (let ((clutch-connection-alist
-           '(("alpha" . (:backend mysql :database "app_a"))))
-          (resolve-count 0)
-          captured-params)
+  (let ((clutch-connection-alist
+         '(("alpha" . (:backend mysql :database "app_a"))))
+        (clutch--connection-transport-cache (make-hash-table :test 'eq))
+        (conn (make-clutch-test-conn :backend 'mysql))
+        (resolve-count 0)
+        captured-params)
+    (with-temp-buffer
       (setq-local clutch--console-name "alpha")
-      (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                 (lambda (conn) (eq conn 'new-conn)))
-                ((symbol-function 'clutch--resolve-password)
+      (cl-letf (((symbol-function 'clutch--resolve-password)
                  (lambda (_params)
                    (cl-incf resolve-count)
                    "secret"))
                 ((symbol-function 'clutch-db-connect)
-                 (lambda (_backend params)
+                 (lambda (backend params)
+                   (should (eq backend 'mysql))
                    (setq captured-params params)
-                   'new-conn))
-                ((symbol-function 'clutch--connection-key)
-                 (lambda (_conn) "test-conn"))
-                ((symbol-function 'clutch--prime-schema-cache) #'ignore)
-                ((symbol-function 'clutch--update-mode-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
+                   (setf (clutch-test-conn-params conn) params)
+                   conn))
+                ((symbol-function 'clutch--prime-schema-cache) #'ignore))
         (clutch-connect)
         (should (= resolve-count 1))
-        (should (equal (plist-get captured-params :password) "secret"))))))
+        (should (equal (plist-get captured-params :password) "secret"))
+        (should (eq clutch-connection conn))))))
 
 (ert-deftest clutch-test-query-console-does-not-create-buffer-on-connect-failure ()
   "Query console should not create a visible buffer before connect succeeds."
