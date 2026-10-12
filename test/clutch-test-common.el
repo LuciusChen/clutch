@@ -43,6 +43,10 @@ features such as DEFAULT in an UPDATE."
   "Return the backend CONN declares, or nil."
   (clutch-test-conn-backend conn))
 
+(cl-defmethod clutch-db-busy-p ((_conn clutch-test-conn))
+  "Return nil, as the scripted test connection executes synchronously."
+  nil)
+
 (cl-defmethod clutch-db-live-p ((conn clutch-test-conn))
   "Return whether CONN is open."
   (clutch-test-conn-live conn))

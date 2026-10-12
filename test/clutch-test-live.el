@@ -1884,6 +1884,107 @@ throughout."
 	          (should (equal (mapcar #'downcase pk-cols) '("id"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-cross-schema-completion ()
+  "Qualified completion stays in its namespace and reuses fetched metadata."
+  :tags '(:clutch-live)
+  (let* ((backend (clutch-test-live-backend-id))
+         (oracle (eq backend 'oracle))
+         (schemas (let ((name (format "clutch_c_%d" (emacs-pid))))
+                    (list name (string-replace "_" "x" name))))
+         (create (pcase backend
+                   ('mysql "CREATE DATABASE %s")
+                   ('oracle "CREATE USER %s IDENTIFIED BY \"Clutch_ns1\" QUOTA UNLIMITED ON users")
+                   ((or 'pg 'sqlserver 'duckdb) "CREATE SCHEMA %s")))
+         (drop (pcase backend
+                 ('mysql "DROP DATABASE %s")
+                 ('oracle "DROP USER %s CASCADE")
+                 ('sqlserver "DROP SCHEMA %s")
+                 (_ "DROP SCHEMA %s CASCADE"))))
+    (unless create (ert-skip "Scoped SQL completion is not supported here"))
+    (clutch-test--with-conn conn
+      (let ((original (clutch-db-resolution-context conn))
+            requests columns (checking nil) (namespace-reads 0))
+        (cl-labels ((namespace-call (&rest _)
+                      (when checking (cl-incf namespace-reads)))
+                    (tables-call (_conn schema &rest _)
+                      (push schema requests))
+                    (columns-call (_conn table _cb &optional _err schema catalog)
+                      (push (list catalog schema table) columns))
+                    (candidates ()
+                      (setq checking t)
+                      (unwind-protect
+                          (when-let* ((capf (clutch-completion-at-point)))
+                            (all-completions "" (nth 2 capf)))
+                        (setq checking nil))))
+          (unwind-protect
+              (progn
+                (cl-loop for schema in schemas for n from 1 do
+                         (clutch-db-query conn (format create schema))
+                         (clutch-db-query
+                          conn (format "CREATE TABLE %s.peo_ple (side_value %s)"
+                                       schema (if (= n 1) "INTEGER" "VARCHAR(17)")))
+                         (clutch-db-query
+                          conn (format "CREATE TABLE %s.peoxple (wrong INTEGER)" schema)))
+                (advice-add 'clutch-db-current-schema :before #'namespace-call)
+                (advice-add 'clutch-db-schema-tables-async :before #'tables-call)
+                (advice-add 'clutch-db-list-columns-async :before #'columns-call)
+                (clutch-test--with-isolated-metadata-caches
+                  (with-temp-buffer
+                    (clutch-mode)
+                    (setq-local clutch-connection conn)
+                    (puthash conn (make-hash-table :test 'equal) clutch--schema-cache)
+                    (cl-loop for schema in schemas for n from 1 do
+                             (erase-buffer)
+                             (insert (format "SELECT * FROM %s." schema))
+                             (should-not (candidates))
+                             (clutch-test--await
+                              (lambda () (member (if oracle "PEO_PLE" "peo_ple")
+                                                 (candidates))))
+                             (dotimes (_ 10) (candidates))
+                             (should (= (length requests) n))
+                             (erase-buffer)
+                             (insert (format "SELECT p. FROM %s.peo_ple p" schema))
+                             (goto-char (point-min))
+                             (search-forward "p.")
+                             (should-not (candidates))
+                             (clutch-test--await
+                              (lambda ()
+                                (member (funcall (if oracle #'upcase #'identity)
+                                                 "side_value")
+                                        (candidates))))
+                             (should (= (length (candidates)) 1))
+                             (dotimes (_ 10) (candidates))
+                             (should (= (length columns) n))
+                             (insert (funcall (if oracle #'upcase #'identity)
+                                              "side_value"))
+                             (setq checking t)
+                             (unwind-protect (clutch--eldoc-function)
+                               (setq checking nil))
+                             (should (= namespace-reads 0))
+                             (let* ((token (concat schema ".peo_ple"))
+                                    (key (clutch--table-key
+                                          (clutch-db--source-table-name conn token)
+                                          (or (clutch-db--source-table-schema conn token)
+                                              (clutch-db-sql-table-schema token))
+                                          (clutch-db--source-table-catalog conn token))))
+                               (clutch-test--await
+                                (lambda () (clutch--column-details-cached-p conn key)))
+                               (let ((details (clutch--cached-column-details conn key)))
+                                 (should (= (length details) 1))
+                                 (should (string-match-p
+                                          (if (= n 1) "int\\|number" "varchar\\|character varying")
+                                          (downcase (plist-get (car details) :type)))))))
+                    (should (equal original (clutch-db-resolution-context conn))))))
+            (advice-remove 'clutch-db-current-schema #'namespace-call)
+            (advice-remove 'clutch-db-schema-tables-async #'tables-call)
+            (advice-remove 'clutch-db-list-columns-async #'columns-call)
+            (dolist (schema (reverse schemas))
+              (ignore-errors
+                (when (eq backend 'sqlserver)
+                  (clutch-db-query conn (format "DROP TABLE %s.peo_ple" schema))
+                  (clutch-db-query conn (format "DROP TABLE %s.peoxple" schema)))
+                (clutch-db-query conn (format drop schema))))))))))
+
 (ert-deftest clutch-test-live-completion-does-not-cache-unknown-table ()
   "Deferred native completion should not cache a parsed nonexistent table."
   :tags '(:clutch-live :native-columns-live)

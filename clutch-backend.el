@@ -1605,14 +1605,16 @@ was started, nil when unsupported.")
   "Backends without asynchronous column detail support return nil."
   nil)
 
-(cl-defgeneric clutch-db-list-columns-async (conn table callback &optional errback)
+(cl-defgeneric clutch-db-list-columns-async
+    (conn table callback &optional errback schema catalog)
   "Start an asynchronous column-name fetch for TABLE on CONN.
 CALLBACK receives the column name list on success.  ERRBACK receives an
-error message string on failure.  Return non-nil when async fetch was
-started, nil when unsupported.")
+error message string on failure.  SCHEMA and CATALOG qualify TABLE as in
+`clutch-db-column-details'.  Return non-nil when async fetch was started,
+nil when unsupported.")
 
 (cl-defmethod clutch-db-list-columns-async ((_conn t) _table _callback
-                                            &optional _errback)
+                                            &optional _errback _schema _catalog)
   "Backends without asynchronous column-name support return nil."
   nil)
 
@@ -1895,6 +1897,16 @@ deciding where literals end."
 (cl-defgeneric clutch-db-list-tables (conn)
   "Return a list of table name strings for CONN's current database.")
 
+(cl-defgeneric clutch-db-schema-tables-async (conn schema callback &optional errback)
+  "Fetch table names in SCHEMA on CONN without changing the session's schema.
+Call CALLBACK with the names, or ERRBACK with an error message.  Return
+non-nil when started, nil when unsupported.")
+
+(cl-defmethod clutch-db-schema-tables-async ((_conn t) _schema _callback
+                                             &optional _errback)
+  "Return nil for backends without scoped table completion."
+  nil)
+
 (cl-defgeneric clutch-db-list-schemas (conn)
   "Return switchable schema/database names for CONN, or nil when unsupported.")
 
@@ -2170,13 +2182,6 @@ BACKEND-NAME is used only in generated docstrings."
                 backend-name)
        (clutch-db--schedule-idle-metadata-call
         conn callback errback #'clutch-db-list-tables idle-delay))
-
-     (cl-defmethod clutch-db-list-columns-async ((conn ,type) table callback
-                                                 &optional errback)
-       ,(format "Fetch %s column names on the main thread when idle."
-                backend-name)
-       (clutch-db--schedule-idle-metadata-call
-        conn callback errback #'clutch-db-list-columns nil table))
 
      (cl-defmethod clutch-db-column-details-async ((conn ,type) table callback
                                                    &optional errback
