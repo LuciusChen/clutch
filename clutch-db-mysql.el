@@ -501,6 +501,36 @@ missed a USE or a DROP that changed the database."
        (unless (string-prefix-p "[1046]" (cadr err))
          (signal (car err) (cdr err)))))))
 
+(cl-defmethod clutch-db-list-columns-async
+    ((conn mysql-conn) table callback &optional errback schema _catalog)
+  "Fetch column names for TABLE in SCHEMA on CONN asynchronously.
+Without SCHEMA, retain the current-schema idle metadata path."
+  (if schema
+      (when (fboundp 'mysql-query-async)
+        (mysql-query-async
+         conn
+         (format "SELECT column_name FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION"
+                 (mysql-escape-literal schema) (mysql-escape-literal table))
+         (lambda (result error)
+           (if error
+               (when errback (funcall errback (clutch-db--error-message error)))
+             (funcall callback (mapcar #'car (mysql-result-rows result))))))
+        t)
+    (clutch-db--schedule-idle-metadata-call
+     conn callback errback #'clutch-db-list-columns nil table)))
+
+(cl-defmethod clutch-db-schema-tables-async
+    ((conn mysql-conn) schema callback &optional errback)
+  "Fetch MySQL table and view names in SCHEMA on CONN asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (mysql-query-async
+     conn (format "SHOW TABLES FROM %s" (mysql-escape-identifier schema))
+     (lambda (result error)
+       (if error
+           (when errback (funcall errback (clutch-db--error-message error)))
+         (funcall callback (mapcar #'car (mysql-result-rows result))))))
+    t))
+
 (cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
   "Return visible MySQL schema/database names for CONN."
   (clutch-db--translate-library-error mysql-error
@@ -712,13 +742,16 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
         comment))))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table
-                                             &optional _schema _catalog)
-  "Return primary key column names for TABLE on MySQL CONN."
+                                             &optional schema _catalog)
+  "Return primary key column names for TABLE in SCHEMA on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
     (let* ((result (mysql-query
                     conn
                     (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
-                            (mysql-escape-identifier table))))
+                            (if schema
+                                (concat (mysql-escape-identifier schema) "."
+                                        (mysql-escape-identifier table))
+                              (mysql-escape-identifier table)))))
            (rows (mysql-result-rows result)))
       (mapcar (lambda (row)
                 (pcase-let ((`(,_ ,_ ,_ ,_ ,name) row))
@@ -732,15 +765,16 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
       (clutch-db-mysql--unique-not-null-identities conn table)))
 
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
-                                      &optional _schema _catalog)
-  "Return foreign key info for TABLE on MySQL CONN.
+                                      &optional schema _catalog)
+  "Return foreign key info for TABLE in SCHEMA on MySQL CONN.
 Returns alist of (COL-NAME . (:ref-table T :ref-column C))."
   (clutch-db--translate-library-error mysql-error
     (let* ((sql (format
                    "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
+WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s \
 AND REFERENCED_TABLE_NAME IS NOT NULL"
+                   (if schema (mysql-escape-literal schema) "DATABASE()")
                    (mysql-escape-literal table)))
              (result (mysql-query conn sql))
              (rows (mysql-result-rows result)))
@@ -753,20 +787,21 @@ AND REFERENCED_TABLE_NAME IS NOT NULL"
 ;;;; Column details
 
 (cl-defmethod clutch-db-column-details ((conn mysql-conn) table
-                                        &optional _schema _catalog)
-  "Return detailed column info for TABLE on MySQL CONN."
+                                        &optional schema _catalog)
+  "Return detailed column info for TABLE in SCHEMA on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
     (let* ((col-result (mysql-query
                           conn
                           (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
 COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT \
 FROM INFORMATION_SCHEMA.COLUMNS \
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s \
+WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s \
 ORDER BY ORDINAL_POSITION"
-                                  (mysql-escape-literal table))))
+                                  (if schema (mysql-escape-literal schema) "DATABASE()")
+                   (mysql-escape-literal table))))
              (col-rows (mysql-result-rows col-result))
-             (pk-cols (clutch-db-primary-key-columns conn table))
-             (fks (clutch-db-foreign-keys conn table)))
+             (pk-cols (clutch-db-primary-key-columns conn table schema))
+             (fks (clutch-db-foreign-keys conn table schema)))
       (mapcar
        (lambda (row)
          (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))

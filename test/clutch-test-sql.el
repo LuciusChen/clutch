@@ -50,6 +50,154 @@ controls liveness and defaults to t."
          (loc (xref-item-location (car defs))))
     (xref-buffer-location-position loc)))
 
+(ert-deftest clutch-test-cross-schema-completion-keeps-sources-separate ()
+  "Qualified completion loads only its schema and keeps same-name tables apart."
+  (clutch-test--with-isolated-metadata-caches
+   (with-temp-buffer
+     (clutch-mode)
+     (setq-local clutch-connection (make-clutch-test-conn))
+     (let (requests callback)
+       (cl-letf (((symbol-function 'clutch-db-schema-tables-async)
+                  (lambda (_conn schema success &optional _error)
+                    (push schema requests)
+                    (setq callback success)
+                    t)))
+         (insert "SELECT * FROM side.")
+         (should-not (clutch-completion-at-point))
+         (should-not (clutch-completion-at-point))
+         (should (equal requests '("side")))
+         (funcall callback '("people"))
+         (let ((capf (clutch-completion-at-point)))
+           (should (equal (all-completions "" (nth 2 capf)) '("people"))))
+         (erase-buffer)
+         (insert "SELECT * FROM catalog.side.")
+         (should-not (clutch-completion-at-point))
+         (should (equal requests '("side")))
+         (clutch--set-table-metadata
+          clutch-connection '(nil "side" "people") :columns
+          '("side_value"))
+         (clutch--set-table-metadata
+          clutch-connection '(nil "other" "people") :columns
+          '("other_value"))
+         (dolist (case '(("SELECT p. FROM side.people p" "side_value")
+                         ("SELECT p. FROM other.people p" "other_value")
+                         ("SELECT side.people. FROM side.people" "side_value")
+                         ("SELECT side.people. FROM other.people o JOIN side.people s ON 1=1" "side_value")
+                         ("SELECT people. FROM side.people s JOIN other.people o ON 1=1")))
+           (erase-buffer)
+           (insert (car case))
+           (goto-char (point-min))
+           (search-forward ". ")
+           (backward-char)
+           (let ((capf (clutch-completion-at-point)))
+             (should (equal (all-completions "" (nth 2 capf))
+                            (cdr case))))))))))
+
+(ert-deftest clutch-test-qualified-completion-and-eldoc-sqlite ()
+  "Local and attached SQLite sources retain completion and column help."
+  (skip-unless (sqlite-available-p))
+  (clutch-test--with-isolated-metadata-caches
+   (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+     (unwind-protect
+         (with-temp-buffer
+           (clutch-mode)
+           (setq-local clutch-connection conn)
+           (clutch-db-query conn "CREATE TABLE people (name TEXT)")
+           (clutch-db-query conn "ATTACH ':memory:' AS other")
+           (clutch-db-query conn "CREATE TABLE other.people (other_name TEXT)")
+           (let ((schema (make-hash-table :test 'equal)))
+             (puthash "people" '("name") schema)
+             (puthash conn schema clutch--schema-cache)
+             (dolist (case '(("SELECT p. FROM main.people p" "name")
+                             ("SELECT p. FROM other.people p" "other_name")))
+               (ert-info ((format "completion: %s" (car case)))
+                 (erase-buffer)
+                 (insert (car case))
+                 (goto-char (point-min))
+                 (search-forward ". ")
+                 (backward-char)
+                 (let ((capf (clutch-completion-at-point)))
+                   (should (equal (cdr case) (all-completions "" (nth 2 capf)))))))
+             (erase-buffer)
+             (insert "SELECT p.name FROM main.people p")
+             (goto-char (point-min))
+             (search-forward "name")
+             (should (string-match-p "name" (or (clutch--eldoc-function) "")))))
+       (clutch-db-disconnect conn)))))
+
+(ert-deftest clutch-test-quoted-table-qualifiers-retain-column-completion ()
+  "Quoted direct qualifiers resolve bare and schema-qualified sources."
+  (clutch-test--with-isolated-metadata-caches
+   (with-temp-buffer
+     (clutch-mode)
+     (setq-local clutch-connection (make-clutch-test-conn))
+     (let ((schema (make-hash-table :test 'equal)))
+       (puthash "people" '("name") schema)
+       (puthash clutch-connection schema clutch--schema-cache)
+       (clutch--set-table-metadata
+        clutch-connection '(nil "side" "people") :columns '("name"))
+       (dolist (sql '("SELECT \"people\". FROM people"
+                      "SELECT `people`. FROM people"
+                      "SELECT \"side\".\"people\". FROM side.people"))
+         (ert-info ((format "%s" sql))
+           (erase-buffer)
+           (insert sql)
+           (goto-char (point-min))
+           (search-forward ". ")
+           (backward-char)
+           (let ((capf (clutch-completion-at-point)))
+             (should (member "name" (all-completions "" (nth 2 capf)))))))))))
+
+(ert-deftest clutch-test-qualified-eldoc-uses-scoped-column-cache ()
+  "Column help consumes the same scoped cache as qualified completion."
+  (clutch-test--with-isolated-metadata-caches
+   (with-temp-buffer
+     (clutch-mode)
+     (setq-local clutch-connection (make-clutch-test-conn))
+     (puthash clutch-connection (make-hash-table :test 'equal) clutch--schema-cache)
+     (clutch--set-table-metadata
+      clutch-connection '(nil "side" "people") :columns '("name"))
+     (clutch--set-table-metadata
+      clutch-connection '(nil "side" "people") :column-details
+      '((:name "name" :type "TEXT")))
+     (insert "SELECT p.name FROM side.people p")
+     (goto-char (point-min))
+     (search-forward "name")
+     (let ((help (clutch--eldoc-function)))
+       (should (string-match-p "side.people.name" (or help "")))
+       (should (string-match-p "TEXT" help)))
+     (clutch--set-table-metadata
+      clutch-connection "people" :column-details
+      '((:name "name" :type "CURRENT_TYPE")))
+     (setq-local clutch--connection-render-state '(:namespace "side"))
+     (cl-letf (((symbol-function 'clutch-db-current-schema)
+                (lambda (_conn) (error "Unexpected namespace query"))))
+       (should (string-match-p "CURRENT_TYPE" (clutch--eldoc-function)))
+       (clutch--set-table-metadata
+        clutch-connection '(nil "side" "people") :columns nil)
+       (puthash "people" '("name") (gethash clutch-connection clutch--schema-cache))
+       (erase-buffer)
+       (insert "SELECT p. FROM side.people p")
+       (goto-char (point-min))
+       (search-forward "p.")
+       (let ((capf (clutch-completion-at-point)))
+         (should (equal '("name") (all-completions "" (nth 2 capf)))))))))
+
+(ert-deftest clutch-test-scoped-completion-dispatch-failure-settles ()
+  "Dead connections do not dispatch; synchronous failures leave failed status."
+  (clutch-test--with-isolated-metadata-caches
+   (let ((conn (make-clutch-test-conn :live nil)) (calls 0))
+     (cl-letf (((symbol-function 'clutch-db-schema-tables-async)
+                (lambda (&rest _) (cl-incf calls) (error "Dispatch failed"))))
+       (should-not (clutch--completion-schema-tables conn "side"))
+       (should (= calls 0))
+       (setf (clutch-test-conn-live conn) t)
+       (should-not (clutch--completion-schema-tables conn "side"))
+       (should (= calls 1))
+       (should (eq (plist-get (clutch--metadata-status
+                              conn '(nil "side" nil) :tables-status) :state)
+                   'failed))))))
+
 ;;;; SQL parsing — query classification
 
 (ert-deftest clutch-test-query-classification-contract ()

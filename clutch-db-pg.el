@@ -1013,6 +1013,38 @@ WHERE schemaname = current_schema() \
 ORDER BY tablename")))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
+(cl-defmethod clutch-db-list-columns-async
+    ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog)
+  "Fetch column names for TABLE in SCHEMA on CONN asynchronously.
+Without SCHEMA, retain the current-schema idle metadata path."
+  (if schema
+      (when (fboundp 'pgsql-exec-async)
+        (pgsql-exec-async
+         (clutch-db-pg--connection-client conn)
+         (format "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position"
+                 (pgsql-escape-literal schema) (pgsql-escape-literal table))
+         (lambda (result error)
+           (if error
+               (when errback (funcall errback (clutch-db--error-message error)))
+             (funcall callback (mapcar #'car (clutch-db-pg--metadata-rows result))))))
+        t)
+    (clutch-db--schedule-idle-metadata-call
+     conn callback errback #'clutch-db-list-columns nil table)))
+
+(cl-defmethod clutch-db-schema-tables-async
+    ((conn clutch-db-pg--connection) schema callback &optional errback)
+  "Fetch PostgreSQL table and view names in SCHEMA on CONN asynchronously."
+  (when (fboundp 'pgsql-exec-async)
+    (pgsql-exec-async
+     (clutch-db-pg--connection-client conn)
+     (format "SELECT table_name FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name"
+             (pgsql-escape-literal schema))
+     (lambda (result error)
+       (if error
+           (when errback (funcall errback (clutch-db--error-message error)))
+         (funcall callback (mapcar #'car (clutch-db-pg--metadata-rows result))))))
+    t))
+
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--connection))
   "Return table/view entry plists for the current PostgreSQL schema on CONN."
   (clutch-db--translate-library-error pgsql-error

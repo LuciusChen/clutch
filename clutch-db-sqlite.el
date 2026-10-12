@@ -230,6 +230,15 @@ WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
            (rows (clutch-db-sqlite--pragma-strict handle "table_info" table)))
       (mapcar (lambda (row) (nth 1 row)) rows))))
 
+(cl-defmethod clutch-db-list-columns-async
+    ((conn clutch-db-sqlite-conn) table callback &optional _errback schema _catalog)
+  "Read TABLE columns in SCHEMA on local CONN, calling CALLBACK immediately.
+SQLite metadata needs no network wait, so retain synchronous completion."
+  (let ((rows (clutch-db-sqlite--pragma-strict
+               (clutch-db-sqlite-conn-handle conn) "table_info" table schema)))
+    (funcall callback (mapcar (lambda (row) (nth 1 row)) rows)))
+  t)
+
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."
   (clutch-db--translate-library-error sqlite-error
