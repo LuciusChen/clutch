@@ -52,20 +52,21 @@
 
 (ert-deftest clutch-test-save-console-reports-write-error ()
   "Console persistence failures should surface a minibuffer warning."
-  (let (reported)
-    (with-temp-buffer
-      (setq-local clutch--console-name "demo")
-      (cl-letf (((symbol-function 'make-directory) #'ignore)
-                ((symbol-function 'write-region)
-                 (lambda (&rest _args)
-                   (error "Disk full")))
-                ((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq reported (apply #'format fmt args)))))
-        (clutch--save-console)
-        (should (string-match-p
-                 "Failed to save console demo: disk full"
-                 reported))))))
+  (clutch-test-console--with-temp-directory dir
+    (let ((clutch-console-directory dir)
+          reported)
+      (with-temp-buffer
+        (setq-local clutch--console-name "demo")
+        (cl-letf (((symbol-function 'write-region)
+                   (lambda (&rest _args)
+                     (error "Disk full")))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq reported (apply #'format fmt args)))))
+          (clutch--save-console)
+          (should (string-match-p
+                   "Failed to save console demo: disk full"
+                   reported)))))))
 
 (ert-deftest clutch-test-console-persistence-name-identity-rules ()
   "Console persistence names should be stable, distinct, and credential-safe."
