@@ -230,6 +230,8 @@ Generic JDBC rows contain:
 
 `get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
 
+On DuckDB and SQL Server, `get-columns` forwards schema and table as JDBC LIKE patterns. Clutch escapes literal underscores, percent signs and backslashes for both column names and details, including the connection's default schema; catalog remains an exact name. Primary-key and foreign-key operations take exact schema/table names and do not use that escaping. Oracle's direct column metadata queries also use exact names.
+
 ## Error semantics
 
 There are five distinct failure classes:

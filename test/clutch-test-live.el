@@ -1919,8 +1919,8 @@ throughout."
                 (cl-loop for schema in schemas for n from 1 do
                          (clutch-db-query conn (format create schema))
                          (clutch-db-query
-                          conn (format "CREATE TABLE %s.peo_ple (side_%d INTEGER)"
-                                       schema n))
+                          conn (format "CREATE TABLE %s.peo_ple (side_value %s)"
+                                       schema (if (= n 1) "INTEGER" "VARCHAR(17)")))
                          (clutch-db-query
                           conn (format "CREATE TABLE %s.peoxple (wrong INTEGER)" schema)))
                 (advice-add 'clutch-db-current-schema :before #'namespace-call)
@@ -1930,6 +1930,7 @@ throughout."
                   (with-temp-buffer
                     (clutch-mode)
                     (setq-local clutch-connection conn)
+                    (puthash conn (make-hash-table :test 'equal) clutch--schema-cache)
                     (cl-loop for schema in schemas for n from 1 do
                              (erase-buffer)
                              (insert (format "SELECT * FROM %s." schema))
@@ -1947,17 +1948,30 @@ throughout."
                              (clutch-test--await
                               (lambda ()
                                 (member (funcall (if oracle #'upcase #'identity)
-                                                 (format "side_%d" n))
+                                                 "side_value")
                                         (candidates))))
                              (should (= (length (candidates)) 1))
                              (dotimes (_ 10) (candidates))
                              (should (= (length columns) n))
                              (insert (funcall (if oracle #'upcase #'identity)
-                                              (format "side_%d" n)))
+                                              "side_value"))
                              (setq checking t)
                              (unwind-protect (clutch--eldoc-function)
                                (setq checking nil))
-                             (should (= namespace-reads 0)))
+                             (should (= namespace-reads 0))
+                             (let* ((token (concat schema ".peo_ple"))
+                                    (key (clutch--table-key
+                                          (clutch-db--source-table-name conn token)
+                                          (or (clutch-db--source-table-schema conn token)
+                                              (clutch-db-sql-table-schema token))
+                                          (clutch-db--source-table-catalog conn token))))
+                               (clutch-test--await
+                                (lambda () (clutch--column-details-cached-p conn key)))
+                               (let ((details (clutch--cached-column-details conn key)))
+                                 (should (= (length details) 1))
+                                 (should (string-match-p
+                                          (if (= n 1) "int\\|number" "varchar\\|character varying")
+                                          (downcase (plist-get (car details) :type)))))))
                     (should (equal original (clutch-db-resolution-context conn))))))
             (advice-remove 'clutch-db-current-schema #'namespace-call)
             (advice-remove 'clutch-db-schema-tables-async #'tables-call)

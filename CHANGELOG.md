@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- JDBC column names and details on DuckDB and SQL Server treat schema/table names literally, including `_`, `%` and backslash, so column eldoc cannot cache another schema or table's type under the requested name.
+
 - MySQL column metadata for explicitly qualified tables uses the requested database consistently for column types, comments, primary keys and foreign keys, instead of reading the current database.
 
 - CSV/TSV copy and export distinguish SQL NULL (an unquoted empty field), empty text (`""`) and literal `NULL` text under the default settings. SQL NULL previously became the text `NULL`, indistinguishable from that literal string. This changes the exported NULL representation; importers must use the same convention.

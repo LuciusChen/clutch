@@ -1932,13 +1932,21 @@ when a catalog is supplied."
     (append (when catalog `((catalog . ,catalog)))
             (when schema `((schema . ,schema))))))
 
-(defun clutch-jdbc--table-metadata-params (conn table &optional schema catalog)
+(defun clutch-jdbc--table-metadata-params
+    (conn table &optional schema catalog literal-patterns)
   "Return JDBC metadata params for TABLE on CONN.
-SCHEMA and CATALOG, when non-nil, qualify TABLE in place of CONN's scope."
-  `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-    (table . ,table)
-    ,@(clutch-jdbc--metadata-scope-params
-       (clutch-jdbc--metadata-conn-for-scope conn schema catalog))))
+SCHEMA and CATALOG, when non-nil, qualify TABLE in place of CONN's scope.
+LITERAL-PATTERNS escapes table and schema names for get-columns, which
+interprets them as LIKE patterns instead of exact names."
+  (let ((scope (clutch-jdbc--metadata-scope-params
+                (clutch-jdbc--metadata-conn-for-scope conn schema catalog))))
+    (when literal-patterns
+      (setq table (clutch-jdbc--literal-metadata-pattern conn table))
+      (when-let* ((entry (assq 'schema scope)))
+        (setcdr entry (clutch-jdbc--literal-metadata-pattern conn (cdr entry)))))
+    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+      (table . ,table)
+      ,@scope)))
 
 (defun clutch-jdbc--visible-schemas (conn schemas)
   "Normalize visible SCHEMAS for CONN."
@@ -2037,7 +2045,7 @@ current database."
                        ,@(clutch-jdbc--metadata-scope-params conn)))))
       (clutch-jdbc--collect-table-entries conn result))))
 
-(defun clutch-jdbc--completion-metadata-pattern (conn name)
+(defun clutch-jdbc--literal-metadata-pattern (conn name)
   "Return the literal metadata pattern for NAME on CONN.
 Oracle's agent metadata queries use exact names; the SQL Server and DuckDB
 JDBC drivers use backslash-escaped LIKE patterns."
@@ -2054,7 +2062,7 @@ JDBC drivers use backslash-escaped LIKE patterns."
     ((conn clutch-jdbc-conn) schema callback &optional errback)
   "Fetch JDBC table names in SCHEMA on CONN asynchronously."
   (let ((scope (clutch-jdbc--metadata-conn-for-scope
-                conn (clutch-jdbc--completion-metadata-pattern conn schema))))
+                conn (clutch-jdbc--literal-metadata-pattern conn schema))))
     (clutch-jdbc--rpc-async
      "get-tables"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
@@ -2338,7 +2346,7 @@ the metadata request."
   "Fetch JDBC column details for TABLE on CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-columns"
-   (clutch-jdbc--table-metadata-params conn table schema catalog)
+   (clutch-jdbc--table-metadata-params conn table schema catalog t)
    (lambda (result)
      (when callback
        (funcall callback
@@ -2354,9 +2362,7 @@ the metadata request."
   "Fetch JDBC column names for TABLE on CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-columns"
-   (clutch-jdbc--table-metadata-params
-    conn (if schema (clutch-jdbc--completion-metadata-pattern conn table) table)
-    (clutch-jdbc--completion-metadata-pattern conn schema) catalog)
+   (clutch-jdbc--table-metadata-params conn table schema catalog t)
    (lambda (result)
      (when callback
        (funcall callback
@@ -2398,7 +2404,7 @@ schemas reports an empty one, which is left out."
   "Return column names for TABLE on JDBC CONN using DatabaseMetaData."
   (let* ((result  (clutch-jdbc--rpc
                    conn "get-columns"
-                   (clutch-jdbc--table-metadata-params conn table))))
+                   (clutch-jdbc--table-metadata-params conn table nil nil t))))
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
@@ -2542,9 +2548,7 @@ schemas reports an empty one, which is left out."
        (let* ((driver (clutch-jdbc--conn-driver conn))
               (result (clutch-jdbc--rpc
                        conn "get-columns"
-                       `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                         (table   . ,name)
-                         ,@(clutch-jdbc--metadata-scope-params conn))))
+                       (clutch-jdbc--table-metadata-params conn name nil nil t)))
               (cols (plist-get result :columns))
               (display-ident
                (if (eq driver 'oracle)
@@ -2697,7 +2701,7 @@ without a unique index never asks for them."
          (result  (clutch-jdbc--rpc
                    conn "get-columns"
                    (clutch-jdbc--table-metadata-params
-                    conn table schema catalog)))
+                    conn table schema catalog t)))
          (cols    (clutch-jdbc--normalize-column-details
                    (plist-get result :columns))))
     (mapcar (lambda (col)
