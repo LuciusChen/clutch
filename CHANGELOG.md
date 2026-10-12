@@ -4,6 +4,8 @@
 
 ### Added
 
+- SQL completion can load tables after an explicit `schema.` and columns from aliases of schema-qualified tables without switching the session schema, on native PostgreSQL/MySQL and JDBC Oracle/SQL Server/DuckDB. Metadata is fetched asynchronously on demand and cached.
+
 - Query export offers `clutch-export-default-format` (CSV or TSV). File exports use `clutch-export-default-directory`, and CSV/TSV file exports `clutch-export-default-file-name`, when set; encoding keeps the existing `clutch-csv-export-default-coding-system` option. Prompts remain editable, and unset destination options keep the current buffer directory and format-specific file name.
 - CSV/TSV copy and export share `clutch-export-null-value-text` (empty by default). NULL markers stay unquoted, and ordinary text matching the marker is quoted to preserve the distinction.
 - CSV copy and export separate fields with `clutch-csv-delimiter`, a comma by default; set it to `?\;` for spreadsheets that expect semicolons. PostgreSQL's streamed query export passes it to `COPY`, and TSV keeps tabs.

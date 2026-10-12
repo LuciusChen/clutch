@@ -501,6 +501,36 @@ missed a USE or a DROP that changed the database."
        (unless (string-prefix-p "[1046]" (cadr err))
          (signal (car err) (cdr err)))))))
 
+(cl-defmethod clutch-db-list-columns-async
+    ((conn mysql-conn) table callback &optional errback schema _catalog)
+  "Fetch column names for TABLE in SCHEMA on CONN asynchronously.
+Without SCHEMA, retain the current-schema idle metadata path."
+  (if schema
+      (when (fboundp 'mysql-query-async)
+        (mysql-query-async
+         conn
+         (format "SELECT column_name FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION"
+                 (mysql-escape-literal schema) (mysql-escape-literal table))
+         (lambda (result error)
+           (if error
+               (when errback (funcall errback (clutch-db--error-message error)))
+             (funcall callback (mapcar #'car (mysql-result-rows result))))))
+        t)
+    (clutch-db--schedule-idle-metadata-call
+     conn callback errback #'clutch-db-list-columns nil table)))
+
+(cl-defmethod clutch-db-schema-tables-async
+    ((conn mysql-conn) schema callback &optional errback)
+  "Fetch MySQL table and view names in SCHEMA on CONN asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (mysql-query-async
+     conn (format "SHOW TABLES FROM %s" (mysql-escape-identifier schema))
+     (lambda (result error)
+       (if error
+           (when errback (funcall errback (clutch-db--error-message error)))
+         (funcall callback (mapcar #'car (mysql-result-rows result))))))
+    t))
+
 (cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
   "Return visible MySQL schema/database names for CONN."
   (clutch-db--translate-library-error mysql-error

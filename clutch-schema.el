@@ -253,6 +253,42 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
                          (string-prefix-p uprefix (upcase table)))
                collect table))))
 
+(defun clutch--completion-schema-tables (conn namespace)
+  "Return cached table names in NAMESPACE on CONN, starting one fetch if needed."
+  (let* ((key (clutch--table-key nil namespace))
+         (metadata (clutch--table-metadata conn key))
+         (state (plist-get (clutch--metadata-status conn key :tables-status) :state)))
+    (unless (or (plist-member metadata :completion-tables)
+                (memq state '(loading failed))
+                (clutch-db-busy-p conn))
+      (unless (clutch--start-table-metadata-request
+               conn key namespace :tables-status "schema-tables"
+               #'clutch-db-schema-tables-async
+               (lambda (tables)
+                 (clutch--set-table-metadata conn key :completion-tables tables)))
+        (clutch--set-metadata-status
+         conn key :tables-status 'failed "Scoped table completion is unsupported")))
+    (plist-get (clutch--table-metadata conn key) :completion-tables)))
+
+(defun clutch--completion-qualified-columns (conn key)
+  "Return cached column names for qualified table KEY on CONN.
+Start one asynchronous fetch on a cache miss."
+  (let ((metadata (clutch--table-metadata conn key))
+        (state (plist-get (clutch--metadata-status conn key :columns-status) :state)))
+    (unless (or (plist-member metadata :columns)
+                (memq state '(loading failed))
+                (clutch-db-busy-p conn))
+      (unless (clutch--start-table-metadata-request
+               conn key key :columns-status "list-columns"
+               (lambda (connection table callback errback)
+                 (clutch--table-metadata-async
+                  #'clutch-db-list-columns-async connection table callback errback))
+               (lambda (columns)
+                 (clutch--set-table-metadata conn key :columns columns)))
+        (clutch--set-metadata-status
+         conn key :columns-status 'failed "Scoped column completion is unsupported")))
+    (plist-get (clutch--table-metadata conn key) :columns)))
+
 (defun clutch--cached-columns (schema table)
   "Return cached columns for TABLE from SCHEMA, or nil if not loaded."
   (let ((cols (and schema (gethash table schema 'missing))))

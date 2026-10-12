@@ -50,6 +50,49 @@ controls liveness and defaults to t."
          (loc (xref-item-location (car defs))))
     (xref-buffer-location-position loc)))
 
+(ert-deftest clutch-test-cross-schema-completion-keeps-sources-separate ()
+  "Qualified completion loads only its schema and keeps same-name tables apart."
+  (clutch-test--with-isolated-metadata-caches
+   (with-temp-buffer
+     (clutch-mode)
+     (setq-local clutch-connection (make-clutch-test-conn))
+     (let (requests callback)
+       (cl-letf (((symbol-function 'clutch-db-schema-tables-async)
+                  (lambda (_conn schema success &optional _error)
+                    (push schema requests)
+                    (setq callback success)
+                    t)))
+         (insert "SELECT * FROM side.")
+         (should-not (clutch-completion-at-point))
+         (should-not (clutch-completion-at-point))
+         (should (equal requests '("side")))
+         (funcall callback '("people"))
+         (let ((capf (clutch-completion-at-point)))
+           (should (equal (all-completions "" (nth 2 capf)) '("people"))))
+         (erase-buffer)
+         (insert "SELECT * FROM catalog.side.")
+         (should-not (clutch-completion-at-point))
+         (should (equal requests '("side")))
+         (clutch--set-table-metadata
+          clutch-connection '(nil "side" "people") :columns
+          '("side_value"))
+         (clutch--set-table-metadata
+          clutch-connection '(nil "other" "people") :columns
+          '("other_value"))
+         (dolist (case '(("SELECT p. FROM side.people p" "side_value")
+                         ("SELECT p. FROM other.people p" "other_value")
+                         ("SELECT side.people. FROM side.people" "side_value")
+                         ("SELECT side.people. FROM other.people o JOIN side.people s ON 1=1" "side_value")
+                         ("SELECT people. FROM side.people s JOIN other.people o ON 1=1")))
+           (erase-buffer)
+           (insert (car case))
+           (goto-char (point-min))
+           (search-forward ". ")
+           (backward-char)
+           (let ((capf (clutch-completion-at-point)))
+             (should (equal (all-completions "" (nth 2 capf))
+                            (cdr case))))))))))
+
 ;;;; SQL parsing — query classification
 
 (ert-deftest clutch-test-query-classification-contract ()

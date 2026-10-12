@@ -391,6 +391,7 @@ Common entry points:
 - `C-c C-c` executes the region or statement at point
 - In SQL consoles, `C-c C-z` shows the current connection's existing result buffer; the inherited SQLi-only `C-c C-n` binding is disabled.
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
+- Cross-schema SQL completion loads metadata on demand: type `schema.` after `FROM` or `JOIN` for tables, or `alias.` for columns from `schema.table alias`. It keeps the current schema unchanged and reuses cached metadata; see the [interactive guide](docs/interactive-client.org) for supported backends and limits.
 - SQL table/alias context is cached per statement and refreshed after edits or scope changes; incomplete statements do not scan other statements to infer source tables.
 - `M-.` jumps SQL aliases to their statement definition; object lookup uses `C-c C-d` / `C-c C-j`
 - In Result Browser buffers, `{` and `}` jump to the first and last visible data columns; Clutch's own row-number column replaces native display line numbers there

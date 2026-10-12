@@ -2037,6 +2037,45 @@ current database."
                        ,@(clutch-jdbc--metadata-scope-params conn)))))
       (clutch-jdbc--collect-table-entries conn result))))
 
+(defun clutch-jdbc--completion-metadata-pattern (conn name)
+  "Return the literal metadata pattern for NAME on CONN.
+Oracle's agent metadata queries use exact names; the SQL Server and DuckDB
+JDBC drivers use backslash-escaped LIKE patterns."
+  (if (and name
+           (or (clutch-jdbc--duckdb-conn-p conn)
+               (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
+               (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
+      (string-replace "%" "\\%"
+                      (string-replace "_" "\\_"
+                                      (string-replace "\\" "\\\\" name)))
+    name))
+
+(cl-defmethod clutch-db-schema-tables-async
+    ((conn clutch-jdbc-conn) schema callback &optional errback)
+  "Fetch JDBC table names in SCHEMA on CONN asynchronously."
+  (let ((scope (clutch-jdbc--metadata-conn-for-scope
+                conn (clutch-jdbc--completion-metadata-pattern conn schema))))
+    (clutch-jdbc--rpc-async
+     "get-tables"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       ,@(clutch-jdbc--metadata-scope-params scope))
+     (let (batches)
+       (cl-labels
+           ((receive (result)
+              (push (plist-get result :rows) batches)
+              (if (eq t (plist-get result :done))
+                  (funcall callback
+                           (mapcar #'car (apply #'nconc (nreverse batches))))
+                (clutch-jdbc--rpc-async
+                 "fetch"
+                 `((cursor-id . ,(plist-get result :cursor-id))
+                   (fetch-size . ,(clutch-jdbc--effective-fetch-size))
+                   (query-timeout-seconds . ,(clutch-jdbc--conn-query-timeout conn)))
+                 #'receive errback nil conn))))
+         #'receive))
+     errback nil conn))
+  t)
+
 (cl-defmethod clutch-db-list-schemas ((conn clutch-jdbc-conn))
   "Return visible schema names for JDBC CONN when supported."
   (cond
@@ -2311,11 +2350,13 @@ the metadata request."
   t)
 
 (cl-defmethod clutch-db-list-columns-async ((conn clutch-jdbc-conn) table callback
-                                            &optional errback)
+                                            &optional errback schema catalog)
   "Fetch JDBC column names for TABLE on CONN asynchronously."
   (clutch-jdbc--rpc-async
    "get-columns"
-   (clutch-jdbc--table-metadata-params conn table)
+   (clutch-jdbc--table-metadata-params
+    conn (if schema (clutch-jdbc--completion-metadata-pattern conn table) table)
+    (clutch-jdbc--completion-metadata-pattern conn schema) catalog)
    (lambda (result)
      (when callback
        (funcall callback
