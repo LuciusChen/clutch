@@ -260,6 +260,7 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
          (state (plist-get (clutch--metadata-status conn key :tables-status) :state)))
     (unless (or (plist-member metadata :completion-tables)
                 (memq state '(loading failed))
+                (not (clutch-db-live-p conn))
                 (clutch-db-busy-p conn))
       (unless (clutch--start-table-metadata-request
                conn key namespace :tables-status "schema-tables"
@@ -277,6 +278,7 @@ Start one asynchronous fetch on a cache miss."
         (state (plist-get (clutch--metadata-status conn key :columns-status) :state)))
     (unless (or (plist-member metadata :columns)
                 (memq state '(loading failed))
+                (not (clutch-db-live-p conn))
                 (clutch-db-busy-p conn))
       (unless (clutch--start-table-metadata-request
                conn key key :columns-status "list-columns"
@@ -603,39 +605,43 @@ message after its failed state is recorded."
   (let ((ticket (clutch--begin-metadata-ticket)))
     (clutch--set-metadata-status
      conn key status-property 'loading nil ticket)
-    (let ((started
-           (funcall
-            fetch conn table
-            (lambda (value)
-              (when (clutch--metadata-callback-current-p
-                     conn ticket
-                     (clutch--metadata-status conn key status-property)
-                     table op "result")
-                (clutch--metadata-debug-table-event
-                 conn op "success" table
-                 (format "Loaded %s for %s" op
-                         (clutch--table-key-label table)))
-                (clutch--clear-metadata-status conn key status-property)
-                (funcall install value)
-                (clutch--notify-metadata-state-changed conn)))
-            (lambda (message)
-              (when (clutch--metadata-callback-current-p
-                     conn ticket
-                     (clutch--metadata-status conn key status-property)
-                     table op "error")
-                (clutch--set-metadata-status
-                 conn key status-property 'failed message ticket)
-                (clutch--metadata-debug-table-event
-                 conn op "error" table message)
-                (when report-error
-                  (funcall report-error message))
-                (clutch--notify-metadata-state-changed conn))))))
-      (when started
-        (clutch--metadata-debug-table-event
-         conn op "submit" table
-         (format "Queued background %s for %s" op
-                 (clutch--table-key-label table))))
-      started)))
+    (cl-labels
+        ((failed (message)
+           (when (clutch--metadata-callback-current-p
+                  conn ticket
+                  (clutch--metadata-status conn key status-property)
+                  table op "error")
+             (clutch--set-metadata-status
+              conn key status-property 'failed message ticket)
+             (clutch--metadata-debug-table-event conn op "error" table message)
+             (when report-error (funcall report-error message))
+             (clutch--notify-metadata-state-changed conn))))
+      (let ((started
+             (condition-case error-data
+                 (funcall
+                  fetch conn table
+                  (lambda (value)
+                    (when (clutch--metadata-callback-current-p
+                           conn ticket
+                           (clutch--metadata-status conn key status-property)
+                           table op "result")
+                      (clutch--metadata-debug-table-event
+                       conn op "success" table
+                       (format "Loaded %s for %s" op
+                               (clutch--table-key-label table)))
+                      (clutch--clear-metadata-status conn key status-property)
+                      (funcall install value)
+                      (clutch--notify-metadata-state-changed conn)))
+                  #'failed)
+               (error
+                (failed (error-message-string error-data))
+                t))))
+        (when started
+          (clutch--metadata-debug-table-event
+           conn op "submit" table
+           (format "Queued background %s for %s" op
+                   (clutch--table-key-label table))))
+        started))))
 
 (defun clutch--ensure-columns-async (conn schema table)
   "Queue an async column-name fetch for TABLE in SCHEMA on CONN when needed."

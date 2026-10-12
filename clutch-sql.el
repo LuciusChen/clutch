@@ -62,7 +62,13 @@ and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
 
 (defun clutch--eldoc-column-string (conn table col-name)
   "Format an eldoc string for COL-NAME in TABLE using CONN."
-  (let* ((details (clutch--cached-column-details conn table))
+  (let* ((table (if (and (consp table)
+                         (null (car table))
+                         (equal (nth 1 table) (clutch-db-current-schema conn))
+                         (clutch--column-details-cached-p conn (nth 2 table)))
+                    (nth 2 table)
+                  table))
+         (details (clutch--cached-column-details conn table))
          (col (and details
                    (cl-find col-name details
                             :key (lambda (d) (plist-get d :name))
@@ -71,7 +77,8 @@ and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
                                                   (downcase candidate))))))
          (canonical-name (or (and col (plist-get col :name))
                              col-name))
-         (header (concat (propertize table 'face 'font-lock-type-face)
+         (header (concat (propertize (clutch--table-key-label table)
+                                     'face 'font-lock-type-face)
                          "."
                          (propertize canonical-name
                                      'face 'font-lock-variable-name-face))))
@@ -560,7 +567,8 @@ For input like `u.name', returns `u' when BEG starts at `name'."
   "Return the table referenced by the qualifier before BEG in SCHEMA, or nil.
 Resolve both statement aliases like `u.name' and direct qualified table names
 like `orders.id' within the current statement."
-  (when-let* ((qualifier (clutch--qualified-identifier-qualifier beg)))
+  (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
+              (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
     (or (cdr (assoc-string qualifier
                            (clutch--table-aliases-in-current-statement schema)
                            t))
@@ -571,7 +579,10 @@ like `orders.id' within the current statement."
                    (string-equal-ignore-case
                     qualifier (clutch-db-sql-table-name table)))
                  tables)))
-          (or (cl-find qualifier tables :test #'string-equal-ignore-case)
+          (or (cl-find qualifier tables
+                           :test (lambda (a b)
+                                   (string-equal-ignore-case
+                                    a (replace-regexp-in-string "[\"`]" "" b))))
               (and (= (length matches) 1) (car matches)))))))
 
 (defconst clutch--sql-keywords
@@ -1081,7 +1092,11 @@ when SYNC-COLUMNS-P is nil."
                    (clutch-db--source-table-name conn table)
                    (or (clutch-db--source-table-schema conn table) namespace)
                    (clutch-db--source-table-catalog conn table))))
-        (clutch--completion-qualified-columns conn key))
+        (or (plist-get (clutch--table-metadata conn key) :columns)
+            (and (not (clutch-db--source-table-catalog conn table))
+                 (equal (nth 1 key) (clutch-db-current-schema conn))
+                 (clutch--cached-columns schema (clutch--table-key-name key)))
+            (clutch--completion-qualified-columns conn key)))
     (if (clutch-db-completion-deferred-columns-p conn)
         (or (clutch--cached-columns schema table)
             (when schema
@@ -1384,9 +1399,12 @@ QUALIFIED-TABLE, STATEMENT-TABLES, and SYNC-COLUMNS-P."
                                  (> (length tables) clutch--schema-inline-table-limit)))
           '((skip))
         (mapcar (lambda (table)
-                  (if-let* ((columns (clutch--cached-columns schema table)))
-                      (list 'cached-column table columns)
-                    (list (if sync-columns-p 'sync-column 'skip) table)))
+                  (cond
+                   ((clutch-db-sql-table-schema table)
+                    (list 'qualified-column table))
+                   ((clutch--cached-columns schema table)
+                    (list 'cached-column table (clutch--cached-columns schema table)))
+                   (t (list (if sync-columns-p 'sync-column 'skip) table))))
                 tables))))))
 
 (defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table)
@@ -1418,14 +1436,26 @@ QUALIFIED-TABLE, STATEMENT-TABLES, and SYNC-COLUMNS-P."
                           'face 'shadow))
                        (when comment
                          (propertize (format "  — %s" comment) 'face 'shadow))))))
-                  ((or 'cached-column 'sync-column)
-                   (let* ((values (or columns
-                                      (clutch--ensure-columns conn schema table)))
+                  ((or 'cached-column 'sync-column 'qualified-column)
+                   (let* ((values (if (eq action 'qualified-column)
+                                      (clutch--completion-column-values
+                                       conn schema table "" sync-columns-p)
+                                    (or columns
+                                        (clutch--ensure-columns conn schema table))))
                           (match (and values
                                       (clutch--identifier-match sym values))))
                      (when match
                        (cl-return
-                        (clutch--eldoc-column-string conn table match)))))))))
+                        (clutch--eldoc-column-string
+                         conn
+                         (if (clutch-db-sql-table-schema table)
+                             (clutch--table-key
+                              (clutch-db--source-table-name conn table)
+                              (or (clutch-db--source-table-schema conn table)
+                                  (clutch-db-sql-table-schema table))
+                              (clutch-db--source-table-catalog conn table))
+                           table)
+                         match)))))))))
 
 (defun clutch--eldoc-effective-symbol-at-point (sym schema)
   "Return the effective eldoc symbol at point for raw SYM and SCHEMA.
@@ -1460,6 +1490,7 @@ SQL keyword/function docs are shown even without a connection."
     (or
      (when-let* ((conn clutch-connection)
                  (schema schema)
+                 ((clutch-db-live-p conn))
                  ((not (clutch-db-busy-p conn))))
        (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
