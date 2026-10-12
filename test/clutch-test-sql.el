@@ -14,37 +14,35 @@
 
 (defmacro clutch-test-sql--with-xref-buffer (spec &rest body)
   "Run BODY in a temporary clutch SQL buffer for xref tests.
-SPEC is a plist.  Supported keys are :sql, :pre-needle, :needle, :offset,
-:schema, :aliases, :tables, and :connection-alive."
+SPEC is a plist with :sql, :pre-needle, :needle, and :offset.
+:cached warms the schema and table-analysis caches.  :connection-alive
+controls liveness and defaults to t."
   (declare (indent 1) (debug (sexp body)))
-  `(let* ((spec ,spec)
-          (schema (plist-get spec :schema))
-          (aliases (plist-get spec :aliases))
-          (tables (plist-get spec :tables))
-          (has-live-stub (plist-member spec :connection-alive))
-          (live-p (plist-get spec :connection-alive))
-          (orig-alive (symbol-function 'clutch--connection-alive-p)))
-     (with-temp-buffer
-       (clutch-mode)
-       (setq-local clutch-connection 'fake-conn)
-       (insert (plist-get spec :sql))
-       (goto-char (point-min))
-       (when-let* ((pre-needle (plist-get spec :pre-needle)))
-         (search-forward pre-needle))
-       (search-forward (plist-get spec :needle))
-       (goto-char (+ (match-beginning 0) (or (plist-get spec :offset) 0)))
-       (cl-letf (((symbol-function 'clutch--schema-for-connection)
-                  (lambda (&optional _conn) schema))
-                 ((symbol-function 'clutch--tables-in-query-cache-entry)
-                  (lambda (_schema)
-                    (when (or aliases tables)
-                      (list :beg (point-min) :end (point-max)
-                            :statement-aliases aliases
-                            :statement-tables tables))))
-                 ((symbol-function 'clutch--connection-alive-p)
-                  (lambda (conn)
-                    (if has-live-stub live-p (funcall orig-alive conn)))))
-         ,@body))))
+  (let ((data (make-symbol "spec")))
+    `(clutch-test--with-isolated-metadata-caches
+       (let ((,data ,spec))
+         (with-temp-buffer
+           (clutch-mode)
+           (setq-local clutch-connection
+                       (make-clutch-test-conn
+                        :live (if (plist-member ,data :connection-alive)
+                                  (plist-get ,data :connection-alive)
+                                t)))
+           (insert (plist-get ,data :sql))
+           (goto-char (point-min))
+           (when-let* ((pre-needle (plist-get ,data :pre-needle)))
+             (search-forward pre-needle))
+           (search-forward (plist-get ,data :needle))
+           (goto-char (+ (match-beginning 0) (or (plist-get ,data :offset) 0)))
+           (when (plist-get ,data :cached)
+             (let ((schema (make-hash-table :test 'equal)))
+               (setq-local clutch--tables-in-query-cache
+                           (clutch--compute-tables-in-query-cache schema))
+               (dolist (table (plist-get clutch--tables-in-query-cache
+                                        :statement-tables))
+                 (puthash table nil schema))
+               (puthash clutch-connection schema clutch--schema-cache)))
+           ,@body)))))
 
 (defun clutch-test-sql--xref-definition-position (identifier)
   "Return the first xref definition buffer position for IDENTIFIER."
@@ -265,20 +263,18 @@ after them asked for no confirmation."
 (ert-deftest clutch-test-mysql-backslash-quote-keeps-statement-visible ()
   "A backslash-escaped quote in MySQL must not hide the rest of the statement."
   (with-temp-buffer
-    (setq-local clutch-connection 'fake-mysql)
-    (cl-letf (((symbol-function 'clutch-db-connection-sql-dialect)
-               (lambda (_conn) (clutch-db-sql-dialect 'mysql))))
-      (should (equal (clutch--high-risk-query-reason
-                      "DELETE FROM users WHERE name = 'it\\'s' OR 1 = 1")
-                     "WHERE is always true"))
-      (let ((sql "SELECT 'it\\'s', o.id FROM users u JOIN orders o ON o.uid = u.id"))
-        (should (equal (car (clutch--extract-tables-and-aliases sql 0 (length sql)))
-                       '("users" "orders")))
-        (insert sql)
-        (goto-char (point-min))
-        (search-forward "o.id")
-        (should (equal (clutch--find-alias-definition-position "o")
-                       (1+ (string-match "o ON" sql))))))))
+    (setq-local clutch-connection (make-clutch-test-conn :backend 'mysql))
+    (should (equal (clutch--high-risk-query-reason
+                    "DELETE FROM users WHERE name = 'it\\'s' OR 1 = 1")
+                   "WHERE is always true"))
+    (let ((sql "SELECT 'it\\'s', o.id FROM users u JOIN orders o ON o.uid = u.id"))
+      (should (equal (car (clutch--extract-tables-and-aliases sql 0 (length sql)))
+                     '("users" "orders")))
+      (insert sql)
+      (goto-char (point-min))
+      (search-forward "o.id")
+      (should (equal (clutch--find-alias-definition-position "o")
+                     (1+ (string-match "o ON" sql)))))))
 
 ;;;; SQL parsing — statement bounds
 
@@ -1546,64 +1542,53 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 (ert-deftest clutch-test-insert-completion-at-point-uses-enum-candidates ()
   "Insert buffer completion should return enum candidates for the current field."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*")) insert-buf)
-    (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity" "is_ship_blocked" "owner")
-                        clutch--result-column-defs '((:name "severity" :type-category text)
-                                                     (:name "is_ship_blocked" :type-category numeric)
-                                                     (:name "owner" :type-category text))
-                        clutch--result-source-table "shipping_incidents"))
-            (cl-letf (((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "severity" :type "enum('low','medium','high','critical')")
-                               (list :name "is_ship_blocked" :type "tinyint(1)")
-                               (list :name "owner" :type "varchar(255)"))))
-                      ((symbol-function 'pop-to-buffer)
-                       (lambda (buf &rest _args) (setq insert-buf buf) buf)))
-              (clutch-result-insert--open-buffer
-               "shipping_incidents" result-buf '(("owner" . "alice")))
-              (with-current-buffer insert-buf
-              (clutch-test--goto-insert-field-value "severity" t)
-              (pcase-let ((`(,beg ,end ,candidates . ,_)
-                           (clutch-result-insert-completion-at-point)))
-                (should (= beg end))
-                (should (equal candidates '("low" "medium" "high" "critical"))))
-              (clutch-test--goto-insert-field-value "is_ship_blocked" t)
-              (pcase-let ((`(,_beg ,_end ,candidates . ,_)
-                           (clutch-result-insert-completion-at-point)))
-                (should (equal candidates '("0" "1"))))
-              (clutch-test--goto-insert-field-value "owner" t)
-              (should-not (clutch-result-insert-completion-at-point)))))
-      (when (buffer-live-p result-buf) (kill-buffer result-buf))
-      (when (buffer-live-p insert-buf) (kill-buffer insert-buf)))))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn
+                 :table "shipping_incidents"
+                 :columns '((:name "severity" :type "enum('low','medium','high','critical')")
+                            (:name "is_ship_blocked" :type "tinyint(1)")
+                            (:name "owner" :type "varchar(255)")))))
+      (clutch-test--with-insert-result-buffer result-buf
+          (:connection conn
+           :columns '("severity" "is_ship_blocked" "owner")
+           :column-defs '((:name "severity" :type-category text)
+                          (:name "is_ship_blocked" :type-category numeric)
+                          (:name "owner" :type-category text))
+           :source-table "shipping_incidents")
+        (clutch-test--with-pop-to-buffer-capture insert-buf
+          (clutch-result-insert--open-buffer
+           "shipping_incidents" result-buf '(("owner" . "alice")))
+          (with-current-buffer insert-buf
+            (clutch-test--goto-insert-field-value "severity" t)
+            (pcase-let ((`(,beg ,end ,candidates . ,_)
+                         (clutch-result-insert-completion-at-point)))
+              (should (= beg end))
+              (should (equal candidates '("low" "medium" "high" "critical"))))
+            (clutch-test--goto-insert-field-value "is_ship_blocked" t)
+            (pcase-let ((`(,_beg ,_end ,candidates . ,_)
+                         (clutch-result-insert-completion-at-point)))
+              (should (equal candidates '("0" "1"))))
+            (clutch-test--goto-insert-field-value "owner" t)
+            (should-not (clutch-result-insert-completion-at-point))))))))
 
 (ert-deftest clutch-test-insert-complete-field-falls-back-to-completing-read ()
   "Insert completion command should fall back when CAPF does not handle it."
-  (let ((result-buf (generate-new-buffer "*clutch-insert-result*"))
-        (insert-buf (generate-new-buffer "*clutch-insert-temp*"))
-        completion-called)
-    (unwind-protect
-        (progn
-          (with-current-buffer result-buf
-            (setq-local clutch-connection 'fake-conn
-                        clutch--result-columns '("severity")
-                        clutch--result-column-defs '((:name "severity" :type-category text))))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (make-clutch-test-conn
+                 :table "shipping_incidents"
+                 :columns '((:name "severity" :type "enum('low','medium','high','critical')"))))
+          completion-called)
+      (clutch-test--with-insert-result-buffer result-buf
+          (:connection conn
+           :columns '("severity")
+           :column-defs '((:name "severity" :type-category text))
+           :source-table "shipping_incidents")
+        (clutch-test--with-pop-to-buffer-capture insert-buf
           (cl-letf (((symbol-function 'completion-at-point) (lambda () nil))
-                    ((symbol-function 'clutch--ensure-column-details)
-                       (lambda (_conn _table)
-                         (list (list :name "severity"
-                                     :type "enum('low','medium','high','critical')"))))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (buf &rest _args) (setq insert-buf buf) buf))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _args)
-                         (setq completion-called t)
-                         "critical")))
-            (with-current-buffer result-buf
-              (setq-local clutch--result-source-table "shipping_incidents"))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _args)
+                       (setq completion-called t)
+                       "critical")))
             (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
             (with-current-buffer insert-buf
               (clutch-test--goto-insert-field-value "severity")
@@ -1612,9 +1597,7 @@ Structure is not interpreted here; callers confirm depth and literals through
               (should (equal
                        (plist-get (clutch-result-insert--field-state "severity")
                                   :value)
-                       "critical")))))
-      (kill-buffer result-buf)
-      (kill-buffer insert-buf))))
+                       "critical")))))))))
 
 (ert-deftest clutch-test-complete-field-propagates-capf-errors ()
   "Edit and insert completion commands should not swallow CAPF failures."
@@ -1930,9 +1913,7 @@ Structure is not interpreted here; callers confirm depth and literals through
             (list :label "where alias"
                   :sql "SELECT u.* FROM users u WHERE u.id = 1"
                   :needle "u.id"
-                  :schema 'fake-schema
-                  :aliases '(("u" . "users"))
-                  :tables '("users")
+                  :cached t
                   :id "u"
                   :before "users "
                   :char ?u)
@@ -1940,27 +1921,21 @@ Structure is not interpreted here; callers confirm depth and literals through
                   :sql "SELECT u.name FROM users u"
                   :needle "u.name"
                   :offset 2
-                  :schema 'fake-schema
-                  :aliases '(("u" . "users"))
-                  :tables '("users")
+                  :cached t
                   :id "u"
                   :before "users "
                   :char ?u)
             (list :label "join alias"
                   :sql "SELECT o.total FROM users u JOIN orders o ON o.uid = u.id"
                   :needle "o.total"
-                  :schema 'fake-schema
-                  :aliases '(("u" . "users") ("o" . "orders"))
-                  :tables '("users" "orders")
+                  :cached t
                   :id "o"
                   :before "orders "
                   :char ?o)
             (list :label "join alias after an unaliased table"
                   :sql "SELECT o.total FROM users JOIN orders o ON o.uid = users.id"
                   :needle "o.total"
-                  :schema 'fake-schema
-                  :aliases '(("o" . "orders"))
-                  :tables '("users" "orders")
+                  :cached t
                   :id "o"
                   :before "orders "
                   :char ?o)
@@ -1968,9 +1943,7 @@ Structure is not interpreted here; callers confirm depth and literals through
                   :sql "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a"
                   :pre-needle "UNION ALL\n"
                   :needle "a.id"
-                  :schema 'fake-schema
-                  :aliases '(("a" . "users") ("a" . "orders"))
-                  :tables '("users" "orders")
+                  :cached t
                   :id "a"
                   :before "orders "
                   :char ?a)
@@ -2047,9 +2020,7 @@ Structure is not interpreted here; callers confirm depth and literals through
             (list :label "field name"
                   :sql "SELECT name FROM users u"
                   :needle "name"
-                  :schema 'fake-schema
-                  :aliases '(("u" . "users"))
-                  :tables '("users")
+                  :cached t
                   :id "name"
                   :no-definitions t)
             (list :label "schema-qualified table"
