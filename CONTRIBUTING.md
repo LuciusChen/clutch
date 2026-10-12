@@ -28,7 +28,7 @@ This runs the main and backend ERT suites, byte compilation, package-lint, check
 
 During iteration, use the affected target or selector from [README](README.md#testing). The full gate is for code/test commits; documentation-only work uses diff and reference checks instead.
 
-Query workflow tests can use `clutch-test-conn` from `test/clutch-test-common.el`: its `:queries` queue holds `(SQL . RESPONSE)` pairs in execution order, where a response is a result or a function of the connection for execution faults. Unexpected SQL fails; assert that expected queues are consumed so a missing query fails too. Keep connection liveness and commit mode in the fixture, and use focused stubs for construction, timing, faults and UI input rather than replacing the query runner or session cleanup. See the reconnect and REPL tests for examples.
+Query workflow tests can use `clutch-test-conn` from `test/clutch-test-common.el`: its `:queries` queue holds `(SQL . RESPONSE)` pairs in execution order, where a response is a result or a function of the connection for execution faults. Unexpected SQL fails; assert that expected queues are consumed so a missing query fails too. Its optional `:on-disconnect` callback injects a fault before closing the connection. Keep connection liveness and commit mode in the fixture, and use focused stubs for construction, timing, faults and UI input rather than replacing the query runner or session cleanup. See the reconnect and REPL tests for examples.
 
 ## Dependency and surface checks
 
