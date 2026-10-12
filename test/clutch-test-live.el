@@ -1901,14 +1901,19 @@ throughout."
     (unless create (ert-skip "Scoped SQL completion is not supported here"))
     (clutch-test--with-conn conn
       (let ((original (clutch-db-resolution-context conn))
-            requests columns)
-        (cl-labels ((tables-call (_conn schema &rest _)
+            requests columns (checking nil) (namespace-reads 0))
+        (cl-labels ((namespace-call (&rest _)
+                      (when checking (cl-incf namespace-reads)))
+                    (tables-call (_conn schema &rest _)
                       (push schema requests))
                     (columns-call (_conn table _cb &optional _err schema catalog)
                       (push (list catalog schema table) columns))
                     (candidates ()
-                      (when-let* ((capf (clutch-completion-at-point)))
-                        (all-completions "" (nth 2 capf)))))
+                      (setq checking t)
+                      (unwind-protect
+                          (when-let* ((capf (clutch-completion-at-point)))
+                            (all-completions "" (nth 2 capf)))
+                        (setq checking nil))))
           (unwind-protect
               (progn
                 (cl-loop for schema in schemas for n from 1 do
@@ -1918,6 +1923,7 @@ throughout."
                                        schema n))
                          (clutch-db-query
                           conn (format "CREATE TABLE %s.peoxple (wrong INTEGER)" schema)))
+                (advice-add 'clutch-db-current-schema :before #'namespace-call)
                 (advice-add 'clutch-db-schema-tables-async :before #'tables-call)
                 (advice-add 'clutch-db-list-columns-async :before #'columns-call)
                 (clutch-test--with-isolated-metadata-caches
@@ -1945,8 +1951,15 @@ throughout."
                                         (candidates))))
                              (should (= (length (candidates)) 1))
                              (dotimes (_ 10) (candidates))
-                             (should (= (length columns) n)))
+                             (should (= (length columns) n))
+                             (insert (funcall (if oracle #'upcase #'identity)
+                                              (format "side_%d" n)))
+                             (setq checking t)
+                             (unwind-protect (clutch--eldoc-function)
+                               (setq checking nil))
+                             (should (= namespace-reads 0)))
                     (should (equal original (clutch-db-resolution-context conn))))))
+            (advice-remove 'clutch-db-current-schema #'namespace-call)
             (advice-remove 'clutch-db-schema-tables-async #'tables-call)
             (advice-remove 'clutch-db-list-columns-async #'columns-call)
             (dolist (schema (reverse schemas))

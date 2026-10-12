@@ -27,6 +27,7 @@
   :group 'clutch)
 
 (defvar clutch-connection)
+(defvar clutch--connection-render-state)
 (defvar clutch--sql-keywords)
 
 (defvar-local clutch--tables-in-query-cache nil
@@ -64,7 +65,8 @@ and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
   "Format an eldoc string for COL-NAME in TABLE using CONN."
   (let* ((table (if (and (consp table)
                          (null (car table))
-                         (equal (nth 1 table) (clutch-db-current-schema conn))
+                         (equal (nth 1 table)
+                                (plist-get clutch--connection-render-state :namespace))
                          (clutch--column-details-cached-p conn (nth 2 table)))
                     (nth 2 table)
                   table))
@@ -1094,7 +1096,8 @@ when SYNC-COLUMNS-P is nil."
                    (clutch-db--source-table-catalog conn table))))
         (or (plist-get (clutch--table-metadata conn key) :columns)
             (and (not (clutch-db--source-table-catalog conn table))
-                 (equal (nth 1 key) (clutch-db-current-schema conn))
+                 (equal (nth 1 key)
+                        (plist-get clutch--connection-render-state :namespace))
                  (clutch--cached-columns schema (clutch--table-key-name key)))
             (clutch--completion-qualified-columns conn key)))
     (if (clutch-db-completion-deferred-columns-p conn)

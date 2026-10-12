@@ -1734,6 +1734,30 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should-not unique-called)
       (should-not locator-called))))
 
+(ert-deftest clutch-db-test-mysql-column-details-honor-schema ()
+  "Column type, comment, primary key and foreign key share the explicit schema."
+  (require 'mysql)
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "current")))
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (let ((scoped (string-match-p "other" sql)))
+                   (make-mysql-result
+                    :rows (cond
+                           ((string-match-p "INFORMATION_SCHEMA.COLUMNS" sql)
+                            (list (list "name" (if scoped "varchar(17)" "int")
+                                        "NO" nil "" (if scoped "other comment" "wrong"))))
+                           ((string-match-p "SHOW KEYS" sql)
+                            (when scoped '((nil nil nil nil "name"))))
+                           ((string-match-p "KEY_COLUMN_USAGE" sql)
+                            (when scoped '(("name" "parent" "id"))))))))))
+      (let ((column (car (clutch-db-column-details conn "people" "other"))))
+        (should (equal (plist-get column :type) "varchar(17)"))
+        (should (equal (plist-get column :comment) "other comment"))
+        (should (plist-get column :primary-key))
+        (should (equal (plist-get column :foreign-key)
+                       '(:ref-table "parent" :ref-column "id")))))))
+
 (ert-deftest clutch-db-test-mysql-row-identity-uses-unique-scan-without-primary-key ()
   "MySQL row identity should still use unique indexes when no primary key exists."
   (require 'clutch-db-mysql)
@@ -6503,6 +6527,32 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
             (let ((result (clutch-db-query conn "SELECT 1 AS n")))
               (should (= (caar (clutch-db-result-rows result)) 1))))
         (setf (mysql-conn-read-idle-timeout conn) old-timeout)))))
+
+(ert-deftest clutch-db-test-mysql-live-scoped-column-details ()
+  "Same-named tables in different databases retain their own column details."
+  :tags '(:db-live :mysql-live)
+  (clutch-db-test--with-mysql conn
+    (let* ((schema (format "clutch_details_%d" (emacs-pid)))
+           (local (concat schema "_current"))
+           (current (clutch-db-current-schema conn)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE DATABASE %s" schema))
+            (clutch-db-query conn (format "CREATE DATABASE %s" local))
+            (clutch-db-query conn (format "CREATE TABLE %s.people (name INTEGER COMMENT 'wrong')" local))
+            (clutch-db-set-current-schema conn local)
+            (clutch-db-query conn (format "CREATE TABLE %s.parent (id VARCHAR(17) PRIMARY KEY)" schema))
+            (clutch-db-query conn (format "CREATE TABLE %s.people (name VARCHAR(17) PRIMARY KEY COMMENT 'other comment', FOREIGN KEY (name) REFERENCES %s.parent(id))" schema schema))
+            (let ((column (car (clutch-db-column-details conn "people" schema))))
+              (should (equal (plist-get column :type) "varchar(17)"))
+              (should (equal (plist-get column :comment) "other comment"))
+              (should (plist-get column :primary-key))
+              (should (equal (plist-get column :foreign-key)
+                             '(:ref-table "parent" :ref-column "id"))))
+            (should (equal local (clutch-db-current-schema conn))))
+        (clutch-db-set-current-schema conn current)
+        (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" schema))
+        (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" local))))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   "Test MySQL schema introspection."

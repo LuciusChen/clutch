@@ -169,9 +169,19 @@ controls liveness and defaults to t."
      (clutch--set-table-metadata
       clutch-connection "people" :column-details
       '((:name "name" :type "CURRENT_TYPE")))
+     (setq-local clutch--connection-render-state '(:namespace "side"))
      (cl-letf (((symbol-function 'clutch-db-current-schema)
-                (lambda (_conn) "side")))
-       (should (string-match-p "CURRENT_TYPE" (clutch--eldoc-function)))))))
+                (lambda (_conn) (error "Unexpected namespace query"))))
+       (should (string-match-p "CURRENT_TYPE" (clutch--eldoc-function)))
+       (clutch--set-table-metadata
+        clutch-connection '(nil "side" "people") :columns nil)
+       (puthash "people" '("name") (gethash clutch-connection clutch--schema-cache))
+       (erase-buffer)
+       (insert "SELECT p. FROM side.people p")
+       (goto-char (point-min))
+       (search-forward "p.")
+       (let ((capf (clutch-completion-at-point)))
+         (should (equal '("name") (all-completions "" (nth 2 capf)))))))))
 
 (ert-deftest clutch-test-scoped-completion-dispatch-failure-settles ()
   "Dead connections do not dispatch; synchronous failures leave failed status."
