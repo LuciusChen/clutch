@@ -206,35 +206,27 @@
 
 (ert-deftest clutch-test-view-xml-value-enables-fontification ()
   "XML viewer should invoke fontification and show byte size in header."
-  (let ((fontified nil)
-        (buf nil))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
-              ((symbol-function 'nxml-mode) (lambda () nil))
-              ((symbol-function 'font-lock-ensure)
-               (lambda (&rest _args) (setq fontified t)))
-              ((symbol-function 'jit-lock-fontify-now)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'pop-to-buffer)
-               (lambda (b &rest _args)
-                 (setq buf b)
-                 b)))
-      (clutch--dispatch-view "<root><a>1</a></root>" '(:type-category text))
-      (should fontified)
-      (with-current-buffer buf
-        (should (string-match-p "XML" (format "%s" header-line-format)))
-        (should (string-match-p "bytes" (format "%s" header-line-format)))))))
+  (let ((fontified nil))
+    (clutch-test--with-pop-to-buffer-capture buf
+      (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
+                ((symbol-function 'nxml-mode) (lambda () nil))
+                ((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args) (setq fontified t)))
+                ((symbol-function 'jit-lock-fontify-now)
+                 (lambda (&rest _args) nil)))
+        (clutch--dispatch-view "<root><a>1</a></root>" '(:type-category text))
+        (should fontified)
+        (with-current-buffer buf
+          (should (string-match-p "XML" (format "%s" header-line-format)))
+          (should (string-match-p "bytes" (format "%s" header-line-format))))))))
 
 (ert-deftest clutch-test-view-xml-value-decodes-numeric-char-refs-for-display ()
   "XML viewer should display numeric character references as UTF-8 text."
-  (let ((buf nil))
+  (clutch-test--with-pop-to-buffer-capture buf
     (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
               ((symbol-function 'nxml-mode) (lambda () nil))
               ((symbol-function 'font-lock-ensure) (lambda (&rest _args) nil))
-              ((symbol-function 'jit-lock-fontify-now) (lambda (&rest _args) nil))
-              ((symbol-function 'pop-to-buffer)
-               (lambda (b &rest _args)
-                 (setq buf b)
-                 b)))
+              ((symbol-function 'jit-lock-fontify-now) (lambda (&rest _args) nil)))
       (clutch--dispatch-view
        "<?xml version=\"1.0\"?><overlay><zone>&#x6E7E;&#x5CB8;&#x30B1;&#x30FC;&#x30D6;&#x30EB;&#x7DB2;</zone><operator>&#x658E;&#x85E4;</operator></overlay>"
        '(:type-category text))
@@ -253,7 +245,7 @@
                   "<?xml version=\"1.0\"?>\n<root>\n  <a>1</a>\n</root>\n"
                   t)))
     (pcase-let ((`(,raw ,formatted ,expect-declaration) case))
-      (let (buf)
+      (clutch-test--with-pop-to-buffer-capture buf
         (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) t))
                   ((symbol-function 'call-process-region)
                    (lambda (start end _program delete _destination _display &rest _args)
@@ -263,11 +255,7 @@
                      0))
                   ((symbol-function 'nxml-mode) (lambda () nil))
                   ((symbol-function 'font-lock-ensure) (lambda (&rest _args) nil))
-                  ((symbol-function 'jit-lock-fontify-now) (lambda (&rest _args) nil))
-                  ((symbol-function 'pop-to-buffer)
-                   (lambda (b &rest _args)
-                     (setq buf b)
-                     b)))
+                  ((symbol-function 'jit-lock-fontify-now) (lambda (&rest _args) nil)))
           (clutch--dispatch-view raw '(:type-category text))
           (with-current-buffer buf
             (if expect-declaration
@@ -581,22 +569,34 @@
 
 (ert-deftest clutch-test-goto-column-skips-hidden-columns ()
   "Column completion should expose visible names and retain source indices."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("clutch__rid_0" "id" "name")
-                clutch--result-column-defs
-                '((:name "clutch__rid_0" :hidden t)
-                  (:name "id")
-                  (:name "name")))
-    (let (candidates target-index)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt collection &rest _)
-                   (setq candidates collection)
-                   "name"))
-                ((symbol-function 'clutch-result--goto-col-idx)
-                 (lambda (index) (setq target-index index))))
-        (clutch-result-goto-column))
-      (should (equal candidates '("id" "name")))
-      (should (= target-index 2)))))
+  (save-window-excursion
+    (clutch-test--with-result-state
+        (:columns '("clutch__rid_0" "id" "name")
+         :column-defs '((:name "clutch__rid_0" :hidden t)
+                        (:name "id")
+                        (:name "name"))
+         :rows '((10 1 "alice") (20 2 "bob"))
+         :column-widths [4 3 5]
+         :render t)
+      (switch-to-buffer (current-buffer))
+      (clutch--goto-cell 1 1)
+      (let* (candidates target-index
+             (observe-target
+              (lambda (index &optional _keep-view)
+                (setq target-index index))))
+        (unwind-protect
+            (progn
+              (advice-add 'clutch-result--goto-col-idx :before observe-target)
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (_prompt collection &rest _)
+                           (setq candidates collection)
+                           "name")))
+                (clutch-result-goto-column))
+              (should (equal candidates '("id" "name")))
+              (should (= target-index 2))
+              (should (= (get-text-property (point) 'clutch-row-idx) 1))
+              (should (= (get-text-property (point) 'clutch-col-idx) 2)))
+          (advice-remove 'clutch-result--goto-col-idx observe-target))))))
 
 (ert-deftest clutch-test-goto-column-centers-target-column ()
   "Column jumps should center the target column in the current window."
@@ -1394,13 +1394,7 @@ table with its schema."
                   clutch-result-edit--column-detail '(:type "BLOB")
                   clutch-result--edit-callback
                   (lambda (value) (setq captured value)))
-      (cl-letf (((symbol-function 'clutch-result-edit--refresh-record-return-buffer)
-                 #'ignore)
-                ((symbol-function 'clutch-result-edit--clear-active-target)
-                 #'ignore)
-                ((symbol-function 'clutch-result-edit--restore-result-position)
-                 #'ignore)
-                ((symbol-function 'quit-window) #'ignore))
+      (cl-letf (((symbol-function 'quit-window) #'ignore))
         (clutch-result-edit--finish-buffer)))
     (should (equal captured "{\"message\":\"已修改\"}"))
     (should (equal (get-text-property
@@ -1537,19 +1531,13 @@ table with its schema."
 (ert-deftest clutch-test-render-result-includes-all-columns ()
   "Wide tables should keep later columns searchable and reachable by TAB."
   (with-temp-buffer
-    (clutch-result-mode)
-    (setq-local clutch--result-columns '("c1" "c2" "c3" "c4"))
+    (clutch-test--init-result-state
+     (list :connection nil
+           :columns '("c1" "c2" "c3" "c4")
+           :rows '(("a" "b" "c" "needle"))
+           :result-max-rows clutch-result-max-rows
+           :column-widths [5 5 5 6]))
     (setq-local clutch--result-column-defs '(nil nil nil nil))
-    (setq-local clutch--result-rows '(("a" "b" "c" "needle")))
-    (setq-local clutch--filtered-rows nil)
-    (setq-local clutch--pending-edits nil)
-    (setq-local clutch--pending-deletes nil)
-    (setq-local clutch--pending-inserts nil)
-    (setq-local clutch--sort-column nil)
-    (setq-local clutch--sort-descending nil)
-    (setq-local clutch--page-current 0)
-    (setq-local clutch--page-total-rows 1)
-    (setq-local clutch--column-widths [5 5 5 6])
     (clutch--refresh-display)
     (should (string-match-p "needle" (buffer-string)))
     (goto-char (point-min))
@@ -1752,32 +1740,23 @@ Point left behind made the next cell command scroll back to it."
 
 (ert-deftest clutch-test-goto-cell-uses-row-starts-and-fallbacks ()
   "Cell navigation should use cached row starts and fall back within a row."
-  (with-temp-buffer
-    (insert "row0\nrow1\n")
-    (let* ((row0 (point-min))
-           (row1 (save-excursion
-                   (goto-char (point-min))
-                   (forward-line 1)
-                   (point)))
-           (clutch--row-start-positions (vector row0 row1)))
-      (add-text-properties (+ row0 1) (+ row0 2)
-                           '(clutch-row-idx 0 clutch-col-idx 0))
-      (add-text-properties (+ row1 2) (+ row1 3)
-                           '(clutch-row-idx 1 clutch-col-idx 7))
-      (clutch--goto-cell 1 7)
-      (should (= (point) (+ row1 2)))))
-  (with-temp-buffer
-    (insert "row0\nrow1\n")
-    (let* ((row0 (point-min))
-           (row1 (save-excursion
-                   (goto-char (point-min))
-                   (forward-line 1)
-                   (point)))
-           (clutch--row-start-positions (vector row0 row1)))
-      (add-text-properties (+ row1 3) (+ row1 4)
-                           '(clutch-row-idx 1 clutch-col-idx 2))
-      (clutch--goto-cell 1 99)
-      (should (= (point) (+ row1 3))))))
+  (pcase-dolist (`(,requested ,column ,offset ,decoy)
+                 '((7 7 2 t) (99 2 3 nil)))
+    (with-temp-buffer
+      (insert "row0\nrow1\n")
+      (let* ((row0 (point-min))
+             (row1 (save-excursion
+                     (goto-char (point-min))
+                     (forward-line 1)
+                     (point)))
+             (clutch--row-start-positions (vector row0 row1)))
+        (when decoy
+          (add-text-properties (+ row0 1) (+ row0 2)
+                               '(clutch-row-idx 0 clutch-col-idx 0)))
+        (add-text-properties (+ row1 offset) (+ row1 offset 1)
+                             (list 'clutch-row-idx 1 'clutch-col-idx column))
+        (clutch--goto-cell 1 requested)
+        (should (= (point) (+ row1 offset)))))))
 
 (ert-deftest clutch-test-down-cell-stays-in-last-result-cell ()
   "Repeated row navigation should stop in the last result cell."
@@ -1954,19 +1933,13 @@ Point left behind made the next cell command scroll back to it."
         (clutch--replace-row-at-index 0)
         (should refreshed))))
   (with-temp-buffer
-    (clutch-result-mode)
-    (setq-local clutch--result-columns '("name")
-                clutch--result-column-defs '(nil)
-                clutch--result-rows '(("aa"))
-                clutch--filtered-rows nil
-                clutch--pending-edits nil
-                clutch--pending-deletes nil
-                clutch--pending-inserts nil
-                clutch--sort-column nil
-                clutch--sort-descending nil
-                clutch--page-current 0
-                clutch--page-total-rows 1
-                clutch--column-widths [4])
+    (clutch-test--init-result-state
+     (list :connection nil
+           :columns '("name")
+           :rows '(("aa"))
+           :result-max-rows clutch-result-max-rows
+           :column-widths [4]))
+    (setq-local clutch--result-column-defs '(nil))
     (cl-letf (((symbol-function 'display-graphic-p)
                (lambda (&optional _display) t))
               ((symbol-function 'default-font-width)
@@ -1989,29 +1962,28 @@ Point left behind made the next cell command scroll back to it."
 
 (ert-deftest clutch-test-append-and-delete-pending-insert-row-contract ()
   "Pending insert row append/delete should update rendered text and row starts."
-  (with-temp-buffer
-    (clutch-test--setup-rendered-result)
-    (setq-local clutch-connection 'fake-conn
-                clutch--result-source-table "users"
-                clutch--pending-inserts
-                '((("name" . "dana") ("city" . "lima"))))
-    (cl-letf (((symbol-function 'clutch--cached-column-details)
-               (lambda (_conn _table)
-                 '((:name "id")
-                   (:name "name")
-                   (:name "city"))))
-              ((symbol-function 'clutch--ensure-column-details-async)
-               (lambda (&rest _)
-                 (error "cached details should avoid async placeholder load"))))
-      (clutch--append-pending-insert-row 0)
-      (should (= (length clutch--row-start-positions) 4))
-      (let ((line (substring-no-properties (clutch-test--rendered-line-at 3))))
-        (should (string-prefix-p "│I I1 " line))
-        (should (string-match-p "dana" line))
-        (should (string-match-p "lima" line)))
-      (clutch--delete-row-at-index 3)
-      (should (= (length clutch--row-start-positions) 3))
-      (should-not (string-match-p "dana" (buffer-string))))))
+  (clutch-test--with-isolated-metadata-caches
+    (with-temp-buffer
+      (clutch-test--setup-rendered-result)
+      (setq-local clutch-connection (make-clutch-test-conn)
+                  clutch--result-source-table "users"
+                  clutch--pending-inserts
+                  '((("name" . "dana") ("city" . "lima"))))
+      (clutch--set-table-metadata
+       clutch-connection "users" :column-details
+       '((:name "id") (:name "name") (:name "city")))
+      (cl-letf (((symbol-function 'clutch--ensure-column-details-async)
+                 (lambda (&rest _)
+                   (error "cached details should avoid async placeholder load"))))
+        (clutch--append-pending-insert-row 0)
+        (should (= (length clutch--row-start-positions) 4))
+        (let ((line (substring-no-properties (clutch-test--rendered-line-at 3))))
+          (should (string-prefix-p "│I I1 " line))
+          (should (string-match-p "dana" line))
+          (should (string-match-p "lima" line)))
+        (clutch--delete-row-at-index 3)
+        (should (= (length clutch--row-start-positions) 3))
+        (should-not (string-match-p "dana" (buffer-string)))))))
 
 (ert-deftest clutch-test-filter-empty-state-follows-staged-inserts ()
   "The empty filter hint must follow zero-to-one ghost-row transitions."
