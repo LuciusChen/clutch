@@ -144,13 +144,9 @@ document connection."
 (ert-deftest clutch-test-object-browse-contract ()
   "Object browse should validate entries and insert SELECT in the console."
   (with-temp-buffer
-    (setq-local clutch-connection 'fake-conn)
-    (cl-letf (((symbol-function 'clutch--find-console-for-conn)
-               (lambda (_conn) nil))
-              ((symbol-function 'clutch-db-escape-identifier)
-               (lambda (_conn name) name)))
-      (should-error (clutch-object-browse '(:name "users" :type "TABLE"))
-                    :type 'user-error)))
+    (setq-local clutch-connection (make-clutch-test-conn))
+    (should-error (clutch-object-browse '(:name "users" :type "TABLE"))
+                  :type 'user-error))
   (should-error
    (clutch-object-browse '(:name "order_idx" :type "INDEX"))
    :type 'user-error
@@ -196,33 +192,25 @@ document connection."
                   :entry '(:name "order-items" :type "TABLE")
                   :expected "SELECT 1;\n\nSELECT * FROM \"order-items\";")))
     (ert-info ((format "case: %s" (plist-get case :label)))
-      (let ((console (generate-new-buffer " *clutch-test-object-browse*"))
-            (escape-fn (unless (plist-get case :conn)
-                         (lambda (_conn name) (format "\"%s\"" name))))
-            (orig-escape (symbol-function 'clutch-db-escape-identifier)))
+      (let ((console (generate-new-buffer " *clutch-test-object-browse*")))
         (unwind-protect
-            (with-current-buffer console
+            (save-window-excursion
+              (switch-to-buffer console)
+              (clutch-mode)
               (insert (or (plist-get case :initial) ""))
               (setq-local clutch-connection (or (plist-get case :conn)
-                                                'fake-conn))
-              (setq-local clutch--query-buffer-local-p t)
+                                                (make-clutch-test-conn)))
               (when (plist-member case :point-line)
                 (goto-char (point-min))
                 (forward-line (plist-get case :point-line)))
-              (cl-letf (((symbol-function 'derived-mode-p)
-                         (lambda (&rest modes) (memq 'clutch-mode modes)))
-                        ((symbol-function 'pop-to-buffer)
-                         (lambda (buf &rest _args)
-                           (set-buffer buf)
-                           buf))
-                        ((symbol-function 'clutch-db-escape-identifier)
-                         (or escape-fn orig-escape)))
-                (clutch-object-browse (plist-get case :entry))
-                (if-let* ((expected (plist-get case :expected)))
-                    (should (equal (buffer-string) expected))
-                  (should (string-suffix-p (plist-get case :suffix)
-                                           (buffer-string))))))
+              (clutch-object-browse (plist-get case :entry))
+              (if-let* ((expected (plist-get case :expected)))
+                  (should (equal (buffer-string) expected))
+                (should (string-suffix-p (plist-get case :suffix)
+                                         (buffer-string)))))
           (when (buffer-live-p console)
+            (with-current-buffer console
+              (setq-local clutch-connection nil))
             (kill-buffer console)))))))
 
 (ert-deftest clutch-test-object-browse-from-another-buffer-appends-to-console ()
@@ -529,8 +517,7 @@ The exact-name match only needs entries under the name's prefix."
 
 (ert-deftest clutch-test-object-sql-name-never-produces-current-schema-literal ()
   "Browse SQL must use real schema metadata, never current_schema placeholders."
-  (cl-letf (((symbol-function 'clutch-db-escape-identifier)
-             (lambda (_conn id) (format "\"%s\"" id))))
+  (let ((conn (make-clutch-test-conn)))
     (dolist (case
              '(((:name "orders_large" :type "TABLE"
                  :schema "public" :source-schema "public")
@@ -540,7 +527,7 @@ The exact-name match only needs entries under the name's prefix."
                ((:name "orders" :type "TABLE")
                 "\"orders\"")))
       (pcase-let ((`(,entry ,expected) case))
-        (let ((sql-name (clutch--object-sql-name 'fake entry)))
+        (let ((sql-name (clutch--object-sql-name conn entry)))
           (should (equal sql-name expected))
           (should-not (string-match-p "current_schema" sql-name)))))))
 
