@@ -421,6 +421,11 @@ when the user declines."
              (not (yes-or-no-p prompt)))
     (user-error "%s" cancel-message)))
 
+(defun clutch-result--confirm-kill ()
+  "Confirm discarding staged mutations before killing the result buffer."
+  (or (not (clutch-result--pending-changes-p))
+      (yes-or-no-p "Discard staged changes and kill result buffer? ")))
+
 (defun clutch-result--check-pending-changes ()
   "Prompt to discard staged row mutations in the current connection result buffer.
 Signal `user-error' if the user declines."
@@ -1076,6 +1081,7 @@ Edit:
   (add-hook 'post-command-hook
             #'clutch--sync-result-cursor-ui nil t)
   (add-hook 'post-command-hook #'clutch--schedule-cell-preview nil t)
+  (add-hook 'kill-buffer-query-functions #'clutch-result--confirm-kill nil t)
   (add-hook 'kill-buffer-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
