@@ -529,7 +529,9 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
                (should (string-match-p "<generated>" (buffer-string)))
                (should (string-match-p "alice" (buffer-string))))))
        (when (buffer-live-p buf)
-         (kill-buffer buf))))))
+         (with-current-buffer buf
+           (let ((kill-buffer-query-functions nil))
+             (kill-buffer buf))))))))
 
 (ert-deftest clutch-test-foreign-key-refresh-redraws-only-marked-results ()
   "Async foreign keys should redraw a result only when they mark its columns."

@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Closing a result buffer asks before discarding staged edits, inserts or deletes, rather than silently losing them.
+
 - CSV/TSV copy and export distinguish SQL NULL (an unquoted empty field), empty text (`""`) and literal `NULL` text under the default settings. SQL NULL previously became the text `NULL`, indistinguishable from that literal string. This changes the exported NULL representation; importers must use the same convention.
 - PostgreSQL query export runs the query once as `COPY … TO STDOUT` when the installed pgsql.el provides `pgsql-copy-out-async`, instead of fetching LIMIT/OFFSET pages. Without an `ORDER BY` on a unique key, pages of a table larger than a quarter of `shared_buffers` could repeat or skip rows, since synchronized sequential scans start each page's scan at a different block: a 150,000-row export held 81,344 distinct rows. The stream also exported that 200-column table in 4.1 s instead of 32–39 s. XTDB, older pgsql.el, other backends and all-row result export still page.
 - Exporting all rows of a result whose server-side filter (`W`) was cleared fetches them in pages of `clutch-export-page-size` again, instead of the whole result in one query. Clearing the filter dropped the query it had filtered, from which the export decides to page.

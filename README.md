@@ -410,7 +410,7 @@ Common entry points:
 - Explicit SQL row limits (`LIMIT`, `OFFSET`, `TOP`, `FETCH`) remain part of the query during pagination and export. Ordinary column, table and alias names such as `top` or `fetch` do not disable pagination.
 - A statement that writes is not paginated, even when it returns rows. `SELECT ... INTO` runs as written and copies every row; `INSERT ... RETURNING`, a PostgreSQL `SELECT` whose `WITH` clause modifies data, and a DB2 or H2 `SELECT` over a data change table such as `FINAL TABLE (INSERT ...)` run once, and all their rows show on one page.
 - `C-c '` edits the current result cell or record-view field; staging a field edit returns to that field. JSON columns and text values containing JSON objects or arrays open in a JSON editor, and `C-c C-c` stages or `C-c C-k` cancels the edit directly when that JSON editor opened automatically. In ordinary edit buffers, nullable columns offer `C-c C-n` for database `NULL`, while columns with a usable default offer `C-c C-d` for database `DEFAULT`
-- `C-c C-k` discards the staged change at point from a result cell or record-view field
+- `C-c C-k` discards the staged change at point from a result cell or record-view field. Closing a result buffer with staged changes asks before discarding them; it does not submit changes or end a database transaction.
 - `M-x clutch-copy-context-for-agent` copies SQL, table metadata, and the latest matching visible result sample as Markdown for an external agent; the same command is available as `k` in the main and result transients. Table metadata reuses the existing object describe path.
 
 ### MongoDB Backend

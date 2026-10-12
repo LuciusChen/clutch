@@ -127,7 +127,7 @@ JDBC binary values that contain only BLOB length metadata appear as =<BLOB>= in 
 
 ** Edit Buffer Keys
 
-Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: =C-c C-c= stages the edited value, and the result buffer's =C-c C-c= submits all staged row changes.
+Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: =C-c C-c= stages the edited value, and the result buffer's =C-c C-c= submits all staged row changes. Closing a result buffer with staged edits, inserts or deletes asks before discarding them. Declining or pressing =C-g= keeps the buffer and its changes; accepting does not submit changes or end a database transaction.
 
 | Key               | Action                                         |
 |-------------------+------------------------------------------------|
