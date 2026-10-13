@@ -1986,10 +1986,14 @@ throughout."
                                "SELECT b.| FROM %s.peo_ple a JOIN (SELECT side_value AS label FROM %s.peo_ple) b ON 1=1"
                                "SELECT b.| FROM (/* recent */ SELECT * FROM %s.peo_ple) b"
                                "SELECT b.| FROM (SELECT ALL * FROM %s.peo_ple) b"
-                               "SELECT b.| FROM (SELECT ALL p.* FROM %s.peo_ple p) b"))
+                               "SELECT b.| FROM (SELECT ALL p.* FROM %s.peo_ple p) b"
+                               "SELECT b.| FROM (SELECT * FROM %s.peo_ple UNION SELECT * FROM %s.peoxple) b"))
                       (ert-info (shape)
                         (erase-buffer)
-                        (insert (format shape (car schemas) (cadr schemas)))
+                        (insert (format (if oracle
+                                            (string-replace " UNION " " MINUS " shape)
+                                          shape)
+                                        (car schemas) (cadr schemas)))
                         (goto-char (point-min))
                         (search-forward "|")
                         (delete-char -1)

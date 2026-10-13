@@ -236,9 +236,21 @@ POINT-OFFSET is at the top level."
      nil "()")
     result))
 
-(defconst clutch--sql-set-operators-regexp
-  (regexp-opt '("UNION" "EXCEPT" "INTERSECT" "MINUS"))
-  "SQL set operators whose output names come from the first branch.")
+(defun clutch--sql-set-operators-regexp ()
+  "Return set operators for completion on the current connection.
+MINUS is an Oracle operator but a valid identifier in other SQL dialects."
+  (if (and clutch-connection
+           (eq (clutch-backend-sql-product
+                (clutch-db-backend-key clutch-connection)) 'oracle))
+      "\\(?:UNION\\|EXCEPT\\|INTERSECT\\|MINUS\\)"
+    "\\(?:UNION\\|EXCEPT\\|INTERSECT\\)"))
+
+(defun clutch--sql-keyword-p (name)
+  "Return non-nil if NAME is reserved by the completion parser's dialect."
+  (or (member (upcase name) clutch--sql-keywords)
+      (let ((case-fold-search t))
+        (string-match-p (concat "\\`" (clutch--sql-set-operators-regexp) "\\'")
+                        name))))
 
 (defun clutch--union-branch-range-in-scope (text point-offset scope)
   "Return the set-operation branch range in TEXT for POINT-OFFSET within SCOPE.
@@ -255,7 +267,7 @@ inside string literals, comments, or nested parentheses are ignored."
                (boundaries (list 0))
                (case-fold-search t))
     (let ((matches (clutch-db-sql-code-match-positions
-                    sub 0 nil (concat "\\b" clutch--sql-set-operators-regexp
+                    sub 0 nil (concat "\\b" (clutch--sql-set-operators-regexp)
                                      "\\b\\(?:[ \t\n\r]+\\(?:all\\|distinct\\)\\b\\)?"))))
       (clutch-db-sql-scan-code
        sub 0 nil
@@ -290,7 +302,7 @@ Commas in projections, expressions, literals and comments are not sources."
   (let* ((matches (clutch-db-sql-code-match-positions
                    sql 0 nil
                    (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
-                           clutch--sql-set-operators-regexp
+                           (clutch--sql-set-operators-regexp)
                            "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
          sources first-source)
@@ -329,7 +341,7 @@ Commas in projections, expressions, literals and comments are not sources."
 Expression parentheses do not create query scopes."
   (let* ((matches (clutch-db-sql-code-match-positions
                    sql 0 nil (concat "\\b\\(?:select\\|"
-                                     clutch--sql-set-operators-regexp "\\)\\b\\|[()]")))
+                                     (clutch--sql-set-operators-regexp) "\\)\\b\\|[()]")))
          (stack (list (cons 0 nil)))
          regions)
     (clutch-db-sql-scan-code
@@ -403,7 +415,7 @@ OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
             (let ((alias-end (match-end 0))
                   (name (clutch--normalize-statement-table-token
                          (match-string 1 sql))))
-              (unless (member (upcase name) clutch--sql-keywords)
+              (unless (clutch--sql-keyword-p name)
                 (setq alias name end alias-end))))
           ;; A column-name list overrides this projection.  Do not offer the
           ;; original names until that separate SQL form is supported.
@@ -425,7 +437,7 @@ OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
            (case-fold-search t)
            (sql (clutch-db-sql-strip-leading-comments sql))
            (branch-end (clutch-db-sql-find-top-level-clause
-                        sql clutch--sql-set-operators-regexp))
+                        sql (clutch--sql-set-operators-regexp)))
            (sql (if branch-end (substring sql 0 branch-end) sql))
            (from (clutch-db-sql-find-top-level-clause sql "FROM"))
            (sources (and from (clutch--completion-query-sources sql output-plans)))
@@ -543,7 +555,7 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
             (let ((alias-consumed-match-end (match-end 0)))
               (when-let* ((alias-token (match-string 1 text))
                           (alias (clutch--normalize-statement-table-token alias-token))
-                          ((not (member (upcase alias) clutch--sql-keywords))))
+                          ((not (clutch--sql-keyword-p alias))))
                 (setq alias-consumed-end alias-consumed-match-end)
                 (push (cons alias table) aliases))))
           (setq pos alias-consumed-end)
@@ -596,7 +608,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
             (let* ((token (match-string 1 text))
                    (normalized (clutch--normalize-statement-table-token token)))
               (when (and normalized
-                         (not (member (upcase normalized) clutch--sql-keywords))
+                         (not (clutch--sql-keyword-p normalized))
                          (string= (downcase normalized) (downcase alias)))
                 (setq alias-pos (+ stmt-beg (match-beginning 1))))))
           (when alias-pos
@@ -819,7 +831,7 @@ like `orders.id' within the current statement."
     "CREATE" "ALTER" "DROP" "TABLE" "INDEX" "VIEW" "DATABASE"
     "GROUP" "BY" "ORDER" "ASC" "DESC" "HAVING" "LIMIT" "OFFSET"
     "PARTITION"
-    "UNION" "EXCEPT" "INTERSECT" "MINUS" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
+    "UNION" "EXCEPT" "INTERSECT" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
     "IF" "IFNULL" "COALESCE" "CAST" "CONCAT" "SUBSTRING"
     "PRIMARY" "KEY" "FOREIGN" "REFERENCES" "CONSTRAINT" "DEFAULT"
     "UNIQUE" "CHECK" "AUTO_INCREMENT"

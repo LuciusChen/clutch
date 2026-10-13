@@ -18,7 +18,7 @@
 
 ### Fixed
 
-- SQL completion recognizes comma-separated FROM sources and derived-table aliases, using the subquery output names instead of exposing every column of its base tables. Projection commas preserve following FROM sources; leading comments, SELECT ALL, no-FROM trailing clauses and set-operation output names are recognized.
+- SQL completion recognizes comma-separated FROM sources and derived-table aliases, using the subquery output names instead of exposing every column of its base tables. Projection commas preserve following FROM sources; leading comments, SELECT ALL, no-FROM trailing clauses and set-operation output names are recognized. MINUS is recognized only for Oracle so other backends retain identifiers named minus.
 
 - JDBC column names and details on DuckDB and SQL Server treat schema/table names literally, including `_`, `%` and backslash, so column eldoc cannot cache another schema or table's type under the requested name.
 

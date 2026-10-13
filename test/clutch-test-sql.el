@@ -98,7 +98,7 @@ controls liveness and defaults to t."
   (clutch-test--with-isolated-metadata-caches
    (with-temp-buffer
      (clutch-mode)
-     (setq-local clutch-connection (make-clutch-test-conn))
+     (setq-local clutch-connection (make-clutch-test-conn :backend 'oracle))
      (clutch--set-table-metadata
       clutch-connection '(nil "side" "people") :columns '("id" "name"))
      (clutch--set-table-metadata
@@ -161,13 +161,18 @@ controls liveness and defaults to t."
            (clutch-mode)
            (setq-local clutch-connection conn)
            (clutch-db-query conn "CREATE TABLE people (name TEXT)")
+           (clutch-db-query conn "CREATE TABLE metrics (id INTEGER, minus INTEGER)")
            (clutch-db-query conn "ATTACH ':memory:' AS other")
            (clutch-db-query conn "CREATE TABLE other.people (other_name TEXT)")
            (let ((schema (make-hash-table :test 'equal)))
              (puthash "people" '("name") schema)
+             (puthash "metrics" '("id" "minus") schema)
              (puthash conn schema clutch--schema-cache)
              (dolist (case '(("SELECT p. FROM main.people p" "name")
-                             ("SELECT p. FROM other.people p" "other_name")))
+                             ("SELECT p. FROM other.people p" "other_name")
+                             ("SELECT d. FROM (SELECT minus FROM metrics) d" "minus")
+                             ("SELECT minus. FROM metrics minus" "id" "minus")
+                             ("SELECT id FROM metrics p WHERE minus = 1 AND p. " "id" "minus")))
                (ert-info ((format "completion: %s" (car case)))
                  (erase-buffer)
                  (insert (car case))
