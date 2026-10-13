@@ -1943,9 +1943,9 @@ throughout."
                              (dotimes (_ 10) (candidates))
                              (should (= (length requests) n))
                              (erase-buffer)
-                             (insert (format "SELECT p. FROM %s.peo_ple p" schema))
+                             (insert (format "SELECT b. FROM (SELECT * FROM %s.peo_ple) b" schema))
                              (goto-char (point-min))
-                             (search-forward "p.")
+                             (search-forward "b.")
                              (should-not (candidates))
                              (clutch-test--await
                               (lambda ()
@@ -1955,6 +1955,10 @@ throughout."
                              (should (= (length (candidates)) 1))
                              (dotimes (_ 10) (candidates))
                              (should (= (length columns) n))
+                             (erase-buffer)
+                             (insert (format "SELECT p. FROM %s.peo_ple p" schema))
+                             (goto-char (point-min))
+                             (search-forward "p.")
                              (insert (funcall (if oracle #'upcase #'identity)
                                               "side_value"))
                              (setq checking t)
@@ -1974,6 +1978,32 @@ throughout."
                                  (should (string-match-p
                                           (if (= n 1) "int\\|number" "varchar\\|character varying")
                                           (downcase (plist-get (car details) :type)))))))
+                    (dolist (shape
+                             '("SELECT * FROM %s.peo_ple a, %s.|"
+                               "SELECT b.| FROM %s.peo_ple a, %s.peo_ple b"
+                               "SELECT b.| FROM %s.peo_ple a JOIN (SELECT * FROM %s.peo_ple) b ON 1=1"
+                               "SELECT * FROM %s.peo_ple a JOIN (SELECT * FROM %s.peo_ple) b ON b.side_value=b.|"
+                               "SELECT b.| FROM %s.peo_ple a JOIN (SELECT side_value AS label FROM %s.peo_ple) b ON 1=1"))
+                      (ert-info (shape)
+                        (erase-buffer)
+                        (insert (format shape (car schemas) (cadr schemas)))
+                        (goto-char (point-min))
+                        (search-forward "|")
+                        (delete-char -1)
+                        (let* ((names (candidates))
+                               (expected (cond
+                                          ((string-prefix-p "SELECT * FROM %s.peo_ple a, " shape)
+                                           (if oracle "PEO_PLE" "peo_ple"))
+                                          ((string-match-p "AS label" shape) "label")
+                                          (oracle "SIDE_VALUE")
+                                          (t "side_value"))))
+                          (should (member expected names))
+                          (insert expected)
+                          ;; Validate the completed SQL against the real server too.
+                          (clutch-db-query conn (buffer-string)))))
+                    (should (= (length columns) 2))
+                    (should (= (length requests) 2))
+                    (should (= namespace-reads 0))
                     (should (equal original (clutch-db-resolution-context conn))))))
             (advice-remove 'clutch-db-current-schema #'namespace-call)
             (advice-remove 'clutch-db-schema-tables-async #'tables-call)

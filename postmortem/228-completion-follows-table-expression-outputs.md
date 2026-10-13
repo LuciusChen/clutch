@@ -1,0 +1,27 @@
+# Completion follows table-expression outputs
+
+## Problem and decision
+
+Issue #167 confirmed that direct schema-qualified JOINs completed, while a second comma-separated FROM source and aliases of derived SELECTs did not. The original cross-schema tests covered cache isolation and direct aliases, not these SQL shapes. Reproduce through the public CAPF before changing production code.
+
+Keep the existing statement cache as the owner of source positions and derived output plans. A lexical scan distinguishes FROM-list commas from commas in SELECT lists, arguments, literals and comments. Existing table extraction consumes those positions; derived aliases resolve to selected output names, not guessed base-table aliases. Star projections use the existing metadata path, including asynchronous scoped column loading, while named projections need no database request. Query regions keep nested aliases and UNION branches apart. A temporary map shares parsed subquery outputs across regions during one analysis; only the existing statement cache retains the resulting plans. There is no new metadata cache, backend protocol, dependency or database query for parsing.
+
+This remains a lightweight completion parser. It does not infer writable row identity or derived-column eldoc, resolve CTE outputs or derived-table column-name lists, or model every dialect-specific SELECT modifier. Expressions need explicit AS aliases for portable output names; direct column aliases may omit AS. Unqualified star sources retain the existing backend completion behavior.
+
+## Evidence
+
+The public CAPF regression failed on main for the comma-separated schema qualifier. Independently disabling comma-source detection or derived-alias resolution makes it fail in the respective reported scenario. Its cases now cover comma-source aliases, derived aliases in SELECT and ON, explicit projections, renamed and computed outputs, qualified and nested stars, UNION names and scopes, and commas outside FROM. The existing five-backend live test starts with cold derived-star completion, checks cached requests and absence of current-schema reads, and executes completed comma-list and derived-table SQL against disposable native PostgreSQL/MySQL and JDBC Oracle/SQL Server/file-backed DuckDB databases.
+
+## Performance
+
+Compiled Emacs 32 code, warmed libraries and cached metadata: a 60,028-byte SELECT with 10,000 projected columns averaged 2.14 ms for first analysis and 0.44 ms for cached completion on main; the new code averaged 3.85 ms and 0.43 ms respectively. The first implementation took 21 ms for first analysis because every projection comma became a scanner candidate. Collecting comma candidates only after the first FROM/JOIN and reusing the source scan removed that overhead. This still adds first-analysis work; it does not make the old path faster. SQL edits invalidate the statement analysis as before.
+
+A separate nested-query stress probe found that reparsing each enclosing region took 213 ms at 40 nested derived tables. Sharing output plans during one analysis reduced this to 22 ms; 10 levels took 2.2 ms. This is not a claim of linear parsing for arbitrary nesting.
+
+Separate disposable live probes using final compiled code measured cached CAPF means of 0.039 ms on PostgreSQL, 0.032 ms on MySQL, 0.056 ms on Oracle, 0.089 ms on SQL Server and 0.047 ms on file-backed DuckDB; maxima ranged from 0.122 to 0.268 ms. First-analysis/dispatch calls averaged 0.254–0.541 ms, with a maximum of 1.143 ms. Each backend probe also passed the completed-SQL live test. These are local command durations, not time until asynchronously requested metadata arrives or a bound on remote driver latency. Performance probes are temporary artifacts, not permanent benchmark tests.
+
+## Verification
+
+The full native/JDBC matrix passed all 15 suites: 251 passed, 224 capability skips, no failures. The initial matrix stopped on a new fixture assertion that mistook a trailing ON-column qualifier for a table-name slot; its expected value was corrected before the successful run. Temporary containers and volumes were removed; production connections and the installed Emacs plugin were untouched.
+
+The full non-live gate passed on Emacs 29.4, 30.2 and 32: 946 passed and four skipped per version, with byte compilation, package-lint, checkdoc and architecture checks clean.
