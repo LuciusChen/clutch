@@ -1983,7 +1983,10 @@ throughout."
                                "SELECT b.| FROM %s.peo_ple a, %s.peo_ple b"
                                "SELECT b.| FROM %s.peo_ple a JOIN (SELECT * FROM %s.peo_ple) b ON 1=1"
                                "SELECT * FROM %s.peo_ple a JOIN (SELECT * FROM %s.peo_ple) b ON b.side_value=b.|"
-                               "SELECT b.| FROM %s.peo_ple a JOIN (SELECT side_value AS label FROM %s.peo_ple) b ON 1=1"))
+                               "SELECT b.| FROM %s.peo_ple a JOIN (SELECT side_value AS label FROM %s.peo_ple) b ON 1=1"
+                               "SELECT b.| FROM (/* recent */ SELECT * FROM %s.peo_ple) b"
+                               "SELECT b.| FROM (SELECT ALL * FROM %s.peo_ple) b"
+                               "SELECT b.| FROM (SELECT ALL p.* FROM %s.peo_ple p) b"))
                       (ert-info (shape)
                         (erase-buffer)
                         (insert (format shape (car schemas) (cadr schemas)))

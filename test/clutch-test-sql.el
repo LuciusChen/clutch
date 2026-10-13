@@ -101,6 +101,9 @@ controls liveness and defaults to t."
      (setq-local clutch-connection (make-clutch-test-conn))
      (clutch--set-table-metadata
       clutch-connection '(nil "side" "people") :columns '("id" "name"))
+     (clutch--set-table-metadata
+      clutch-connection '(nil "side" "archive")
+      :columns '("other_id" "other_name"))
      (cl-letf (((symbol-function 'clutch-db-schema-tables-async)
                 (lambda (_conn namespace success &optional _error)
                   (should (equal namespace "side"))
@@ -108,6 +111,16 @@ controls liveness and defaults to t."
        (dolist (case
                 '(("SELECT * FROM main.people a, side.|" "people")
                   ("SELECT b.| FROM main.people a, side.people b" "id" "name")
+                  ("SELECT id, | FROM side.people u" "id" "name")
+                  ("SELECT b.| FROM (/* recent */ SELECT id FROM side.people) b" "id")
+                  ("SELECT b.| FROM (SELECT 1 AS id LIMIT 1) b" "id")
+                  ("SELECT b.| FROM (SELECT 1 AS id ORDER BY id) b" "id")
+                  ("SELECT b.| FROM (SELECT ALL * FROM side.people) b" "id" "name")
+                  ("SELECT b.| FROM (SELECT ALL p.* FROM side.people p) b" "id" "name")
+                  ("SELECT b.| FROM (SELECT * FROM side.people EXCEPT SELECT * FROM side.archive) b" "id" "name")
+                  ("SELECT * FROM (SELECT id AS first FROM side.people) b EXCEPT SELECT b.| FROM (SELECT name AS second FROM side.people) b" "second")
+                  ("SELECT b.| FROM (SELECT * FROM side.people INTERSECT SELECT * FROM side.archive) b" "id" "name")
+                  ("SELECT b.| FROM (SELECT * FROM side.people MINUS SELECT * FROM side.archive) b" "id" "name")
                   ("SELECT b.| FROM main.people a JOIN (SELECT * FROM side.people) b ON a.id=b.id" "id" "name")
                   ("SELECT * FROM main.people a JOIN (SELECT * FROM side.people) b ON a.id=b.|" "id" "name")
                   ("SELECT b.| FROM (SELECT id, name AS label FROM side.people) b" "id" "label")

@@ -236,9 +236,13 @@ POINT-OFFSET is at the top level."
      nil "()")
     result))
 
+(defconst clutch--sql-set-operators-regexp
+  (regexp-opt '("UNION" "EXCEPT" "INTERSECT" "MINUS"))
+  "SQL set operators whose output names come from the first branch.")
+
 (defun clutch--union-branch-range-in-scope (text point-offset scope)
-  "Return the UNION branch range in TEXT for POINT-OFFSET within SCOPE.
-SCOPE is a (BEG . END) pair in TEXT coordinates.  UNION / UNION ALL keywords
+  "Return the set-operation branch range in TEXT for POINT-OFFSET within SCOPE.
+SCOPE is a (BEG . END) pair in TEXT coordinates.  Set-operation keywords
 inside string literals, comments, or nested parentheses are ignored."
   (pcase-let* ((`(,scope-beg . ,scope-end) scope)
                (sub (substring text scope-beg scope-end))
@@ -251,7 +255,8 @@ inside string literals, comments, or nested parentheses are ignored."
                (boundaries (list 0))
                (case-fold-search t))
     (let ((matches (clutch-db-sql-code-match-positions
-                    sub 0 nil "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?")))
+                    sub 0 nil (concat "\\b" clutch--sql-set-operators-regexp
+                                     "\\b\\(?:[ \t\n\r]+\\(?:all\\|distinct\\)\\b\\)?"))))
       (clutch-db-sql-scan-code
        sub 0 nil
        (lambda (pos _ch depth)
@@ -272,9 +277,9 @@ inside string literals, comments, or nested parentheses are ignored."
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
 (defun clutch--union-branch-range (text point-offset)
-  "Return (BEG . END) of the UNION branch in TEXT containing POINT-OFFSET.
+  "Return (BEG . END) of the set-operation branch in TEXT containing POINT-OFFSET.
 First narrows to the innermost parenthesized scope, then splits by
-UNION / UNION ALL at depth 0 within that scope."
+set operators at depth 0 within that scope."
   (clutch--union-branch-range-in-scope
    text point-offset
    (clutch--innermost-paren-range text point-offset)))
@@ -284,7 +289,9 @@ UNION / UNION ALL at depth 0 within that scope."
 Commas in projections, expressions, literals and comments are not sources."
   (let* ((matches (clutch-db-sql-code-match-positions
                    sql 0 nil
-                   "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|union\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]"))
+                   (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
+                           clutch--sql-set-operators-regexp
+                           "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
          sources first-source)
     (maphash (lambda (pos end)
@@ -318,10 +325,11 @@ Commas in projections, expressions, literals and comments are not sources."
     (nreverse sources)))
 
 (defun clutch--completion-query-regions (sql)
-  "Return SELECT query regions in SQL, splitting UNION branches.
+  "Return SELECT query regions in SQL, splitting set-operation branches.
 Expression parentheses do not create query scopes."
   (let* ((matches (clutch-db-sql-code-match-positions
-                   sql 0 nil "\\b\\(?:select\\|union\\)\\b\\|[()]"))
+                   sql 0 nil (concat "\\b\\(?:select\\|"
+                                     clutch--sql-set-operators-regexp "\\)\\b\\|[()]")))
          (stack (list (cons 0 nil)))
          regions)
     (clutch-db-sql-scan-code
@@ -333,8 +341,8 @@ Expression parentheses do not create query scopes."
          (when (cdr (car stack))
            (push (cons (caar stack) pos) regions))
          (when (cdr stack) (pop stack)))
-        ((string-equal-ignore-case
-          (substring sql pos (gethash pos matches)) "UNION")
+        ((not (string-equal-ignore-case
+               (substring sql pos (gethash pos matches)) "SELECT"))
          (when (cdr (car stack))
            (push (cons (caar stack) pos) regions))
          (setcar (car stack) (gethash pos matches))
@@ -415,13 +423,18 @@ OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
       (gethash sql output-plans)
     (let* ((original-sql sql)
            (case-fold-search t)
-           (union (clutch-db-sql-find-top-level-clause sql "UNION"))
-           (sql (if union (substring sql 0 union) sql))
+           (sql (clutch-db-sql-strip-leading-comments sql))
+           (branch-end (clutch-db-sql-find-top-level-clause
+                        sql clutch--sql-set-operators-regexp))
+           (sql (if branch-end (substring sql 0 branch-end) sql))
            (from (clutch-db-sql-find-top-level-clause sql "FROM"))
            (sources (and from (clutch--completion-query-sources sql output-plans)))
-           (end (or from (length sql)))
+           (end (or from
+                    (clutch-db-sql-find-top-level-clause
+                     sql "\\(?:FROM\\|WHERE\\|GROUP\\|HAVING\\|ORDER\\|LIMIT\\|OFFSET\\|FETCH\\|FOR\\)")
+                    (length sql)))
            items start plan)
-      (when (string-match "\\`[ \t\n\r]*SELECT\\b[ \t\n\r]*\\(?:DISTINCT\\b[ \t\n\r]*\\)?" sql)
+      (when (string-match "\\`[ \t\n\r]*SELECT\\b[ \t\n\r]*\\(?:\\(?:DISTINCT\\|ALL\\)\\b[ \t\n\r]*\\)?" sql)
         (setq start (match-end 0))
         (clutch-db-sql-scan-code
          sql start end
@@ -508,7 +521,7 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
                 (< (match-beginning 0) end))
       (if (and (equal (match-string 1 text) ",")
                (not (gethash (1+ (match-beginning 1)) comma-sources)))
-          (setq pos (match-end 0))
+          (setq pos (1+ (match-beginning 1)))
         (let* ((dml-match (match-string 1 text))
                (table-end (or (match-end 2)
                               (match-end 3)
@@ -538,8 +551,8 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
     (cons (nreverse tables) (nreverse aliases))))
 
 (defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings for the UNION branch in SCHEMA containing point.
-When the statement has no UNION, returns all aliases."
+  "Return alias-to-table mappings in SCHEMA for point's set-operation branch.
+When the statement has no set operation, returns all aliases."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (all-aliases (plist-get entry :statement-aliases))
          (stmt-beg (plist-get entry :beg))
@@ -552,7 +565,7 @@ When the statement has no UNION, returns all aliases."
       (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
-  "Return (BEG . END) of the depth-0 UNION branch in TEXT containing POINT-OFFSET.
+  "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
 Unlike `clutch--union-branch-range', does not narrow into parenthesized
 scopes first, so FROM/JOIN clauses remain visible from inside expressions."
   (clutch--union-branch-range-in-scope
@@ -592,7 +605,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.
 First searches the innermost paren scope (subquery), then falls back to
-the top-level UNION branch so expression parens like SUM(...) don't hide
+the top-level set-operation branch so expression parens like SUM(...) don't hide
 outer FROM/JOIN clauses."
   (let* ((bounds (clutch--statement-bounds))
          (stmt-beg (car bounds))
@@ -806,7 +819,7 @@ like `orders.id' within the current statement."
     "CREATE" "ALTER" "DROP" "TABLE" "INDEX" "VIEW" "DATABASE"
     "GROUP" "BY" "ORDER" "ASC" "DESC" "HAVING" "LIMIT" "OFFSET"
     "PARTITION"
-    "UNION" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
+    "UNION" "EXCEPT" "INTERSECT" "MINUS" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
     "IF" "IFNULL" "COALESCE" "CAST" "CONCAT" "SUBSTRING"
     "PRIMARY" "KEY" "FOREIGN" "REFERENCES" "CONSTRAINT" "DEFAULT"
     "UNIQUE" "CHECK" "AUTO_INCREMENT"
