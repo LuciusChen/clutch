@@ -1544,7 +1544,7 @@ Structure is not interpreted here; callers confirm depth and literals through
   (clutch-test--with-isolated-metadata-caches
     (let* ((conn (make-clutch-test-conn :backend 'pg))
            (schema (make-hash-table :test 'equal)))
-      (puthash "users" '("id" "UserName" "odd\"name" "select" "SELECT") schema)
+      (puthash "users" '("id" "arr" "IndexValue" "UserName" "odd\"name" "select" "SELECT") schema)
       (puthash "User Table" nil schema)
       (puthash conn schema clutch--schema-cache)
       (puthash conn '(:state ready) clutch--schema-status-cache)
@@ -1562,6 +1562,8 @@ Structure is not interpreted here; callers confirm depth and literals through
                       "SELECT \"odd\"\"name\" FROM users")
                      ("SELECT sele| FROM users" "select"
                       "SELECT \"select\" FROM users")
+                     ("SELECT arr[Ind|] FROM users" "IndexValue"
+                      "SELECT arr[\"IndexValue\"] FROM users")
                      ("SELECT SEL| FROM users" "SELECT"
                       "SELECT \"SELECT\" FROM users")
                      ("SELECT d.La| FROM (SELECT id AS Label FROM users) d" "Label"
@@ -1586,6 +1588,33 @@ Structure is not interpreted here; callers confirm depth and literals through
               (insert candidate)
               (funcall (plist-get (cdddr capf) :exit-function) candidate 'finished)
               (should (equal (buffer-string) (nth 2 case))))))))))
+
+(ert-deftest clutch-test-completion-quoted-prefix-reaches-cold-backend ()
+  "Quoted prefixes reach a cold Oracle metadata lookup without delimiters."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((conn (make-clutch-jdbc-conn :driver 'oracle))
+           (schema (make-hash-table :test 'equal)))
+      (puthash "users" nil schema)
+      (puthash conn schema clutch--schema-cache)
+      (puthash conn '(:state ready) clutch--schema-status-cache)
+      (dolist (case '(("SELECT u.\"odd\"\"n|\" FROM users u" "odd\"n")
+                      ("SELECT u.\"|\" FROM users u" "")))
+        (ert-info ((car case))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (insert (car case))
+            (goto-char (point-min)) (search-forward "|") (delete-char -1)
+            (let (requested)
+              (cl-letf (((symbol-function 'clutch-db-complete-columns)
+                         (lambda (_conn table prefix)
+                           (should (equal table "users"))
+                           (push prefix requested)
+                           (when (string-empty-p prefix) '("UserName")))))
+                (if (string-empty-p (cadr case))
+                    (should (clutch-completion-at-point))
+                  (should-not (clutch-completion-at-point)))
+                (should (equal requested (list (cadr case))))))))))))
 
 (ert-deftest clutch-test-completion-quotes-backend-dialects ()
   "Completion delegates identifier spelling to native and JDBC dialects."

@@ -1890,14 +1890,17 @@ throughout."
   (unless (memq (clutch-test-live-backend-id) '(pg mysql oracle sqlserver duckdb))
     (ert-skip "Identifier completion is not supported by this live backend"))
   (clutch-test--with-conn conn
-    (let ((table (format "clutch_quote_%d" (emacs-pid))))
+    (let ((table (format "clutch_quote_%d" (emacs-pid)))
+          (array-p (memq (clutch-test-live-backend-id) '(pg duckdb))))
       (unwind-protect
           (progn
             (clutch-db-query
-             conn (format "CREATE TABLE %s (id INTEGER, %s INTEGER, %s VARCHAR(64))"
+             conn (format "CREATE TABLE %s (id INTEGER, %s INTEGER, %s VARCHAR(64)%s)"
                           table (clutch-db-escape-identifier conn "SELECT")
-                          (clutch-db-escape-identifier conn "UserName")))
-            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, 7, 'Alice')" table))
+                          (clutch-db-escape-identifier conn "UserName")
+                          (if array-p ", arr INTEGER[], \"IndexValue\" INTEGER" "")))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, 7, 'Alice'%s)"
+                                          table (if array-p ", ARRAY[11,22], 2" "")))
             (clutch-test--with-isolated-metadata-caches
               (with-temp-buffer
                 (clutch-mode)
@@ -1905,13 +1908,17 @@ throughout."
                 (let ((schema (make-hash-table :test 'equal)))
                   (puthash table (clutch-db-list-columns conn table) schema)
                   (puthash conn schema clutch--schema-cache))
-                (dolist (case '(("SELECT UserN| FROM %s" "Alice")
-                                ("SELECT SEL| FROM %s" "7")
-                                ("SELECT d.La| FROM (SELECT id AS Label FROM %s) d" "1")
-                                ("SELECT d.La| FROM (SELECT id AS %s FROM %s) d" "1")
-                                ("SELECT d.I| FROM (SELECT ID FROM %s) d" "1")
-                                ("SELECT d.La| FROM (SELECT q.* FROM (SELECT id AS Label FROM %s) q) d" "1")
-                                ("SELECT \"Us|\" FROM %s" "Alice")))
+                (dolist (case (append '(("SELECT UserN| FROM %s" "Alice")
+                                        ("SELECT SEL| FROM %s" "7")
+                                        ("SELECT d.La| FROM (SELECT id AS Label FROM %s) d" "1")
+                                        ("SELECT d.La| FROM (SELECT id AS %s FROM %s) d" "1")
+                                        ("SELECT d.I| FROM (SELECT ID FROM %s) d" "1")
+                                        ("SELECT d.La| FROM (SELECT q.* FROM (SELECT id AS Label FROM %s) q) d" "1")
+                                        ("SELECT \"Us|\" FROM %s" "Alice"))
+                                      (when array-p
+                                        '(("SELECT arr[IndexV|] FROM %s" "22")))
+                                      (when (eq (clutch-test-live-backend-id) 'sqlserver)
+                                        '(("SELECT [UserN|] FROM %s" "Alice")))))
                   (ert-info ((car case))
                     (erase-buffer)
                     (insert (if (string-match-p "AS %s" (car case))
@@ -1926,9 +1933,17 @@ throughout."
                     (let ((rows (clutch-db-result-rows
                                  (clutch-db-query conn (buffer-string)))))
                       (should (equal (mapcar (lambda (row)
-                                              (clutch-test--live-row-prefix-strings row 1))
-                                            rows)
-                                     (list (list (cadr case)))))))))))
+                                               (clutch-test--live-row-prefix-strings row 1))
+                                             rows)
+                                     (list (list (cadr case))))))))
+                (when (eq (clutch-test-live-backend-id) 'oracle)
+                  ;; Empty quoted prefixes must reach Oracle's cold search path.
+                  (puthash table nil (gethash conn clutch--schema-cache))
+                  (erase-buffer)
+                  (insert (format "SELECT u.\"\" FROM %s u" table))
+                  (goto-char (point-min)) (search-forward "u.\"")
+                  (let ((capf (clutch-completion-at-point)))
+                    (should (member "UserName" (clutch-test--completion-candidates capf))))))))
         (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" table)))))))
 
 (ert-deftest clutch-test-live-cross-schema-completion ()

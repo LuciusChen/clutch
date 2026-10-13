@@ -1282,17 +1282,23 @@ SQL-derived names keep their original token instead of acquiring catalog quotes.
 (defun clutch--completion-quoted-identifier ()
   "Return bounds and delimiters of the quoted identifier at point, or nil.
 The bounds cover its contents, excluding quotes.  An unfinished identifier
-ends at point, leaving following SQL intact."
+ends at point, leaving following SQL intact.  Square brackets are identifier
+quotes only for SQLite and SQL Server; elsewhere they may be array subscripts."
   (let* ((bounds (clutch--statement-bounds))
          (beg (car bounds))
          (sql (buffer-substring-no-properties beg (cdr bounds)))
          (offset (- (point) beg))
          (dialect (clutch-db-connection-sql-dialect clutch-connection))
+         (brackets-p (memq (clutch-db-backend-key clutch-connection)
+                           '(sqlite sqlserver)))
          (pos 0)
          result)
     ;; Search delimiters in C rather than invoking the lexer for every character.
     (while (and (not result)
-                (string-match (rx (any ?\" ?\' ?` ?\[ ?/ ?$ ?-)) sql pos)
+                (string-match (if brackets-p
+                                  (rx (in ?\" ?\' ?` ?\[ ?/ ?$ ?-))
+                                (rx (in ?\" ?\' ?` ?/ ?$ ?-)))
+                              sql pos)
                 (< (match-beginning 0) offset))
       (setq pos (match-beginning 0))
       (let ((end (clutch-db-sql-skip-literal-or-comment sql pos t dialect)))
@@ -1596,11 +1602,9 @@ when completion triggers during an in-flight query)."
            (end (cdr bounds))
            (context-beg (if quoted (1- beg) beg))
            (prefix (if quoted
-                       (clutch-db-sql--unquote-identifier
-                        (concat (string (if (eq (plist-get quoted :delimiter) ?\])
-                                            ?\[ (plist-get quoted :delimiter)))
-                                (buffer-substring-no-properties beg end)
-                                (string (plist-get quoted :delimiter))))
+                       (let ((delimiter (string (plist-get quoted :delimiter))))
+                         (string-replace (concat delimiter delimiter) delimiter
+                                         (buffer-substring-no-properties beg end)))
                      (buffer-substring-no-properties beg end)))
            (prefix-len (- end beg))
            (qualified-empty-prefix-p (and qualified-bounds (not symbol-bounds)))
