@@ -162,9 +162,12 @@ BOUNDS, when non-nil, is the already computed statement range."
   (pcase-let* ((`(,beg . ,end) (or bounds (clutch--statement-bounds)))
                (tick (buffer-chars-modified-tick))
                (text (buffer-substring-no-properties beg end))
+               (from-sources (clutch--sql-from-source-positions text))
                (`(,found . ,aliases)
-                (clutch--extract-tables-and-aliases text 0 (length text) t))
-               (statement-tables (delete-dups found)))
+                (clutch--extract-tables-and-aliases
+                 text 0 (length text) t from-sources))
+               (statement-tables (delete-dups found))
+               (output-plans (make-hash-table :test 'equal)))
     (list :schema schema
           :tick tick
           :restriction-beg (point-min)
@@ -172,7 +175,17 @@ BOUNDS, when non-nil, is the already computed statement range."
           :beg beg
           :end end
           :statement-tables statement-tables
-          :statement-aliases aliases)))
+          :statement-aliases aliases
+          :from-sources from-sources
+          :derived-scopes
+          (when (string-match-p "(" text)
+            (cl-loop for (start . finish) in (clutch--completion-query-regions text)
+                     collect
+                     (list start finish
+                           (cl-remove-if-not
+                            (lambda (source) (consp (cdr source)))
+                            (clutch--completion-query-sources
+                             (substring text start finish) output-plans))))))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -223,9 +236,25 @@ POINT-OFFSET is at the top level."
      nil "()")
     result))
 
+(defun clutch--sql-set-operators-regexp ()
+  "Return set operators for completion on the current connection.
+MINUS is an Oracle operator but a valid identifier in other SQL dialects."
+  (if (and clutch-connection
+           (eq (clutch-backend-sql-product
+                (clutch-db-backend-key clutch-connection)) 'oracle))
+      "\\(?:UNION\\|EXCEPT\\|INTERSECT\\|MINUS\\)"
+    "\\(?:UNION\\|EXCEPT\\|INTERSECT\\)"))
+
+(defun clutch--sql-keyword-p (name)
+  "Return non-nil if NAME is reserved by the completion parser's dialect."
+  (or (member (upcase name) clutch--sql-keywords)
+      (let ((case-fold-search t))
+        (string-match-p (concat "\\`" (clutch--sql-set-operators-regexp) "\\'")
+                        name))))
+
 (defun clutch--union-branch-range-in-scope (text point-offset scope)
-  "Return the UNION branch range in TEXT for POINT-OFFSET within SCOPE.
-SCOPE is a (BEG . END) pair in TEXT coordinates.  UNION / UNION ALL keywords
+  "Return the set-operation branch range in TEXT for POINT-OFFSET within SCOPE.
+SCOPE is a (BEG . END) pair in TEXT coordinates.  Set-operation keywords
 inside string literals, comments, or nested parentheses are ignored."
   (pcase-let* ((`(,scope-beg . ,scope-end) scope)
                (sub (substring text scope-beg scope-end))
@@ -238,7 +267,8 @@ inside string literals, comments, or nested parentheses are ignored."
                (boundaries (list 0))
                (case-fold-search t))
     (let ((matches (clutch-db-sql-code-match-positions
-                    sub 0 nil "\\bunion\\b\\(?:[ \t\n\r]+all\\b\\)?")))
+                    sub 0 nil (concat "\\b" (clutch--sql-set-operators-regexp)
+                                     "\\b\\(?:[ \t\n\r]+\\(?:all\\|distinct\\)\\b\\)?"))))
       (clutch-db-sql-scan-code
        sub 0 nil
        (lambda (pos _ch depth)
@@ -259,76 +289,282 @@ inside string literals, comments, or nested parentheses are ignored."
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
 (defun clutch--union-branch-range (text point-offset)
-  "Return (BEG . END) of the UNION branch in TEXT containing POINT-OFFSET.
+  "Return (BEG . END) of the set-operation branch in TEXT containing POINT-OFFSET.
 First narrows to the innermost parenthesized scope, then splits by
-UNION / UNION ALL at depth 0 within that scope."
+set operators at depth 0 within that scope."
   (clutch--union-branch-range-in-scope
    text point-offset
    (clutch--innermost-paren-range text point-offset)))
 
-(defun clutch--extract-tables-and-aliases (text beg end &optional qualified)
+(defun clutch--sql-from-source-positions (sql)
+  "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
+Commas in projections, expressions, literals and comments are not sources."
+  (let* ((matches (clutch-db-sql-code-match-positions
+                   sql 0 nil
+                   (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
+                           (clutch--sql-set-operators-regexp)
+                           "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
+         (clauses (make-hash-table :test 'eql))
+         sources first-source)
+    (maphash (lambda (pos end)
+               (when (member (upcase (substring sql pos end)) '("FROM" "JOIN"))
+                 (setq first-source (min (or first-source end) end))))
+             matches)
+    ;; Projection commas cannot introduce tables.  Avoid allocating and sorting
+    ;; one candidate per projected column on wide SELECTs.
+    (when first-source
+      (let ((pos first-source))
+        (while (string-match "," sql pos)
+          (puthash (match-beginning 0) (match-end 0) matches)
+          (setq pos (match-end 0)))))
+    (clutch-db-sql-scan-code
+     sql 0 nil
+     (lambda (pos ch depth)
+       (cond
+        ((= ch ?\() (remhash (1+ depth) clauses))
+        ((= ch ?\)) nil)
+        ((= ch ?,)
+         (when (gethash depth clauses)
+           (push (cons (1+ pos) depth) sources)))
+        (t
+         (let ((token (upcase (substring sql pos (gethash pos matches)))))
+           (if (member token '("FROM" "JOIN"))
+               (progn (puthash depth t clauses)
+                      (push (cons (gethash pos matches) depth) sources))
+             (remhash depth clauses)))))
+       nil)
+     (clutch-db-connection-sql-dialect clutch-connection) matches)
+    (nreverse sources)))
+
+(defun clutch--completion-query-regions (sql)
+  "Return SELECT query regions in SQL, splitting set-operation branches.
+Expression parentheses do not create query scopes."
+  (let* ((matches (clutch-db-sql-code-match-positions
+                   sql 0 nil (concat "\\b\\(?:select\\|"
+                                     (clutch--sql-set-operators-regexp) "\\)\\b\\|[()]")))
+         (stack (list (cons 0 nil)))
+         regions)
+    (clutch-db-sql-scan-code
+     sql 0 nil
+     (lambda (pos ch _depth)
+       (cond
+        ((= ch ?\() (push (cons (1+ pos) nil) stack))
+        ((= ch ?\))
+         (when (cdr (car stack))
+           (push (cons (caar stack) pos) regions))
+         (when (cdr stack) (pop stack)))
+        ((not (string-equal-ignore-case
+               (substring sql pos (gethash pos matches)) "SELECT"))
+         (when (cdr (car stack))
+           (push (cons (caar stack) pos) regions))
+         (setcar (car stack) (gethash pos matches))
+         (setcdr (car stack) nil))
+        (t
+         (unless (cdr (car stack))
+           (setcar (car stack) pos)
+           (setcdr (car stack) t))))
+       nil)
+     (clutch-db-connection-sql-dialect clutch-connection) matches)
+    (dolist (frame stack)
+      (when (cdr frame) (push (cons (car frame) (length sql)) regions)))
+    regions))
+
+(defun clutch--completion-derived-source (entry qualifier)
+  "Resolve derived table QUALIFIER in cached statement ENTRY at point."
+  (let ((offset (- (point) (plist-get entry :beg)))
+        scope)
+    (dolist (candidate (plist-get entry :derived-scopes))
+      (when (and (<= (nth 0 candidate) offset)
+                 (<= offset (nth 1 candidate))
+                 (or (not scope)
+                     (< (- (nth 1 candidate) (nth 0 candidate))
+                        (- (nth 1 scope) (nth 0 scope)))))
+        (setq scope candidate)))
+    (assoc-string (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
+                  (nth 2 scope) t)))
+
+(defun clutch--completion-query-sources (sql output-plans)
+  "Return (ALIAS . SOURCE) pairs for the outer FROM list of SQL.
+SOURCE is a table token or (output . PLAN) for a derived SELECT.
+OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
+  (let ((masked (clutch-db-sql-mask-literal-or-comment
+                 sql (clutch-db-connection-sql-dialect clutch-connection)))
+        (case-fold-search t)
+        sources)
+    (dolist (entry (clutch--sql-from-source-positions sql))
+      (when (zerop (cdr entry))
+        (let ((start (car entry)) source end alias)
+          (when (string-match "[ \t\n\r]*" masked start)
+            (setq start (match-end 0)))
+          (cond
+           ((and (< start (length sql)) (= (aref sql start) ?\())
+            (when-let* ((close (clutch-db-sql-matching-paren-position sql start)))
+              (setq source (cons 'output
+                                 (clutch--completion-query-output
+                                  (substring sql (1+ start) close) output-plans))
+                    end (1+ close))))
+           ((and (string-match "[[:alnum:]_$#.`\"]+" masked start)
+                 (= (match-beginning 0) start))
+            (setq source (match-string 0 sql) end (match-end 0)
+                  alias (clutch-db-sql-table-name source))))
+          (when (and end
+                     (string-match
+                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      masked end)
+                     (= (match-beginning 0) end))
+            (let ((alias-end (match-end 0))
+                  (name (clutch--normalize-statement-table-token
+                         (match-string 1 sql))))
+              (unless (clutch--sql-keyword-p name)
+                (setq alias name end alias-end))))
+          ;; A column-name list overrides this projection.  Do not offer the
+          ;; original names until that separate SQL form is supported.
+          (when (and (consp source) end
+                     (string-match "[ \t\n\r]*(" masked end)
+                     (= (match-beginning 0) end))
+            (setq source '(output)))
+          (when (and alias source) (push (cons alias source) sources)))))
+    (nreverse sources)))
+
+(defun clutch--completion-query-output (sql output-plans)
+  "Describe named output columns of a derived SELECT in SQL.
+Names are strings; (star . SOURCES) expands only the selected sources.
+Expressions without an explicit alias have no portable output name.
+OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
+  (if (not (eq (gethash sql output-plans 'unparsed) 'unparsed))
+      (gethash sql output-plans)
+    (let* ((original-sql sql)
+           (case-fold-search t)
+           (sql (clutch-db-sql-strip-leading-comments sql))
+           (branch-end (clutch-db-sql-find-top-level-clause
+                        sql (clutch--sql-set-operators-regexp)))
+           (sql (if branch-end (substring sql 0 branch-end) sql))
+           (from (clutch-db-sql-find-top-level-clause sql "FROM"))
+           (sources (and from (clutch--completion-query-sources sql output-plans)))
+           (end (or from
+                    (clutch-db-sql-find-top-level-clause
+                     sql "\\(?:FROM\\|WHERE\\|GROUP\\|HAVING\\|ORDER\\|LIMIT\\|OFFSET\\|FETCH\\|FOR\\)")
+                    (length sql)))
+           items start plan)
+      (when (string-match "\\`[ \t\n\r]*SELECT\\b[ \t\n\r]*\\(?:\\(?:DISTINCT\\|ALL\\)\\b[ \t\n\r]*\\)?" sql)
+        (setq start (match-end 0))
+        (clutch-db-sql-scan-code
+         sql start end
+         (lambda (pos _ch depth)
+           (when (zerop depth)
+             (push (string-trim (substring sql start pos)) items)
+             (setq start (1+ pos)))
+           nil)
+         nil ",")
+        (push (string-trim (substring sql start end)) items)
+        (dolist (item (nreverse items))
+          (setq item (string-trim
+                      (clutch-db-sql-mask-literal-or-comment
+                       item (clutch-db-connection-sql-dialect clutch-connection))))
+          (cond
+           ((string= item "*") (push (cons 'star (mapcar #'cdr sources)) plan))
+           ((string-match "\\`\\([[:alnum:]_$#.`\"]+\\)\\.\\*\\'" item)
+            (when-let* ((source (cdr (assoc-string
+                                      (clutch--normalize-statement-table-token
+                                       (match-string 1 item)) sources t))))
+              (push (list 'star source) plan)))
+           ((or (string-match
+                 "\\(?:\\`\\|[ \t\n\r]+\\)AS[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item)
+                (string-match
+                 "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item))
+            (push (clutch--normalize-statement-table-token (match-string 1 item)) plan))
+           ((string-match-p "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*\\'" item)
+            (push (clutch-db-sql-table-name item) plan)))))
+      (puthash original-sql (nreverse plan) output-plans))))
+
+(defun clutch--completion-output-columns (plan conn schema prefix sync-columns-p)
+  "Resolve PLAN's named columns using cached or asynchronous metadata on CONN.
+SCHEMA, PREFIX and SYNC-COLUMNS-P have the ordinary completion meanings."
+  (seq-uniq
+   (cl-loop for item in plan append
+            (if (stringp item) (list item)
+              (cl-loop for source in (cdr item) append
+                       (if (stringp source)
+                           (clutch--completion-column-values
+                            conn schema source prefix sync-columns-p)
+                         (clutch--completion-output-columns
+                          (cdr source) conn schema prefix sync-columns-p)))))))
+
+(defun clutch--extract-tables-and-aliases
+    (text beg end &optional qualified from-sources)
   "Extract tables and alias mappings from TEXT between BEG and END.
 Return (TABLES . ALIASES) where TABLES is a list of table names and
 ALIASES is an alist of (alias . table) pairs.
 String literals and comments are ignored via masking.  QUALIFIED preserves
-schema-qualified table tokens for completion and alias resolution."
+schema-qualified table tokens for completion and alias resolution.
+FROM-SOURCES, when supplied, reuses source positions from the statement cache."
   (let ((case-fold-search t)
         (masked (clutch-db-sql-mask-literal-or-comment
                  text (clutch-db-connection-sql-dialect clutch-connection)))
         (pos beg)
+        (comma-sources (let ((positions (make-hash-table :test 'eql)))
+                         (when (string-match-p "," text)
+                           (dolist (source (or from-sources
+                                               (clutch--sql-from-source-positions text)))
+                             (puthash (car source) t positions)))
+                         positions))
         tables aliases)
     (while (and (< pos end)
                 (string-match
-                 (rx word-start
-                     (or (seq (group (or "from" "join" "update" "into"))
-                              (+ (in " \t\n\r"))
-                              (group (+ (in alnum "_$#.`\""))))
-                         (seq (or (seq "truncate" (+ (in " \t\n\r")) "table")
-                                  (seq "alter" (+ (in " \t\n\r")) "table")
-                                  (seq "drop" (+ (in " \t\n\r")) "table"))
-                              (+ (in " \t\n\r"))
-                              (group (+ (in alnum "_$#.`\""))))
-                         (seq "create" (+ (in " \t\n\r"))
-                              (? (seq (or "unique" "fulltext" "spatial")
-                                      (+ (in " \t\n\r"))))
-                              "index"
-                              (*? anything)
-                              word-start "on"
-                              (+ (in " \t\n\r"))
-                              (group (+ (in alnum "_$#.`\""))))))
+                 (rx
+                  (or (seq (group (or (seq word-start (or "from" "join" "update" "into")
+                                           (+ (in " \t\n\r"))) ","))
+                           (* (in " \t\n\r"))
+                           (group (+ (in alnum "_$#.`\""))))
+                      (seq word-start (or (seq "truncate" (+ (in " \t\n\r")) "table")
+                                          (seq "alter" (+ (in " \t\n\r")) "table")
+                                          (seq "drop" (+ (in " \t\n\r")) "table"))
+                           (+ (in " \t\n\r"))
+                           (group (+ (in alnum "_$#.`\""))))
+                      (seq word-start "create" (+ (in " \t\n\r"))
+                           (? (seq (or "unique" "fulltext" "spatial")
+                                   (+ (in " \t\n\r"))))
+                           "index"
+                           (*? anything)
+                           word-start "on"
+                           (+ (in " \t\n\r"))
+                           (group (+ (in alnum "_$#.`\""))))))
                  masked pos)
                 (< (match-beginning 0) end))
-      (let* ((dml-match (match-string 1 text))
-             (table-end (or (match-end 2)
-                            (match-end 3)
-                            (match-end 4)))
-             (table-token (or (match-string 2 text)
-                              (match-string 3 text)
-                              (match-string 4 text)))
-             (table (if (and qualified (clutch-db-sql-table-schema table-token))
-                        table-token
-                      (clutch--normalize-statement-table-token table-token)))
-             (alias-consumed-end table-end))
-        (setq pos table-end)
-        (when (and dml-match
-                   (string-match
-                    "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
-                    masked table-end)
-                   (= (match-beginning 0) table-end)
-                   (< (match-beginning 0) end))
-          (let ((alias-consumed-match-end (match-end 0)))
-            (when-let* ((alias-token (match-string 1 text))
-                        (alias (clutch--normalize-statement-table-token alias-token))
-                        ((not (member (upcase alias) clutch--sql-keywords))))
-              (setq alias-consumed-end alias-consumed-match-end)
-              (push (cons alias table) aliases))))
-        (setq pos alias-consumed-end)
-        (when table (push table tables))))
+      (if (and (equal (match-string 1 text) ",")
+               (not (gethash (1+ (match-beginning 1)) comma-sources)))
+          (setq pos (1+ (match-beginning 1)))
+        (let* ((dml-match (match-string 1 text))
+               (table-end (or (match-end 2)
+                              (match-end 3)
+                              (match-end 4)))
+               (table-token (or (match-string 2 text)
+                                (match-string 3 text)
+                                (match-string 4 text)))
+               (table (if (and qualified (clutch-db-sql-table-schema table-token))
+                          table-token
+                        (clutch--normalize-statement-table-token table-token)))
+               (alias-consumed-end table-end))
+          (setq pos table-end)
+          (when (and dml-match
+                     (string-match
+                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      masked table-end)
+                     (= (match-beginning 0) table-end)
+                     (< (match-beginning 0) end))
+            (let ((alias-consumed-match-end (match-end 0)))
+              (when-let* ((alias-token (match-string 1 text))
+                          (alias (clutch--normalize-statement-table-token alias-token))
+                          ((not (clutch--sql-keyword-p alias))))
+                (setq alias-consumed-end alias-consumed-match-end)
+                (push (cons alias table) aliases))))
+          (setq pos alias-consumed-end)
+          (when table (push table tables)))))
     (cons (nreverse tables) (nreverse aliases))))
 
 (defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings for the UNION branch in SCHEMA containing point.
-When the statement has no UNION, returns all aliases."
+  "Return alias-to-table mappings in SCHEMA for point's set-operation branch.
+When the statement has no set operation, returns all aliases."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (all-aliases (plist-get entry :statement-aliases))
          (stmt-beg (plist-get entry :beg))
@@ -341,7 +577,7 @@ When the statement has no UNION, returns all aliases."
       (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
-  "Return (BEG . END) of the depth-0 UNION branch in TEXT containing POINT-OFFSET.
+  "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
 Unlike `clutch--union-branch-range', does not narrow into parenthesized
 scopes first, so FROM/JOIN clauses remain visible from inside expressions."
   (clutch--union-branch-range-in-scope
@@ -372,7 +608,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
             (let* ((token (match-string 1 text))
                    (normalized (clutch--normalize-statement-table-token token)))
               (when (and normalized
-                         (not (member (upcase normalized) clutch--sql-keywords))
+                         (not (clutch--sql-keyword-p normalized))
                          (string= (downcase normalized) (downcase alias)))
                 (setq alias-pos (+ stmt-beg (match-beginning 1))))))
           (when alias-pos
@@ -381,7 +617,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.
 First searches the innermost paren scope (subquery), then falls back to
-the top-level UNION branch so expression parens like SUM(...) don't hide
+the top-level set-operation branch so expression parens like SUM(...) don't hide
 outer FROM/JOIN clauses."
   (let* ((bounds (clutch--statement-bounds))
          (stmt-beg (car bounds))
@@ -595,7 +831,7 @@ like `orders.id' within the current statement."
     "CREATE" "ALTER" "DROP" "TABLE" "INDEX" "VIEW" "DATABASE"
     "GROUP" "BY" "ORDER" "ASC" "DESC" "HAVING" "LIMIT" "OFFSET"
     "PARTITION"
-    "UNION" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
+    "UNION" "EXCEPT" "INTERSECT" "ALL" "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
     "IF" "IFNULL" "COALESCE" "CAST" "CONCAT" "SUBSTRING"
     "PRIMARY" "KEY" "FOREIGN" "REFERENCES" "CONSTRAINT" "DEFAULT"
     "UNIQUE" "CHECK" "AUTO_INCREMENT"
@@ -1063,9 +1299,20 @@ contexts like FROM/JOIN are not shadowed by keywords such as ORDER."
 
 (defun clutch--completion-table-context-p (beg)
   "Return non-nil when BEG is in a SQL table-name completion context."
-  (string-match-p
-   "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
-   (upcase (buffer-substring-no-properties (line-beginning-position) beg))))
+  (or (string-match-p
+       "\\b\\(FROM\\|JOIN\\|INTO\\|UPDATE\\|TABLE\\|DESCRIBE\\|DESC\\)\\s-+\\S-*\\'"
+       (upcase (buffer-substring-no-properties (line-beginning-position) beg)))
+      (let* ((entry (clutch--tables-in-query-cache-entry
+                     (clutch--schema-for-connection)))
+             (offset (- beg (plist-get entry :beg)))
+             (source (car (last (cl-remove-if
+                                 (lambda (source) (> (car source) offset))
+                                 (plist-get entry :from-sources))))))
+        (and source
+             (string-match-p
+              "\\`[ \t\n\r]*[[:alnum:]_$#.`\"]*\\'"
+              (buffer-substring-no-properties
+               (+ (plist-get entry :beg) (car source)) beg))))))
 
 (defun clutch--completion-context-tables (schema qualified-table prefix-len
                                                  table-context-p busy
@@ -1323,10 +1570,15 @@ when completion triggers during an in-flight query)."
               (or (clutch--schema-table-candidates conn schema prefix)
                   (clutch--safe-completion-call
                    (lambda () (clutch-db-complete-tables conn prefix))))))
-           (qualified-table (clutch--qualified-identifier-table schema beg))
+           (derived (and (not table-context-p)
+                         (clutch--completion-derived-source
+                          (clutch--tables-in-query-cache-entry schema)
+                          (clutch--qualified-identifier-qualifier beg))))
+           (qualified-table (and (not derived)
+                                 (clutch--qualified-identifier-table schema beg)))
            (context-tables
             (clutch--completion-context-tables
-             schema qualified-table prefix-len table-context-p busy
+             schema qualified-table prefix-len (or table-context-p derived) busy
              empty-column-prefix-p))
            (empty-column-result
             (and empty-column-prefix-p
@@ -1352,6 +1604,11 @@ when completion triggers during an in-flight query)."
              keyword-candidates
              (cond
               (namespace (clutch--sql-identifier-completion-candidates scoped-tables))
+              (derived
+               (and (not busy)
+                    (clutch--sql-identifier-completion-candidates
+                     (clutch--completion-output-columns
+                      (cddr derived) conn schema prefix sync-columns-p))))
               (empty-column-prefix-p
                (car-safe empty-column-result))
               (prefer-keyword-p nil)
