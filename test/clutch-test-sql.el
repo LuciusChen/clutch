@@ -1544,7 +1544,7 @@ Structure is not interpreted here; callers confirm depth and literals through
   (clutch-test--with-isolated-metadata-caches
     (let* ((conn (make-clutch-test-conn :backend 'pg))
            (schema (make-hash-table :test 'equal)))
-      (puthash "users" '("UserName" "odd\"name" "select") schema)
+      (puthash "users" '("id" "UserName" "odd\"name" "select" "SELECT") schema)
       (puthash "User Table" nil schema)
       (puthash conn schema clutch--schema-cache)
       (puthash conn '(:state ready) clutch--schema-status-cache)
@@ -1562,6 +1562,14 @@ Structure is not interpreted here; callers confirm depth and literals through
                       "SELECT \"odd\"\"name\" FROM users")
                      ("SELECT sele| FROM users" "select"
                       "SELECT \"select\" FROM users")
+                     ("SELECT SEL| FROM users" "SELECT"
+                      "SELECT \"SELECT\" FROM users")
+                     ("SELECT d.La| FROM (SELECT id AS Label FROM users) d" "Label"
+                      "SELECT d.Label FROM (SELECT id AS Label FROM users) d")
+                     ("SELECT d.La| FROM (SELECT id AS \"Label\" FROM users) d" "Label"
+                      "SELECT d.\"Label\" FROM (SELECT id AS \"Label\" FROM users) d")
+                     ("SELECT d.I| FROM (SELECT ID FROM users) d" "ID"
+                      "SELECT d.ID FROM (SELECT ID FROM users) d")
                      ("sele| FROM users" "SELECT" "SELECT FROM users")))
         (ert-info ((format "%S" case))
           (with-temp-buffer
@@ -1616,6 +1624,7 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 (ert-deftest clutch-test-completion-quotes-sqlite-executable-query ()
   "Completed names with spaces and mixed case execute against real SQLite."
+  (skip-unless (sqlite-available-p))
   (clutch-test--with-isolated-metadata-caches
     (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
           (schema (make-hash-table :test 'equal)))

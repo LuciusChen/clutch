@@ -18,7 +18,7 @@
 
 ### Fixed
 
-- SQL identifier completion preserves catalog spelling and escapes accepted table and column names using the connection's dialect, including mixed-case and space-containing names. Existing identifier quotes are replaced without duplication. `clutch-sql-completion-case-style` now applies only to keywords so it cannot change the object named by a completion.
+- SQL identifier completion preserves catalog spelling and escapes accepted table and column names using the connection's dialect, including mixed-case and space-containing names. Existing identifier quotes are replaced without duplication. `clutch-sql-completion-case-style` now applies only to keywords so it cannot change the object named by a completion. Derived projection names preserve their SQL quoting and case-folding semantics, and columns take precedence over identically named keywords in column completion. Quoted-identifier detection scans delimiter candidates within the current statement instead of rescanning ordinary text character by character on every completion.
 
 - SQL completion recognizes comma-separated FROM sources and derived-table aliases, using the subquery output names instead of exposing every column of its base tables. Projection commas preserve following FROM sources; leading comments, SELECT ALL, no-FROM trailing clauses and set-operation output names are recognized. MINUS is recognized only for Oracle so other backends retain identifiers named minus.
 

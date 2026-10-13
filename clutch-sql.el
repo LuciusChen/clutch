@@ -428,7 +428,8 @@ OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
 
 (defun clutch--completion-query-output (sql output-plans)
   "Describe named output columns of a derived SELECT in SQL.
-Names are strings; (star . SOURCES) expands only the selected sources.
+Names are strings carrying their SQL insertion identity; (star . SOURCES)
+expands only the selected sources.
 Expressions without an explicit alias have no portable output name.
 OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
   (if (not (eq (gethash sql output-plans 'unparsed) 'unparsed))
@@ -472,9 +473,15 @@ OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
                  "\\(?:\\`\\|[ \t\n\r]+\\)AS[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item)
                 (string-match
                  "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item))
-            (push (clutch--normalize-statement-table-token (match-string 1 item)) plan))
+            (let ((token (match-string 1 item)))
+              ;; SQL output names retain their original quoting/folding semantics.
+              (push (propertize (clutch--normalize-statement-table-token token)
+                                'clutch--sql-identifier (cons 'sql token)) plan)))
            ((string-match-p "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*\\'" item)
-            (push (clutch-db-sql-table-name item) plan)))))
+            (when-let* ((token (clutch-db-sql-table-qualifier item)))
+              (push (propertize (clutch-db-sql-table-name item)
+                                'clutch--sql-identifier (cons 'sql token))
+                    plan))))))
       (puthash original-sql (nreverse plan) output-plans))))
 
 (defun clutch--completion-output-columns (plan conn schema prefix sync-columns-p)
@@ -1263,23 +1270,31 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
 
 (defun clutch--sql-identifier-completion-candidates (candidates)
   "Return CANDIDATES with their catalog spelling for insertion.
-Keep quotes out of the matching text so an unquoted prefix still matches."
+Keep quotes out of the matching text so an unquoted prefix still matches.
+SQL-derived names keep their original token instead of acquiring catalog quotes."
   (delete-dups
    (mapcar (lambda (name)
-             (propertize name 'clutch--sql-identifier name))
+             (propertize name 'clutch--sql-identifier
+                         (or (get-text-property 0 'clutch--sql-identifier name)
+                             name)))
            candidates)))
 
 (defun clutch--completion-quoted-identifier ()
   "Return bounds and delimiters of the quoted identifier at point, or nil.
 The bounds cover its contents, excluding quotes.  An unfinished identifier
 ends at point, leaving following SQL intact."
-  (let* ((beg (car (clutch--statement-bounds)))
-         (sql (buffer-substring-no-properties beg (point-max)))
+  (let* ((bounds (clutch--statement-bounds))
+         (beg (car bounds))
+         (sql (buffer-substring-no-properties beg (cdr bounds)))
          (offset (- (point) beg))
          (dialect (clutch-db-connection-sql-dialect clutch-connection))
          (pos 0)
          result)
-    (while (and (< pos offset) (not result))
+    ;; Search delimiters in C rather than invoking the lexer for every character.
+    (while (and (not result)
+                (string-match (rx (any ?\" ?\' ?` ?\[ ?/ ?$ ?-)) sql pos)
+                (< (match-beginning 0) offset))
+      (setq pos (match-beginning 0))
       (let ((end (clutch-db-sql-skip-literal-or-comment sql pos t dialect)))
         (when (and end (<= offset end)
                    (memq (aref sql pos) '(?\" ?` ?\[)))
@@ -1635,12 +1650,15 @@ when completion triggers during an in-flight query)."
             (and (not quoted)
                  (not qualified-empty-prefix-p)
                  (not table-context-p)
-                 (null context-tables)
-                 (clutch--sql-keyword-prefix-p prefix)))
+                 (clutch--sql-keyword-prefix-p prefix)
+                 (or (null context-tables)
+                     (string-empty-p
+                      (clutch-db-sql-strip-leading-comments
+                       (buffer-substring-no-properties
+                        (car (clutch--statement-bounds)) context-beg))))))
            (candidates nil))
       (setq candidates
             (append
-             keyword-candidates
              (cond
               (namespace (clutch--sql-identifier-completion-candidates scoped-tables))
               (derived
@@ -1658,7 +1676,10 @@ when completion triggers during an in-flight query)."
               (t
                (clutch--sql-identifier-completion-candidates
                 (append direct-table-candidates
-                        (and schema (hash-table-keys schema))))))))
+                        (and schema (hash-table-keys schema))))))
+             keyword-candidates))
+      ;; A column named like a keyword remains an identifier in column context.
+      (setq candidates (delete-dups candidates))
       (when quoted
         (let ((delimiter (string (plist-get quoted :delimiter))))
           (setq candidates
@@ -1683,11 +1704,14 @@ when completion triggers during an in-flight query)."
                                            (get-text-property
                                             0 'clutch--sql-identifier candidate))))
                      (if identifier
-                         (let ((sql (if (consp identifier)
+                         (let ((sql (cond
+                                       ((eq (car-safe identifier) 'sql)
+                                        (cdr identifier))
+                                       ((consp identifier)
                                         (concat (car identifier) "."
                                                 (clutch-db-escape-identifier
-                                                 conn (cdr identifier)))
-                                      (clutch-db-escape-identifier conn identifier))))
+                                                 conn (cdr identifier))))
+                                       (t (clutch-db-escape-identifier conn identifier)))))
                            (delete-region (if quoted (1- beg) beg)
                                           (+ (point) (if (plist-get quoted :closed) 1 0)))
                            (insert sql))

@@ -1884,6 +1884,53 @@ throughout."
 	          (should (equal (mapcar #'downcase pk-cols) '("id"))))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-test-live-completion-quotes-identifiers ()
+  "Accepted catalog and derived identifiers execute with their intended names."
+  :tags '(:clutch-live)
+  (unless (memq (clutch-test-live-backend-id) '(pg mysql oracle sqlserver duckdb))
+    (ert-skip "Identifier completion is not supported by this live backend"))
+  (clutch-test--with-conn conn
+    (let ((table (format "clutch_quote_%d" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (clutch-db-query
+             conn (format "CREATE TABLE %s (id INTEGER, %s INTEGER, %s VARCHAR(64))"
+                          table (clutch-db-escape-identifier conn "SELECT")
+                          (clutch-db-escape-identifier conn "UserName")))
+            (clutch-db-query conn (format "INSERT INTO %s VALUES (1, 7, 'Alice')" table))
+            (clutch-test--with-isolated-metadata-caches
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (let ((schema (make-hash-table :test 'equal)))
+                  (puthash table (clutch-db-list-columns conn table) schema)
+                  (puthash conn schema clutch--schema-cache))
+                (dolist (case '(("SELECT UserN| FROM %s" "Alice")
+                                ("SELECT SEL| FROM %s" "7")
+                                ("SELECT d.La| FROM (SELECT id AS Label FROM %s) d" "1")
+                                ("SELECT d.La| FROM (SELECT id AS %s FROM %s) d" "1")
+                                ("SELECT d.I| FROM (SELECT ID FROM %s) d" "1")
+                                ("SELECT d.La| FROM (SELECT q.* FROM (SELECT id AS Label FROM %s) q) d" "1")
+                                ("SELECT \"Us|\" FROM %s" "Alice")))
+                  (ert-info ((car case))
+                    (erase-buffer)
+                    (insert (if (string-match-p "AS %s" (car case))
+                                (format (car case)
+                                        (clutch-db-escape-identifier conn "Label") table)
+                              (format (car case) table)))
+                    (goto-char (point-min))
+                    (search-forward "|")
+                    (delete-char -1)
+                    ;; Exercise completion-in-region and its acceptance callback.
+                    (clutch-complete-at-point)
+                    (let ((rows (clutch-db-result-rows
+                                 (clutch-db-query conn (buffer-string)))))
+                      (should (equal (mapcar (lambda (row)
+                                              (clutch-test--live-row-prefix-strings row 1))
+                                            rows)
+                                     (list (list (cadr case)))))))))))
+        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" table)))))))
+
 (ert-deftest clutch-test-live-cross-schema-completion ()
   "Qualified completion stays in its namespace and reuses fetched metadata."
   :tags '(:clutch-live)
