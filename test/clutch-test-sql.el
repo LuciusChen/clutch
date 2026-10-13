@@ -1539,6 +1539,108 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 ;;;; Completion — identifiers and columns
 
+(ert-deftest clutch-test-completion-quotes-identifiers-on-acceptance ()
+  "Accepted identifiers keep catalog spelling and SQL keywords stay keywords."
+  (clutch-test--with-isolated-metadata-caches
+    (let* ((conn (make-clutch-test-conn :backend 'pg))
+           (schema (make-hash-table :test 'equal)))
+      (puthash "users" '("UserName" "odd\"name" "select") schema)
+      (puthash "User Table" nil schema)
+      (puthash conn schema clutch--schema-cache)
+      (puthash conn '(:state ready) clutch--schema-status-cache)
+      (dolist (case '(("SELECT Us| FROM users" "UserName"
+                      "SELECT \"UserName\" FROM users")
+                     ("SELECT u.Us| FROM users u" "UserName"
+                      "SELECT u.\"UserName\" FROM users u")
+                     ("SELECT * FROM Us|" "User Table"
+                      "SELECT * FROM \"User Table\"")
+                     ("SELECT \"Us|\" FROM users" "UserName"
+                      "SELECT \"UserName\" FROM users")
+                     ("SELECT \"Us| FROM users" "UserName"
+                      "SELECT \"UserName\" FROM users")
+                     ("SELECT odd| FROM users" "odd\"name"
+                      "SELECT \"odd\"\"name\" FROM users")
+                     ("SELECT sele| FROM users" "select"
+                      "SELECT \"select\" FROM users")
+                     ("sele| FROM users" "SELECT" "SELECT FROM users")))
+        (ert-info ((format "%S" case))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection conn)
+            (insert (car case))
+            (goto-char (point-min))
+            (search-forward "|")
+            (delete-char -1)
+            (let* ((capf (clutch-completion-at-point))
+                   (candidate (cadr case)))
+              (should (member candidate (clutch-test--completion-candidates capf)))
+              (delete-region (car capf) (cadr capf))
+              (insert candidate)
+              (funcall (plist-get (cdddr capf) :exit-function) candidate 'finished)
+              (should (equal (buffer-string) (nth 2 case))))))))))
+
+(ert-deftest clutch-test-completion-quotes-backend-dialects ()
+  "Completion delegates identifier spelling to native and JDBC dialects."
+  (require 'mysql)
+  (require 'pgsql)
+  (require 'clutch-db-mysql)
+  (require 'clutch-db-pg)
+  (dolist (driver '(mysql pg oracle sqlserver db2 snowflake redshift jdbc clickhouse))
+    (clutch-test--with-isolated-metadata-caches
+      (let* ((conn (pcase driver
+                     ('mysql (make-mysql-conn))
+                     ('pg (clutch-db-pg--make-connection))
+                     (_ (make-clutch-jdbc-conn :driver driver))))
+             (schema (make-hash-table :test 'equal)))
+        (puthash "User Table" nil schema)
+        (puthash conn schema clutch--schema-cache)
+        (puthash conn '(:state ready) clutch--schema-status-cache)
+        (with-temp-buffer
+          (clutch-mode)
+          (setq-local clutch-connection conn)
+          (insert "SELECT * FROM Us")
+          (let* ((capf (cl-letf (((symbol-function 'clutch-db-live-p)
+                                 (lambda (_conn) t))
+                                ((symbol-function 'clutch-db-busy-p)
+                                 (lambda (_conn) nil)))
+                         (clutch-completion-at-point)))
+                 (candidate (car (clutch-test--completion-candidates capf))))
+            (should (equal candidate "User Table"))
+            (delete-region (car capf) (cadr capf))
+            (insert candidate)
+            (funcall (plist-get (cdddr capf) :exit-function) candidate 'finished)
+            (should (equal (buffer-string)
+                           (if (memq driver '(mysql clickhouse))
+                               "SELECT * FROM `User Table`"
+                             "SELECT * FROM \"User Table\"")))))))))
+
+(ert-deftest clutch-test-completion-quotes-sqlite-executable-query ()
+  "Completed names with spaces and mixed case execute against real SQLite."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:")))
+          (schema (make-hash-table :test 'equal)))
+      (unwind-protect
+          (progn
+            (clutch-db-query conn "CREATE TABLE \"User Table\" (\"UserName\" TEXT)")
+            (clutch-db-query conn "INSERT INTO \"User Table\" VALUES ('Alice')")
+            (puthash "User Table" '("UserName") schema)
+            (puthash conn schema clutch--schema-cache)
+            (puthash conn '(:state ready) clutch--schema-status-cache)
+            (with-temp-buffer
+              (clutch-mode)
+              (setq-local clutch-connection conn)
+              (insert "SELECT * FROM Us")
+              (let* ((capf (clutch-completion-at-point))
+                     (candidate (car (clutch-test--completion-candidates capf))))
+                (delete-region (car capf) (cadr capf))
+                (insert candidate)
+                (funcall (plist-get (cdddr capf) :exit-function) candidate 'finished))
+              (should (equal (buffer-string) "SELECT * FROM \"User Table\""))
+              (should (equal (clutch-db-result-rows
+                              (clutch-db-query conn (buffer-string)))
+                             '(("Alice"))))))
+        (clutch-db-disconnect conn)))))
+
 (ert-deftest clutch-test-completion-at-point-keyword-phrase-exit-inserts-space ()
   "Connection-aware completion should space accepted keyword phrases."
   (with-temp-buffer
@@ -1866,8 +1968,8 @@ Structure is not interpreted here; callers confirm depth and literals through
                     "select ord from users join orders on users.id = orders.user_id"
                     "ord" preserve (:members ("ORDER BY" "order_id")) nil)
                    (lowercase "select con from APP_CONFIG" "con" lower
-                              (:members ("concat" "constraint" "config_id" "config_name")
-                                        :absent ("CONFIG_ID" "CONFIG_NAME"))
+                              (:members ("concat" "constraint" "CONFIG_ID" "CONFIG_NAME")
+                                        :absent ("config_id" "config_name"))
                               nil)))
           (pcase-let ((`(,label ,sql ,needle ,style ,expected ,company) case))
             (ert-info ((format "case: %s" label))

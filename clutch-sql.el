@@ -17,13 +17,13 @@
 (require 'clutch-schema)
 
 (defcustom clutch-sql-completion-case-style 'preserve
-  "How SQL completion inserts keywords and identifiers.
-`preserve' keeps backend-provided identifier case and uppercase SQL keywords.
-`lower' inserts lowercase keywords and lowercases completion identifiers.
-`upper' inserts uppercase keywords and uppercases completion identifiers."
+  "How SQL completion inserts keywords.
+`preserve' and `upper' insert uppercase SQL keywords; `lower' inserts lowercase.
+Identifiers always retain their catalog spelling and are quoted on acceptance
+using the connection's SQL dialect."
   :type '(choice (const :tag "Preserve backend / default keyword case" preserve)
-                 (const :tag "Lowercase keywords and identifiers" lower)
-                 (const :tag "Uppercase keywords and identifiers" upper))
+                 (const :tag "Lowercase keywords" lower)
+                 (const :tag "Uppercase keywords" upper))
   :group 'clutch)
 
 (defvar clutch-connection)
@@ -1262,9 +1262,40 @@ Each value is a plist (:sig SIGNATURE :desc DESCRIPTION).")
   (member (upcase text) clutch--sql-keyword-completion-raw-candidates))
 
 (defun clutch--sql-identifier-completion-candidates (candidates)
-  "Return completion CANDIDATES honoring identifier case style."
+  "Return CANDIDATES with their catalog spelling for insertion.
+Keep quotes out of the matching text so an unquoted prefix still matches."
   (delete-dups
-   (mapcar #'clutch--apply-sql-completion-case-style candidates)))
+   (mapcar (lambda (name)
+             (propertize name 'clutch--sql-identifier name))
+           candidates)))
+
+(defun clutch--completion-quoted-identifier ()
+  "Return bounds and delimiters of the quoted identifier at point, or nil.
+The bounds cover its contents, excluding quotes.  An unfinished identifier
+ends at point, leaving following SQL intact."
+  (let* ((beg (car (clutch--statement-bounds)))
+         (sql (buffer-substring-no-properties beg (point-max)))
+         (offset (- (point) beg))
+         (dialect (clutch-db-connection-sql-dialect clutch-connection))
+         (pos 0)
+         result)
+    (while (and (< pos offset) (not result))
+      (let ((end (clutch-db-sql-skip-literal-or-comment sql pos t dialect)))
+        (when (and end (<= offset end)
+                   (memq (aref sql pos) '(?\" ?` ?\[)))
+          (let* ((delimiter (if (eq (aref sql pos) ?\[) ?\] (aref sql pos)))
+                 (tail end))
+            (while (and (> tail (1+ pos))
+                        (eq (aref sql (1- tail)) delimiter))
+              (setq tail (1- tail)))
+            (let ((closed (cl-oddp (- end tail))))
+              (when (<= offset (if closed (1- end) end))
+                (setq result
+                      (list :bounds (cons (+ beg pos 1)
+                                          (+ beg (if closed (1- end) offset)))
+                            :delimiter delimiter :closed closed))))))
+        (setq pos (or end (1+ pos)))))
+    result))
 
 (defun clutch--sql-keyword-prefix-p (prefix)
   "Return non-nil when PREFIX matches the start of any SQL keyword."
@@ -1417,13 +1448,10 @@ control backend column loading."
              (table (plist-get source :table)))
         (dolist (column (clutch--completion-column-values
                          conn schema table prefix sync-columns-p))
-          (let* ((styled-column
-                  (clutch--apply-sql-completion-case-style column))
-                 (styled-qualifier
-                  (clutch--apply-sql-completion-case-style qualifier))
-                 (candidate (if qualify-p
-                                (concat styled-qualifier "." styled-column)
-                              styled-column)))
+          (let ((candidate
+                 (propertize (if qualify-p (concat qualifier "." column) column)
+                             'clutch--sql-identifier
+                             (if qualify-p (cons qualifier column) column))))
             (puthash candidate
                      (clutch--completion-column-source-annotation qualifier table)
                      annotations)
@@ -1537,7 +1565,9 @@ it, so nothing is scanned there."
   "Completion-at-point function for SQL identifiers.
 Skips column loading if the connection is busy (prevents re-entrancy
 when completion triggers during an in-flight query)."
-  (let* ((symbol-bounds (bounds-of-thing-at-point 'symbol))
+  (let* ((quoted (and clutch-connection (clutch--completion-quoted-identifier)))
+         (symbol-bounds (or (plist-get quoted :bounds)
+                            (bounds-of-thing-at-point 'symbol)))
          (qualified-bounds (clutch--completion-qualified-empty-prefix-bounds))
          (empty-column-bounds (and (not symbol-bounds)
                                    (not qualified-bounds)
@@ -1549,15 +1579,22 @@ when completion triggers during an in-flight query)."
                 (bounds bounds))
       (let* ((beg (car bounds))
            (end (cdr bounds))
-           (prefix (buffer-substring-no-properties beg end))
+           (context-beg (if quoted (1- beg) beg))
+           (prefix (if quoted
+                       (clutch-db-sql--unquote-identifier
+                        (concat (string (if (eq (plist-get quoted :delimiter) ?\])
+                                            ?\[ (plist-get quoted :delimiter)))
+                                (buffer-substring-no-properties beg end)
+                                (string (plist-get quoted :delimiter))))
+                     (buffer-substring-no-properties beg end)))
            (prefix-len (- end beg))
            (qualified-empty-prefix-p (and qualified-bounds (not symbol-bounds)))
            (empty-column-prefix-p (and empty-column-bounds t))
            (schema (clutch--schema-for-connection))
-           (table-context-p (clutch--completion-table-context-p beg))
+           (table-context-p (clutch--completion-table-context-p context-beg))
            (busy (clutch-db-busy-p conn))
            (namespace (and table-context-p
-                           (clutch--qualified-identifier-qualifier beg)))
+                           (clutch--qualified-identifier-qualifier context-beg)))
            (scoped-tables
             (and namespace
                  (not (clutch-db-sql-table-schema namespace))
@@ -1573,9 +1610,9 @@ when completion triggers during an in-flight query)."
            (derived (and (not table-context-p)
                          (clutch--completion-derived-source
                           (clutch--tables-in-query-cache-entry schema)
-                          (clutch--qualified-identifier-qualifier beg))))
+                          (clutch--qualified-identifier-qualifier context-beg))))
            (qualified-table (and (not derived)
-                                 (clutch--qualified-identifier-table schema beg)))
+                                 (clutch--qualified-identifier-table schema context-beg)))
            (context-tables
             (clutch--completion-context-tables
              schema qualified-table prefix-len (or table-context-p derived) busy
@@ -1587,14 +1624,16 @@ when completion triggers during an in-flight query)."
                   conn schema context-tables prefix sync-columns-p)))
            (annotation-function (cdr-safe empty-column-result))
            (keyword-candidates
-            (and (not empty-column-prefix-p)
+            (and (not quoted)
+                 (not empty-column-prefix-p)
                  (not qualified-empty-prefix-p)
                  context-tables
                  (not table-context-p)
                  (clutch--sql-keyword-prefix-p prefix)
                  (clutch--sql-keyword-completion-candidates)))
            (prefer-keyword-p
-            (and (not qualified-empty-prefix-p)
+            (and (not quoted)
+                 (not qualified-empty-prefix-p)
                  (not table-context-p)
                  (null context-tables)
                  (clutch--sql-keyword-prefix-p prefix)))
@@ -1620,6 +1659,16 @@ when completion triggers during an in-flight query)."
                (clutch--sql-identifier-completion-candidates
                 (append direct-table-candidates
                         (and schema (hash-table-keys schema))))))))
+      (when quoted
+        (let ((delimiter (string (plist-get quoted :delimiter))))
+          (setq candidates
+                (mapcar
+                 (lambda (candidate)
+                   (propertize (string-replace delimiter (concat delimiter delimiter)
+                                               candidate)
+                               'clutch--sql-identifier
+                               (get-text-property 0 'clutch--sql-identifier candidate)))
+                 candidates))))
       (when candidates
         (append
          (list beg end
@@ -1628,11 +1677,24 @@ when completion triggers during an in-flight query)."
                :exclusive 'no
                :exit-function
                (lambda (str status)
-                 (when (and (clutch--completion-finished-status-p status)
-                            (clutch--sql-keyword-completion-candidate-p str)
-                            (clutch--sql-completion-insert-space-p str)
-                            (not (looking-at-p "\\s-")))
-                   (insert " "))))
+                 (when (clutch--completion-finished-status-p status)
+                   (let* ((candidate (car (member str candidates)))
+                          (identifier (and candidate
+                                           (get-text-property
+                                            0 'clutch--sql-identifier candidate))))
+                     (if identifier
+                         (let ((sql (if (consp identifier)
+                                        (concat (car identifier) "."
+                                                (clutch-db-escape-identifier
+                                                 conn (cdr identifier)))
+                                      (clutch-db-escape-identifier conn identifier))))
+                           (delete-region (if quoted (1- beg) beg)
+                                          (+ (point) (if (plist-get quoted :closed) 1 0)))
+                           (insert sql))
+                       (when (and (clutch--sql-keyword-completion-candidate-p str)
+                                  (clutch--sql-completion-insert-space-p str)
+                                  (not (looking-at-p "\\s-")))
+                         (insert " ")))))))
          (when qualified-empty-prefix-p
            (list :company-prefix-length t))))))))
 
