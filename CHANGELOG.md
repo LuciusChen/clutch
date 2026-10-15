@@ -20,6 +20,10 @@
 
 - A batch of many short statements no longer forces a redisplay before and after each one, which made up about half the run time of a script of thousands of single-row updates. Its progress marker is redrawn at most as often as the running timer refreshes, ten times a second.
 
+- Eldoc and completion no longer query a connection that a running batch of statements still holds. Between two statements the backend looks idle, so moving point in the buffer could start a synchronous lookup that made the batch's next statement fail with "Connection busy" and stopped the rest of the batch.
+
+- A comment that ends the line of a statement's semicolon stays with that statement. Counted in the next statement, it put that statement's status marker and `C-c C-c` flash one line up, was sent to the server with it, and made point on that comment pick the next statement.
+
 - SQL identifier completion preserves catalog spelling and escapes accepted table and column names using the connection's dialect, including mixed-case and space-containing names. Existing identifier quotes are replaced without duplication. `clutch-sql-completion-case-style` now applies only to keywords so it cannot change the object named by a completion. Derived projection names preserve their SQL quoting and case-folding semantics, and columns take precedence over identically named keywords in column completion. Quoted-identifier detection scans delimiter candidates within the current statement instead of rescanning ordinary text character by character on every completion. Array subscripts keep their brackets, and quoted empty or delimiter-escaped prefixes reach cold metadata lookups as raw names.
 
 - SQL completion recognizes comma-separated FROM sources and derived-table aliases, using the subquery output names instead of exposing every column of its base tables. Projection commas preserve following FROM sources; leading comments, SELECT ALL, no-FROM trailing clauses and set-operation output names are recognized. MINUS is recognized only for Oracle so other backends retain identifiers named minus.

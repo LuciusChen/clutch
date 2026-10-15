@@ -330,7 +330,7 @@ Defer missing metadata when the connection is idle."
   (or (clutch--cached-columns schema collection)
       (when (and clutch-connection
                  schema
-                 (not (clutch-db-busy-p clutch-connection)))
+                 (not (clutch-db-in-use-p clutch-connection)))
         (clutch--safe-completion-call
          (lambda ()
            (clutch--ensure-columns-async
