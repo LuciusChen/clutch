@@ -2255,6 +2255,58 @@ Structure is not interpreted here; callers confirm depth and literals through
       (should-error (clutch--eldoc-schema-string 'fake schema "id" "users")
                     :type 'clutch-db-error))))
 
+(ert-deftest clutch-test-eldoc-and-completion-stay-off-a-reserved-connection ()
+  "Eldoc and completion leave a connection that foreground work holds alone.
+Between the statements of a batch the backend is idle, so the backend's busy
+flag alone let their synchronous queries in, and the batch's next statement
+then failed with \"Connection busy\"."
+  (clutch-test--with-isolated-metadata-caches
+    (let ((clutch-db--foreground-connections (make-hash-table :test 'eq))
+          (schema (make-hash-table :test 'equal))
+          queries)
+      (puthash "users" nil schema)
+      (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                 (lambda (&optional _conn) schema))
+                ((symbol-function 'clutch-db-busy-p) #'ignore)
+                ((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+                ((symbol-function 'clutch-db-completion-sync-columns-p)
+                 (lambda (_conn) t))
+                ((symbol-function 'clutch-db-database) (lambda (_conn) "testdb"))
+                ((symbol-function 'clutch-db-symbol-help)
+                 (lambda (_conn symbol) (push (list 'help symbol) queries) nil))
+                ((symbol-function 'clutch--ensure-columns)
+                 (lambda (_conn _schema table)
+                   (push (list 'columns table) queries)
+                   '("name")))
+                ((symbol-function 'clutch--ensure-columns-async)
+                 (lambda (_conn _schema table)
+                   (push (list 'columns-async table) queries)))
+                ((symbol-function 'clutch-db-complete-tables)
+                 (lambda (_conn prefix) (push (list 'tables prefix) queries) nil)))
+        (with-temp-buffer
+          (clutch-mode)
+          (insert "SELECT na FROM users")
+          (setq-local clutch-connection 'fake)
+          (goto-char 10)
+          (clutch-db--reserve-connection 'fake)
+          (clutch--eldoc-function)
+          (clutch-completion-at-point)
+          (should-not queries)
+          (clutch-db--release-connection 'fake)
+          (clutch--eldoc-function)
+          (should queries))
+        (with-temp-buffer
+          (clutch-mode)
+          (insert "SELECT * FROM zz")
+          (setq-local clutch-connection 'fake)
+          (setq queries nil)
+          (clutch-db--reserve-connection 'fake)
+          (clutch-completion-at-point)
+          (should-not queries)
+          (clutch-db--release-connection 'fake)
+          (clutch-completion-at-point)
+          (should (equal queries '((tables "zz")))))))))
+
 ;;;; Xref — alias jump
 
 (ert-deftest clutch-test-xref-alias-jump-contract ()
