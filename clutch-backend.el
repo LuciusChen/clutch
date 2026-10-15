@@ -659,20 +659,41 @@ preceding statement."
       (1- offset))
      (t offset))))
 
+(defun clutch-db-sql-statement-start (sql offset)
+  "Return the offset where the statement starting at OFFSET in SQL begins.
+OFFSET follows a top-level semicolon.  A comment that ends the line of that
+semicolon belongs to the statement before it, so the next statement begins on
+the following line.  Executable comments (/*! and /*M!) are code and stay."
+  (let* ((eol (or (string-search "\n" sql offset) (length sql)))
+         (line (substring sql offset eol)))
+    (if (and (string-match
+              "\\`[ \t]*\\(?:--.*\\|/\\*\\(?:[^*]\\|\\*[^/]\\)*\\*/\\)[ \t\r]*\\'"
+              line)
+             (not (string-match-p "\\`[ \t]*/\\*M?!" line)))
+        (min (1+ eol) (length sql))
+      offset)))
+
 (defun clutch-db-sql--bounds-from-breaks (text offset breaks)
   "Return zero-based statement bounds around OFFSET in TEXT given BREAKS.
 BREAKS are zero-based top-level semicolon offsets in TEXT, as returned by
-`clutch-db-sql-statement-breaks'."
-  (let ((beg 0)
-        (end (length text))
-        (effective-offset
-         (clutch-db-sql-statement-effective-offset text offset)))
-    (dolist (break breaks)
-      (if (< break effective-offset)
-          (setq beg (1+ break))
-        (when (= end (length text))
-          (setq end break))))
-    (cons beg end)))
+`clutch-db-sql-statement-breaks'.  A comment after a semicolon on its line
+belongs to the statement before it, so only the semicolons next to OFFSET
+need their statement starts computed."
+  (let ((effective-offset
+         (clutch-db-sql-statement-effective-offset text offset))
+        before before-that)
+    (while (and breaks (< (car breaks) effective-offset))
+      (setq before-that before
+            before (car breaks)
+            breaks (cdr breaks)))
+    (let ((start (and before (clutch-db-sql-statement-start text (1+ before)))))
+      (if (and start (> start effective-offset))
+          ;; OFFSET is in the trailing comment of the statement BEFORE ends.
+          (cons (if before-that
+                    (clutch-db-sql-statement-start text (1+ before-that))
+                  0)
+                before)
+        (cons (or start 0) (or (car breaks) (length text)))))))
 
 (defun clutch-db-sql--trim-bounds (text beg end)
   "Return non-whitespace bounds in TEXT between BEG and END, or nil."
