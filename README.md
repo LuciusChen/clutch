@@ -229,6 +229,8 @@ Configure the offered format with `clutch-export-default-format`, encoding with 
 
 Paged query export and all-row result export use `clutch-export-page-size` (default 2000), independently of the display page size (default 500). Set it to a positive integer, for example `(setq clutch-export-page-size 5000)` for larger export pages. Larger pages reduce repeated pagination queries but increase memory use and can prolong synchronous JDBC fetches; use a smaller value for wide rows or slow remote connections.
 
+While a long script or a large export runs, the SQL buffer is redisplayed repeatedly to show progress, and `display-line-numbers-mode` makes each redisplay costlier. On a 3,200-statement batch of `UPDATE`s it roughly doubled the run time (about 14 s to 28 s), and it added one to a few seconds to a 180 MB export. Turn it off in that buffer with `M-x display-line-numbers-mode` before such a run, or keep it out of SQL buffers with `(add-hook 'clutch-mode-hook (lambda () (display-line-numbers-mode -1)))`.
+
 By default, `TRUNCATE` and `UPDATE` or `DELETE` without an effective `WHERE`, including one in a PostgreSQL `WITH` clause or a DB2 data change table, require entering the exact token `YES`. Customize `clutch-high-risk-query-confirmation` to use an ordinary `yes-or-no` prompt or to disable this high-risk confirmation. Other destructive SQL keeps its ordinary confirmation prompt, and each statement asks at most once.
 
 #### 4. Control transactions
