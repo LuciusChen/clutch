@@ -1611,7 +1611,7 @@ when completion triggers during an in-flight query)."
            (empty-column-prefix-p (and empty-column-bounds t))
            (schema (clutch--schema-for-connection))
            (table-context-p (clutch--completion-table-context-p context-beg))
-           (busy (clutch-db-busy-p conn))
+           (busy (clutch-db-in-use-p conn))
            (namespace (and table-context-p
                            (clutch--qualified-identifier-qualifier context-beg)))
            (scoped-tables
@@ -1621,7 +1621,7 @@ when completion triggers during an in-flight query)."
                   conn (clutch-db--source-table-name conn namespace))))
            (sync-columns-p (clutch-db-completion-sync-columns-p conn))
            (direct-table-candidates
-            (when (and table-context-p (not namespace)
+            (when (and table-context-p (not namespace) (not busy)
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
               (or (clutch--schema-table-candidates conn schema prefix)
                   (clutch--safe-completion-call
@@ -1841,11 +1841,11 @@ SQL keyword/function docs are shown even without a connection."
      (when-let* ((conn clutch-connection)
                  (schema schema)
                  ((clutch-db-live-p conn))
-                 ((not (clutch-db-busy-p conn))))
+                 ((not (clutch-db-in-use-p conn))))
        (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
      (when-let* ((conn clutch-connection)
                  ((clutch-db-live-p conn))
-                 ((not (clutch-db-busy-p conn))))
+                 ((not (clutch-db-in-use-p conn))))
        (clutch--ensure-help-doc conn effective-sym))
      (clutch--eldoc-keyword-string effective-sym)))))
 

@@ -261,7 +261,7 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
     (unless (or (plist-member metadata :completion-tables)
                 (memq state '(loading failed))
                 (not (clutch-db-live-p conn))
-                (clutch-db-busy-p conn))
+                (clutch-db-in-use-p conn))
       (unless (clutch--start-table-metadata-request
                conn key namespace :tables-status "schema-tables"
                #'clutch-db-schema-tables-async
@@ -279,7 +279,7 @@ Start one asynchronous fetch on a cache miss."
     (unless (or (plist-member metadata :columns)
                 (memq state '(loading failed))
                 (not (clutch-db-live-p conn))
-                (clutch-db-busy-p conn))
+                (clutch-db-in-use-p conn))
       (unless (clutch--start-table-metadata-request
                conn key key :columns-status "list-columns"
                (lambda (connection table callback errback)
