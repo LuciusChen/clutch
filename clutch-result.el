@@ -3378,6 +3378,31 @@ may run after this function returns."
               page-size)
          #'emit done)))))
 
+(defconst clutch-result--export-gc-threshold (* 32 1024 1024)
+  "Garbage collection threshold in bytes while an export runs.
+At Emacs's default threshold, collection took most of the time of a large
+export.  This keeps it to a few percent for some 35 MB more memory.")
+
+(defconst clutch-result--export-read-size 65536
+  "Bytes read from a process at a time while an export runs.
+Emacs 29 reads 4096, which made a large export many times slower.")
+
+(defun clutch-result--raise-export-limits ()
+  "Raise the garbage collection threshold and process read size for an export.
+Return a function that puts back what this changed, except a value that
+has been changed again since."
+  (let* ((gc gc-cons-threshold)
+         (read read-process-output-max)
+         (gc-raised (setq gc-cons-threshold
+                          (max gc clutch-result--export-gc-threshold)))
+         (read-raised (setq read-process-output-max
+                            (max read clutch-result--export-read-size))))
+    (lambda ()
+      (when (= gc-cons-threshold gc-raised)
+        (setq gc-cons-threshold gc))
+      (when (= read-process-output-max read-raised)
+        (setq read-process-output-max read)))))
+
 (defun clutch-result--export-pages (sql query page-size emit done &optional stream)
   "Fetch QUERY for an export of SQL, calling EMIT with rows and columns.
 PAGE-SIZE pages QUERY, or nil fetches it whole.  STREAM, when non-nil, is
@@ -3391,12 +3416,16 @@ synchronously continues the loop instead of nesting the next one, so many
 pages need no deeper stack.  An error or a quit is signaled while the
 command runs and only reported once it has returned.  Killing the owning
 buffer, or changing its connection, stops the export."
-  (let ((conn clutch-connection)
-        (buffer (current-buffer))
-        (order-by clutch--order-by)
-        (activity (clutch--begin-query-activity clutch-connection))
-        (page-num 0)
-        waiting)
+  (let* ((conn clutch-connection)
+         (buffer (current-buffer))
+         (order-by clutch--order-by)
+         restore-limits
+         (activity (clutch--begin-query-activity
+                    clutch-connection nil
+                    (lambda () (when restore-limits (funcall restore-limits)))))
+         (page-num 0)
+         waiting)
+    (setq restore-limits (clutch-result--raise-export-limits))
     (cl-labels
         ((report (err)
            (if waiting
