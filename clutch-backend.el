@@ -306,6 +306,14 @@ Values are nesting counts.")
   "Return non-nil when CONN is reserved by foreground Clutch work."
   (gethash conn clutch-db--foreground-connections))
 
+(defun clutch-db-in-use-p (conn)
+  "Return non-nil when CONN is in a statement or reserved for foreground work.
+Between the statements of a batch the backend is idle, yet the batch still
+owns CONN.  Work that queries CONN on its own, such as eldoc and completion,
+checks this rather than `clutch-db-busy-p' and waits."
+  (or (clutch-db-busy-p conn)
+      (clutch-db--foreground-busy-p conn)))
+
 (defun clutch-db--reserve-connection (conn)
   "Reserve CONN for foreground work; reservations nest."
   (puthash conn (1+ (or (gethash conn clutch-db--foreground-connections) 0))
@@ -1682,8 +1690,7 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
   (cl-labels
       ((run ()
          (if (clutch-db-live-p conn)
-             (if (or (clutch-db-busy-p conn)
-                     (clutch-db--foreground-busy-p conn)
+             (if (or (clutch-db-in-use-p conn)
                      (gethash conn clutch-db--idle-metadata-connections))
                  (run-with-idle-timer 0.1 nil #'run)
                (puthash conn t clutch-db--idle-metadata-connections)
