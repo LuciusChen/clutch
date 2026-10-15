@@ -344,8 +344,7 @@ GENERATION rejects stale work."
           (remhash conn clutch--object-warmup-timers)
           (when (clutch--object-warmup-current-p conn generation)
             (condition-case err
-                (if (or (clutch-db-busy-p conn)
-                        (clutch-db--foreground-busy-p conn))
+                (if (clutch-db-in-use-p conn)
                     (clutch--schedule-object-warmup conn)
                   (let ((type (clutch--object-category-type next)))
                     (if (clutch-db-list-objects-async
