@@ -3387,21 +3387,45 @@ export.  This keeps it to a few percent for some 35 MB more memory.")
   "Bytes read from a process at a time while an export runs.
 Emacs 29 reads 4096, which made a large export many times slower.")
 
+(defvar clutch-result--export-limits nil
+  "State of the limits that running exports have raised, or nil.
+A plist: :gc and :read are the global values before, :gc-raised and
+:read-raised the ones set, :users the number of exports using them.")
+
 (defun clutch-result--raise-export-limits ()
   "Raise the garbage collection threshold and process read size for an export.
-Return a function that puts back what this changed, except a value that
-has been changed again since."
-  (let* ((gc gc-cons-threshold)
-         (read read-process-output-max)
-         (gc-raised (setq gc-cons-threshold
-                          (max gc clutch-result--export-gc-threshold)))
-         (read-raised (setq read-process-output-max
-                            (max read clutch-result--export-read-size))))
+Exports that run at once share the raised values.  Return a function that
+ends this export's use of them; the last one puts back what it changed,
+except a value that has been changed again since.  They are the global
+values, not a temporary binding in force when an export starts or ends."
+  (unless clutch-result--export-limits
+    (let ((gc (default-toplevel-value 'gc-cons-threshold))
+          (read (default-toplevel-value 'read-process-output-max)))
+      (setq clutch-result--export-limits
+            (list :gc gc :read read :users 0
+                  :gc-raised (max gc clutch-result--export-gc-threshold)
+                  :read-raised (max read clutch-result--export-read-size)))
+      (set-default-toplevel-value
+       'gc-cons-threshold (plist-get clutch-result--export-limits :gc-raised))
+      (set-default-toplevel-value
+       'read-process-output-max
+       (plist-get clutch-result--export-limits :read-raised))))
+  (cl-incf (plist-get clutch-result--export-limits :users))
+  (let ((limits clutch-result--export-limits)
+        released)
     (lambda ()
-      (when (= gc-cons-threshold gc-raised)
-        (setq gc-cons-threshold gc))
-      (when (= read-process-output-max read-raised)
-        (setq read-process-output-max read)))))
+      (unless released
+        (setq released t)
+        (when (zerop (cl-decf (plist-get limits :users)))
+          (setq clutch-result--export-limits nil)
+          (when (= (default-toplevel-value 'gc-cons-threshold)
+                   (plist-get limits :gc-raised))
+            (set-default-toplevel-value 'gc-cons-threshold
+                                        (plist-get limits :gc)))
+          (when (= (default-toplevel-value 'read-process-output-max)
+                   (plist-get limits :read-raised))
+            (set-default-toplevel-value 'read-process-output-max
+                                        (plist-get limits :read))))))))
 
 (defun clutch-result--export-pages (sql query page-size emit done &optional stream)
   "Fetch QUERY for an export of SQL, calling EMIT with rows and columns.
