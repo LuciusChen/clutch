@@ -994,24 +994,32 @@ when its continuation fails."
           (should (= calls 1))
           (should-not (clutch-db--foreground-busy-p 'conn)))))))
 
+(defvar clutch-test--export-buffers nil
+  "Buffers that `clutch-test--start-export' made in the running test.")
+
 (defmacro clutch-test--with-global-export-limits (gc read &rest body)
   "Run BODY with the global GC threshold GC and process read size READ.
-Both globals are put back afterwards, whatever BODY does."
+Both globals are put back afterwards, whatever BODY does, and the buffers
+BODY started exports in are killed."
   (declare (indent 2) (debug t))
   `(let ((saved-gc (default-toplevel-value 'gc-cons-threshold))
-         (saved-read (default-toplevel-value 'read-process-output-max)))
+         (saved-read (default-toplevel-value 'read-process-output-max))
+         (clutch-test--export-buffers nil))
      (unwind-protect
          (progn
            (set-default-toplevel-value 'gc-cons-threshold ,gc)
            (set-default-toplevel-value 'read-process-output-max ,read)
            ,@body)
        (set-default-toplevel-value 'gc-cons-threshold saved-gc)
-       (set-default-toplevel-value 'read-process-output-max saved-read))))
+       (set-default-toplevel-value 'read-process-output-max saved-read)
+       (mapc #'kill-buffer clutch-test--export-buffers))))
 
 (defun clutch-test--start-export (query connection done)
   "Start an export of QUERY on CONNECTION in a new result buffer.
-DONE is called with the outcome when the export ends.  Return the buffer."
+DONE is called with the outcome when the export ends.  Return the buffer,
+which `clutch-test--with-global-export-limits' kills."
   (let ((buffer (generate-new-buffer " *clutch-export-limits*")))
+    (push buffer clutch-test--export-buffers)
     (with-current-buffer buffer
       (clutch-test--init-result-state
        (list :columns '("id") :rows '((1)) :connection connection
