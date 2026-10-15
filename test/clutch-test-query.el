@@ -2996,29 +2996,40 @@ there, and the result keeps its rows and its unknown total."
         (should-not (gethash 'async-conn clutch--running-queries))
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
-(ert-deftest clutch-test-batch-redisplays-at-a-bounded-rate ()
-  "A batch of many quick statements forces a redisplay for few of them.
+(ert-deftest clutch-test-batch-redisplays-once-per-interval ()
+  "A batch draws its first statement at once, then at most once per interval.
 Each forced redisplay costs milliseconds, and two per statement made up
-half the run time of a script of thousands of short statements."
+half the run time of a script of thousands of short statements.  The clock
+is controlled, so the result does not depend on the speed of the machine."
   (with-temp-buffer
-    (dotimes (i 100)
+    (dotimes (i 4)
       (insert (format "UPDATE t SET n = %d;\n" i)))
     (setq-local clutch-connection 'async-conn)
-    (let ((redisplays 0))
+    (let ((now 1000.0)
+          (redisplays 0))
       (clutch-test--with-async-statements finishes
         (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
                   ((symbol-function 'message) #'ignore)
+                  ((symbol-function 'float-time) (lambda (&rest _) now))
                   ((symbol-function 'redisplay)
                    (lambda (&rest _) (cl-incf redisplays))))
-          (clutch--execute-statements
-           (clutch--split-statement-specs (buffer-string) (point-min)))
-          (dotimes (_ 100)
-            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-            (ert-run-idle-timers))
-          (should (= (length finishes) 100))
-          ;; The first statement shows its marker at once; later ones wait.
-          (should (>= redisplays 1))
-          (should (< redisplays 25)))))))
+          (cl-flet ((finish ()
+                      (funcall (cdar finishes)
+                               (make-clutch-db-result :affected-rows 1) nil)
+                      (ert-run-idle-timers)))
+            (clutch--execute-statements
+             (clutch--split-statement-specs (buffer-string) (point-min)))
+            ;; The activity redisplays once itself, and the first statement
+            ;; is drawn at once.
+            (should (= redisplays 2))
+            ;; Within the interval the next statements draw nothing.
+            (finish)
+            (finish)
+            (should (= redisplays 2))
+            ;; Once it has passed, the next statement draws again.
+            (setq now (+ now 1.0))
+            (finish)
+            (should (= redisplays 3))))))))
 
 (ert-deftest clutch-test-async-markers-follow-edits-while-running ()
   "Status markers should stay on their statement while the buffer is edited.
