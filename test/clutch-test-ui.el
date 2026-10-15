@@ -1129,17 +1129,24 @@ line up and sent the comment with it."
                      "/* x */ SELECT 3")))))
 
 (ert-deftest clutch-test-split-statement-specs-stays-linear-on-one-line ()
-  "Statements on one line cost no more than statements on separate lines.
-Looking for a trailing comment after each semicolon must not read the rest
-of the line each time, which made thousands of statements on a line take
-seconds."
+  "Statements with no comment after them cost no search of their line.
+Looking for a trailing comment after each semicolon used to search, and copy,
+the rest of the line every time, so thousands of statements on one line took
+quadratic time.  The searches are counted rather than timed, so the result
+does not depend on the speed of the machine."
   (with-temp-buffer
-    (let* ((count 30000)
+    (let* ((count 2000)
            (text (mapconcat (lambda (_) "SELECT 1") (number-sequence 1 count) "; "))
-           (start (float-time))
-           (specs (clutch--split-statement-specs text 1)))
+           (searches 0)
+           specs)
+      (advice-add 'string-search :before
+                  (lambda (&rest _) (cl-incf searches))
+                  '((name . clutch-test-count-searches)))
+      (unwind-protect
+          (setq specs (clutch--split-statement-specs text 1))
+        (advice-remove 'string-search 'clutch-test-count-searches))
       (should (= (length specs) count))
-      (should (< (- (float-time) start) 1.0)))))
+      (should (< searches (/ count 10))))))
 
 (ert-deftest clutch-test-execute-range-runs-one-statement-without-its-comment ()
   "A range with one statement and a trailing comment runs that statement.
