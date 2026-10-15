@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- A batch of many short statements no longer forces a redisplay before and after each one, which made up about half the run time of a script of thousands of single-row updates. Its progress marker is redrawn at most as often as the running timer refreshes, ten times a second.
+
 - Eldoc and completion no longer query a connection that a running batch of statements still holds. Between two statements the backend looks idle, so moving point in the buffer could start a synchronous lookup that made the batch's next statement fail with "Connection busy" and stopped the rest of the batch.
 
 - A comment that ends the line of a statement's semicolon stays with that statement. Counted in the next statement, it put that statement's status marker and `C-c C-c` flash one line up, was sent to the server with it, and made point on that comment pick the next statement.
