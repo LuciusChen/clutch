@@ -659,20 +659,61 @@ preceding statement."
       (1- offset))
      (t offset))))
 
+(defun clutch-db-sql-statement-start (sql offset)
+  "Return the offset where the statement starting at OFFSET in SQL begins.
+OFFSET follows a top-level semicolon.  A comment that ends the line of that
+semicolon belongs to the statement before it, so the next statement begins on
+the following line.  Executable comments (/*! and /*M!) are code and stay.
+Only the text up to the comment's end is read, so a line of many short
+statements costs no more than separate lines."
+  (let ((len (length sql))
+        (pos offset))
+    (while (and (< pos len) (memq (aref sql pos) '(?\s ?\t)))
+      (cl-incf pos))
+    (cond
+     ((and (< (1+ pos) len)
+           (eq (aref sql pos) ?-) (eq (aref sql (1+ pos)) ?-))
+      (let ((eol (string-search "\n" sql pos)))
+        (if eol (1+ eol) len)))
+     ((and (< (1+ pos) len)
+           (eq (aref sql pos) ?/) (eq (aref sql (1+ pos)) ?*)
+           (not (eq (and (< (+ pos 2) len) (aref sql (+ pos 2))) ?!))
+           (not (and (eq (and (< (+ pos 2) len) (aref sql (+ pos 2))) ?M)
+                     (eq (and (< (+ pos 3) len) (aref sql (+ pos 3))) ?!))))
+      (let ((close (string-search "*/" sql (+ pos 2)))
+            (after nil))
+        (if (not (and close
+                      (not (string-search "\n" (substring sql pos close)))))
+            offset
+          (setq after (+ close 2))
+          (while (and (< after len) (memq (aref sql after) '(?\s ?\t ?\r)))
+            (cl-incf after))
+          (cond ((>= after len) len)
+                ((eq (aref sql after) ?\n) (1+ after))
+                (t offset)))))
+     (t offset))))
+
 (defun clutch-db-sql--bounds-from-breaks (text offset breaks)
   "Return zero-based statement bounds around OFFSET in TEXT given BREAKS.
 BREAKS are zero-based top-level semicolon offsets in TEXT, as returned by
-`clutch-db-sql-statement-breaks'."
-  (let ((beg 0)
-        (end (length text))
-        (effective-offset
-         (clutch-db-sql-statement-effective-offset text offset)))
-    (dolist (break breaks)
-      (if (< break effective-offset)
-          (setq beg (1+ break))
-        (when (= end (length text))
-          (setq end break))))
-    (cons beg end)))
+`clutch-db-sql-statement-breaks'.  A comment after a semicolon on its line
+belongs to the statement before it, so only the semicolons next to OFFSET
+need their statement starts computed."
+  (let ((effective-offset
+         (clutch-db-sql-statement-effective-offset text offset))
+        before before-that)
+    (while (and breaks (< (car breaks) effective-offset))
+      (setq before-that before
+            before (car breaks)
+            breaks (cdr breaks)))
+    (let ((start (and before (clutch-db-sql-statement-start text (1+ before)))))
+      (if (and start (> start effective-offset))
+          ;; OFFSET is in the trailing comment of the statement BEFORE ends.
+          (cons (if before-that
+                    (clutch-db-sql-statement-start text (1+ before-that))
+                  0)
+                before)
+        (cons (or start 0) (or (car breaks) (length text)))))))
 
 (defun clutch-db-sql--trim-bounds (text beg end)
   "Return non-whitespace bounds in TEXT between BEG and END, or nil."
