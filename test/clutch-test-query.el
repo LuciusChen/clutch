@@ -3012,6 +3012,41 @@ there, and the result keeps its rows and its unknown total."
         (should-not (gethash 'async-conn clutch--running-queries))
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
+(ert-deftest clutch-test-batch-redisplays-once-per-interval ()
+  "A batch draws its first statement at once, then at most once per interval.
+Each forced redisplay costs milliseconds, and two per statement made up
+half the run time of a script of thousands of short statements.  The clock
+is controlled, so the result does not depend on the speed of the machine."
+  (with-temp-buffer
+    (dotimes (i 4)
+      (insert (format "UPDATE t SET n = %d;\n" i)))
+    (setq-local clutch-connection 'async-conn)
+    (let ((now 1000.0)
+          (redisplays 0))
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'message) #'ignore)
+                  ((symbol-function 'float-time) (lambda (&rest _) now))
+                  ((symbol-function 'redisplay)
+                   (lambda (&rest _) (cl-incf redisplays))))
+          (cl-flet ((finish ()
+                      (funcall (cdar finishes)
+                               (make-clutch-db-result :affected-rows 1) nil)
+                      (ert-run-idle-timers)))
+            (clutch--execute-statements
+             (clutch--split-statement-specs (buffer-string) (point-min)))
+            ;; The activity redisplays once itself, and the first statement
+            ;; is drawn at once.
+            (should (= redisplays 2))
+            ;; Within the interval the next statements draw nothing.
+            (finish)
+            (finish)
+            (should (= redisplays 2))
+            ;; Once it has passed, the next statement draws again.
+            (setq now (+ now 1.0))
+            (finish)
+            (should (= redisplays 3))))))))
+
 (ert-deftest clutch-test-batch-markers-stay-on-their-statement-lines ()
   "Each statement of a batch is marked on its own line.
 A comment after the previous semicolon used to pull the marker, and the

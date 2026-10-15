@@ -1814,6 +1814,7 @@ Stops and reports on the first error."
          (connection clutch-connection)
          (source-buffer (current-buffer))
          (done 0)
+         (last-redisplay 0.0)
          waiting
          activity)
     (clutch--prepare-query-activity connection)
@@ -1831,7 +1832,16 @@ Stops and reports on the first error."
                           specs)
             activity (clutch--begin-query-activity connection markers)))
     (cl-labels
-        ((report-complete (&optional ending)
+        ((redraw ()
+           ;; A forced redisplay costs milliseconds, which would dominate a
+           ;; script of thousands of short statements.  A backend that runs
+           ;; SQL synchronously never reaches the refresh timer, so the batch
+           ;; shows its progress itself, as often as that timer would.
+           (when (> (- (float-time) last-redisplay)
+                    clutch--execution-refresh-interval)
+             (redisplay t)
+             (setq last-redisplay (float-time))))
+         (report-complete (&optional ending)
            (message "%s statement%s %s%s"
                     (clutch--message-count done)
                     (if (= done 1) "" "s")
@@ -1908,7 +1918,7 @@ Stops and reports on the first error."
              (when (and region (buffer-live-p source-buffer))
                (with-current-buffer source-buffer
                  (clutch--mark-executed-sql-region (car region) (cdr region))
-                 (redisplay t)))
+                 (redraw)))
              (if (not (plist-get outcome :cancelled))
                  t
                ;; The cancel met this statement's result; stop the batch.
@@ -1940,7 +1950,7 @@ Stops and reports on the first error."
                  (with-current-buffer source-buffer
                    (when region
                      (clutch--clear-executed-sql-overlay)
-                     (redisplay t))
+                     (redraw))
                    (clutch--execute-statement
                     stmt connection final-p region
                     (lambda (outcome)
