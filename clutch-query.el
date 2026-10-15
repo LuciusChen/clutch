@@ -1797,7 +1797,7 @@ the last semicolon, is no statement and is dropped unless it contains /*! or
       (dolist (break (clutch-db-sql-statement-breaks
                       sql (clutch--buffer-sql-dialect)))
         (emit break)
-        (setq start (1+ break)))
+        (setq start (clutch-db-sql-statement-start sql (1+ break))))
       (emit len))
     (nreverse stmts)))
 
