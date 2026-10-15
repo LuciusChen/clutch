@@ -1440,10 +1440,12 @@ already confirmed SQL."
 Text inserted at either edge stays outside the region."
   (cons (copy-marker beg t) (copy-marker end)))
 
-(defun clutch--begin-query-activity (connection &optional markers)
+(defun clutch--begin-query-activity (connection &optional markers on-end)
   "Start a foreground query activity on CONNECTION in the current buffer.
 MARKERS locate its statements in the buffer; ending the activity releases
-them.  Return the activity, which `clutch--finish-query-activity' ends."
+them.  ON-END, when non-nil, is a function the activity calls once as it
+ends, however it ends.  Return the activity, which
+`clutch--finish-query-activity' ends."
   (clutch-db--reserve-connection connection)
   (let ((start (float-time)))
     (setq clutch--execution-start-time start)
@@ -1451,13 +1453,15 @@ them.  Return the activity, which `clutch--finish-query-activity' ends."
     (clutch--update-mode-line)
     (redisplay t)
     (list :connection connection :buffer (current-buffer) :markers markers
-          :start start :ended nil)))
+          :on-end on-end :start start :ended nil)))
 
 (defun clutch--end-query-activity (activity)
   "End ACTIVITY once, releasing its connection, markers and execution display.
 A later activity in ACTIVITY's buffer keeps its own display."
   (unless (plist-get activity :ended)
     (plist-put activity :ended t)
+    (when-let* ((on-end (plist-get activity :on-end)))
+      (funcall on-end))
     (clutch-db--release-connection (plist-get activity :connection))
     (dolist (marker (plist-get activity :markers))
       (set-marker marker nil))

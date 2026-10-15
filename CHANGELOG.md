@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Query and result exports raise Emacs's garbage collection threshold to 32 MB, and the process read size to 64 KB, until they end, and then put both back (a value you set higher stays, one changed meanwhile is left alone). Garbage collection took most of a large export's time at the default threshold, and Emacs 29 reads from a process 4 KB at a time. A 155,000-row, 200-column PostgreSQL export of 181 MB took 15.5 s with Emacs 30 and 404 s with Emacs 29 before, and 3.4 s and 25 s now.
+
 - SQL identifier completion preserves catalog spelling and escapes accepted table and column names using the connection's dialect, including mixed-case and space-containing names. Existing identifier quotes are replaced without duplication. `clutch-sql-completion-case-style` now applies only to keywords so it cannot change the object named by a completion. Derived projection names preserve their SQL quoting and case-folding semantics, and columns take precedence over identically named keywords in column completion. Quoted-identifier detection scans delimiter candidates within the current statement instead of rescanning ordinary text character by character on every completion. Array subscripts keep their brackets, and quoted empty or delimiter-escaped prefixes reach cold metadata lookups as raw names.
 
 - SQL completion recognizes comma-separated FROM sources and derived-table aliases, using the subquery output names instead of exposing every column of its base tables. Projection commas preserve following FROM sources; leading comments, SELECT ALL, no-FROM trailing clauses and set-operation output names are recognized. MINUS is recognized only for Oracle so other backends retain identifiers named minus.
