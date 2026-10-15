@@ -2996,6 +2996,30 @@ there, and the result keeps its rows and its unknown total."
         (should-not (gethash 'async-conn clutch--running-queries))
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
 
+(ert-deftest clutch-test-batch-redisplays-at-a-bounded-rate ()
+  "A batch of many quick statements forces a redisplay for few of them.
+Each forced redisplay costs milliseconds, and two per statement made up
+half the run time of a script of thousands of short statements."
+  (with-temp-buffer
+    (dotimes (i 100)
+      (insert (format "UPDATE t SET n = %d;\n" i)))
+    (setq-local clutch-connection 'async-conn)
+    (let ((redisplays 0))
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'message) #'ignore)
+                  ((symbol-function 'redisplay)
+                   (lambda (&rest _) (cl-incf redisplays))))
+          (clutch--execute-statements
+           (clutch--split-statement-specs (buffer-string) (point-min)))
+          (dotimes (_ 100)
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers))
+          (should (= (length finishes) 100))
+          ;; The first statement shows its marker at once; later ones wait.
+          (should (>= redisplays 1))
+          (should (< redisplays 25)))))))
+
 (ert-deftest clutch-test-async-markers-follow-edits-while-running ()
   "Status markers should stay on their statement while the buffer is edited.
 While it runs or is being cancelled, its background covers just its text.
