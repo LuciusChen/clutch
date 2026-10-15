@@ -1106,6 +1106,48 @@ Running a region or buffer that ended in one failed on the comment with
                    '("SELECT 1" "/* a */\nSELECT 2")))
     (should-not (clutch--split-statement-specs "-- only a comment\n"))))
 
+(ert-deftest clutch-test-split-statement-specs-leave-trailing-comments-behind ()
+  "A comment ending the line of a semicolon belongs to that statement.
+Counted in the next statement, it put that statement's status marker one
+line up and sent the comment with it."
+  (with-temp-buffer
+    (let ((text "UPDATE a SET n = 1; -- first\nUPDATE b SET n = 2; /* second */\nUPDATE c SET n = 3;\n"))
+      (insert text)
+      (let ((specs (clutch--split-statement-specs text (point-min))))
+        (should (equal (mapcar #'car specs)
+                       '("UPDATE a SET n = 1" "UPDATE b SET n = 2"
+                         "UPDATE c SET n = 3")))
+        (should (equal (mapcar (lambda (spec)
+                                 (line-number-at-pos (nth 1 spec)))
+                               specs)
+                       '(1 2 3)))))
+    ;; Executable comments are code, and a comment before more SQL on its
+    ;; line leads that SQL.
+    (should (equal (mapcar #'car (clutch--split-statement-specs
+                                  "SELECT 1; /*!40101 SET @a = 1 */;\nSELECT 2; /* x */ SELECT 3"))
+                   '("SELECT 1" "/*!40101 SET @a = 1 */" "SELECT 2"
+                     "/* x */ SELECT 3")))))
+
+(ert-deftest clutch-test-split-statement-specs-stays-linear-on-one-line ()
+  "Statements with no comment after them cost no search of their line.
+Looking for a trailing comment after each semicolon used to search, and copy,
+the rest of the line every time, so thousands of statements on one line took
+quadratic time.  The searches are counted rather than timed, so the result
+does not depend on the speed of the machine."
+  (with-temp-buffer
+    (let* ((count 2000)
+           (text (mapconcat (lambda (_) "SELECT 1") (number-sequence 1 count) "; "))
+           (searches 0)
+           specs)
+      (advice-add 'string-search :before
+                  (lambda (&rest _) (cl-incf searches))
+                  '((name . clutch-test-count-searches)))
+      (unwind-protect
+          (setq specs (clutch--split-statement-specs text 1))
+        (advice-remove 'string-search 'clutch-test-count-searches))
+      (should (= (length specs) count))
+      (should (< searches (/ count 10))))))
+
 (ert-deftest clutch-test-execute-range-runs-one-statement-without-its-comment ()
   "A range with one statement and a trailing comment runs that statement.
 The whole range, comment included, used to reach paging, whose LIMIT then

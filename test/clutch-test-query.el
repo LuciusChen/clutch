@@ -1635,6 +1635,22 @@ the filter wraps the base query, not the last query run."
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
 
+(ert-deftest clutch-test-statement-bounds-leave-trailing-comments-behind ()
+  "Point on a statement or on its trailing comment picks that statement.
+The previous line's comment used to lead the next statement, so the flash
+covered it and point at the end of that line picked the next statement."
+  (with-temp-buffer
+    (insert "UPDATE a SET n = 1; -- first\nUPDATE b SET n = 2; -- second\n")
+    (cl-flet ((picked (needle)
+                (goto-char (point-min))
+                (search-forward needle)
+                (let ((bounds (clutch--dwim-bounds-at-point)))
+                  (buffer-substring-no-properties (car bounds) (cdr bounds)))))
+      (should (equal (picked "UPDATE a") "UPDATE a SET n = 1"))
+      (should (equal (picked "first") "UPDATE a SET n = 1"))
+      (should (equal (picked "UPDATE b") "UPDATE b SET n = 2"))
+      (should (equal (picked "second") "UPDATE b SET n = 2")))))
+
 (ert-deftest clutch-test-preview-leaves-the-result-buffer-selected ()
   "\\`C-c C-c' after \\`C-c C-p' should submit from the result buffer.
 The preview is in `sql-mode', where \\`C-c C-c' sends to an SQL process."
@@ -3142,6 +3158,67 @@ there, and the result keeps its rows and its unknown total."
         (should (member "Query finished after its buffer was killed" messages))
         (should-not (gethash 'async-conn clutch--running-queries))
         (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+
+(ert-deftest clutch-test-batch-redisplays-once-per-interval ()
+  "A batch draws its first statement at once, then at most once per interval.
+Each forced redisplay costs milliseconds, and two per statement made up
+half the run time of a script of thousands of short statements.  The clock
+is controlled, so the result does not depend on the speed of the machine."
+  (with-temp-buffer
+    (dotimes (i 4)
+      (insert (format "UPDATE t SET n = %d;\n" i)))
+    (setq-local clutch-connection 'async-conn)
+    (let ((now 1000.0)
+          (redisplays 0))
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                  ((symbol-function 'message) #'ignore)
+                  ((symbol-function 'float-time) (lambda (&rest _) now))
+                  ((symbol-function 'redisplay)
+                   (lambda (&rest _) (cl-incf redisplays))))
+          (cl-flet ((finish ()
+                      (funcall (cdar finishes)
+                               (make-clutch-db-result :affected-rows 1) nil)
+                      (ert-run-idle-timers)))
+            (clutch--execute-statements
+             (clutch--split-statement-specs (buffer-string) (point-min)))
+            ;; The activity redisplays once itself, and the first statement
+            ;; is drawn at once.
+            (should (= redisplays 2))
+            ;; Within the interval the next statements draw nothing.
+            (finish)
+            (finish)
+            (should (= redisplays 2))
+            ;; Once it has passed, the next statement draws again.
+            (setq now (+ now 1.0))
+            (finish)
+            (should (= redisplays 3))))))))
+
+(ert-deftest clutch-test-batch-markers-stay-on-their-statement-lines ()
+  "Each statement of a batch is marked on its own line.
+A comment after the previous semicolon used to pull the marker, and the
+text sent, onto the line above."
+  (with-temp-buffer
+    (insert "UPDATE a SET n = 1; -- first\nUPDATE b SET n = 2; -- second\n")
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (clutch--execute-statements
+         (clutch--split-statement-specs (buffer-string) (point-min)))
+        (should (equal (mapcar #'car finishes) '("UPDATE a SET n = 1")))
+        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (equal (mapcar #'car finishes)
+                       '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
+        (should (= (line-number-at-pos
+                    (overlay-start clutch--executed-sql-overlay))
+                   2))
+        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+        (ert-run-idle-timers)
+        (should (= (line-number-at-pos
+                    (overlay-start clutch--executed-sql-overlay))
+                   2))))))
 
 (ert-deftest clutch-test-async-markers-follow-edits-while-running ()
   "Status markers should stay on their statement while the buffer is edited.
