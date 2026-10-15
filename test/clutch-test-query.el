@@ -994,6 +994,31 @@ when its continuation fails."
           (should (= calls 1))
           (should-not (clutch-db--foreground-busy-p 'conn)))))))
 
+(defmacro clutch-test--with-global-export-limits (gc read &rest body)
+  "Run BODY with the global GC threshold GC and process read size READ.
+Both globals are put back afterwards, whatever BODY does."
+  (declare (indent 2) (debug t))
+  `(let ((saved-gc (default-toplevel-value 'gc-cons-threshold))
+         (saved-read (default-toplevel-value 'read-process-output-max)))
+     (unwind-protect
+         (progn
+           (set-default-toplevel-value 'gc-cons-threshold ,gc)
+           (set-default-toplevel-value 'read-process-output-max ,read)
+           ,@body)
+       (set-default-toplevel-value 'gc-cons-threshold saved-gc)
+       (set-default-toplevel-value 'read-process-output-max saved-read))))
+
+(defun clutch-test--start-export (query connection done)
+  "Start an export of QUERY on CONNECTION in a new result buffer.
+DONE is called with the outcome when the export ends.  Return the buffer."
+  (let ((buffer (generate-new-buffer " *clutch-export-limits*")))
+    (with-current-buffer buffer
+      (clutch-test--init-result-state
+       (list :columns '("id") :rows '((1)) :connection connection
+             :base-query query :server-pageable t :result-max-rows 2))
+      (clutch-result--export-pages query query 2 #'ignore done))
+    buffer))
+
 (ert-deftest clutch-test-export-raises-runtime-limits-while-it-runs ()
   "An export raises the GC threshold and process read size until it ends.
 Garbage collection took most of the time of a large export at Emacs's
@@ -1002,57 +1027,95 @@ way an export ends restores the limits, one the user already set higher
 is kept, and one changed while the export ran is left as it was changed."
   (dolist (ending '(success failure cancel))
     (ert-info ((format "ended by %s" ending))
-      (with-temp-buffer
+      (clutch-test--with-global-export-limits 800000 4096
         (clutch-test--with-async-statements finishes
-          (clutch-test--init-result-state
-           (list :columns '("id") :rows '((1)) :connection 'async-conn
-                 :base-query "SELECT id FROM t" :server-pageable t
-                 :result-max-rows 2))
-          (let ((gc-cons-threshold 800000)
-                (read-process-output-max 4096)
-                completions)
+          (let (completions)
             (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
                        (lambda (_conn _sql page-num &rest _)
                          (format "SELECT id FROM t PAGE %d" page-num)))
                       ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
                       ((symbol-function 'clutch--present-statement-outcome) #'ignore)
                       ((symbol-function 'message) #'ignore))
-              (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
-                                           #'ignore
-                                           (lambda (err) (push err completions)))
-              (should (>= gc-cons-threshold (* 16 1024 1024)))
-              (should (>= read-process-output-max 65536))
-              (pcase ending
-                ('success
-                 (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil))
-                ('failure
-                 (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
-                ('cancel
-                 (clutch-cancel-query-or-quit)
-                 (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)))
-              (ert-run-idle-timers)
-              (should (= (length completions) 1))
-              (should (= gc-cons-threshold 800000))
-              (should (= read-process-output-max 4096))))))))
-  (with-temp-buffer
+              (with-current-buffer
+                  (clutch-test--start-export "SELECT id FROM t" 'async-conn
+                                         (lambda (err) (push err completions)))
+                (should (>= gc-cons-threshold (* 16 1024 1024)))
+                (should (>= read-process-output-max 65536))
+                (pcase ending
+                  ('success
+                   (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil))
+                  ('failure
+                   (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
+                  ('cancel
+                   (clutch-cancel-query-or-quit)
+                   (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)))
+                (ert-run-idle-timers)
+                (should (= (length completions) 1))
+                (should (= gc-cons-threshold 800000))
+                (should (= read-process-output-max 4096)))))))))
+  (clutch-test--with-global-export-limits (* 256 1024 1024) (* 1024 1024)
     (clutch-test--with-async-statements finishes
-      (clutch-test--init-result-state
-       (list :columns '("id") :rows '((1)) :connection 'async-conn
-             :base-query "SELECT id FROM t" :server-pageable t
-             :result-max-rows 2))
-      (let ((gc-cons-threshold (* 256 1024 1024))
-            (read-process-output-max (* 1024 1024)))
+      (let (completions)
         (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
                   ((symbol-function 'message) #'ignore))
-          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
-                                       #'ignore #'ignore)
-          (should (= gc-cons-threshold (* 256 1024 1024)))
-          ;; Changed while the export ran: not ours to put back.
-          (setq gc-cons-threshold (* 64 1024 1024))
-          (funcall (cdar finishes) nil '(clutch-db-error "boom"))
+          (with-current-buffer
+              (clutch-test--start-export "SELECT id FROM t" 'async-conn
+                                         (lambda (err) (push err completions)))
+            (should (= gc-cons-threshold (* 256 1024 1024)))
+            ;; Changed while the export ran: not ours to put back.
+            (set-default-toplevel-value 'gc-cons-threshold (* 64 1024 1024))
+            (funcall (cdar finishes) nil '(clutch-db-error "boom"))
+            (ert-run-idle-timers)
+            (should (= gc-cons-threshold (* 64 1024 1024)))
+            (should (= read-process-output-max (* 1024 1024)))))))))
+
+(ert-deftest clutch-test-export-limits-last-until-the-last-export-ends ()
+  "Concurrent exports share the raised limits until the last one ends.
+The first export to end used to put the lower values back under the other."
+  (clutch-test--with-global-export-limits 800000 4096
+    (clutch-test--with-async-statements finishes
+      (let (a-done b-done)
+        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (_conn sql page-num &rest _)
+                     (format "%s PAGE %d" sql page-num)))
+                  ((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (clutch-test--start-export "SELECT a" 'conn-a (lambda (err) (push err a-done)))
+          (clutch-test--start-export "SELECT b" 'conn-b (lambda (err) (push err b-done)))
+          (should (equal (mapcar #'car finishes)
+                         '("SELECT b PAGE 0" "SELECT a PAGE 0")))
+          (funcall (cdr (assoc "SELECT a PAGE 0" finishes))
+                   (make-clutch-db-result :rows '((1))) nil)
           (ert-run-idle-timers)
-          (should (= gc-cons-threshold (* 64 1024 1024)))
-          (should (= read-process-output-max (* 1024 1024))))))))
+          (should (= (length a-done) 1))
+          (should-not b-done)
+          (should (>= gc-cons-threshold (* 16 1024 1024)))
+          (should (>= read-process-output-max 65536))
+          (funcall (cdr (assoc "SELECT b PAGE 0" finishes))
+                   (make-clutch-db-result :rows '((1))) nil)
+          (ert-run-idle-timers)
+          (should (= (length b-done) 1))
+          (should (= gc-cons-threshold 800000))
+          (should (= read-process-output-max 4096)))))))
+
+(ert-deftest clutch-test-export-limits-ignore-temporary-bindings ()
+  "An export that ends under a temporary binding still restores the globals.
+Checked against the binding in force, it found its own raised values gone
+and left them raised for good once the binding ended."
+  (clutch-test--with-global-export-limits 800000 4096
+    (clutch-test--with-async-statements finishes
+      (let (completions)
+        (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (clutch-test--start-export "SELECT id FROM t" 'async-conn
+                                         (lambda (err) (push err completions)))
+          (let ((gc-cons-threshold (* 5 1024 1024))
+                (read-process-output-max 8192))
+            (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)
+            (ert-run-idle-timers))
+          (should (= (length completions) 1))
+          (should (= (default-toplevel-value 'gc-cons-threshold) 800000))
+          (should (= (default-toplevel-value 'read-process-output-max) 4096)))))))
 
 (ert-deftest clutch-test-export-stops-when-its-result-loses-its-connection ()
   "An export whose result lost its connection should stop without showing the page.
