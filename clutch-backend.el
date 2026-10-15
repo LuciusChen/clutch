@@ -663,15 +663,35 @@ preceding statement."
   "Return the offset where the statement starting at OFFSET in SQL begins.
 OFFSET follows a top-level semicolon.  A comment that ends the line of that
 semicolon belongs to the statement before it, so the next statement begins on
-the following line.  Executable comments (/*! and /*M!) are code and stay."
-  (let* ((eol (or (string-search "\n" sql offset) (length sql)))
-         (line (substring sql offset eol)))
-    (if (and (string-match
-              "\\`[ \t]*\\(?:--.*\\|/\\*\\(?:[^*]\\|\\*[^/]\\)*\\*/\\)[ \t\r]*\\'"
-              line)
-             (not (string-match-p "\\`[ \t]*/\\*M?!" line)))
-        (min (1+ eol) (length sql))
-      offset)))
+the following line.  Executable comments (/*! and /*M!) are code and stay.
+Only the text up to the comment's end is read, so a line of many short
+statements costs no more than separate lines."
+  (let ((len (length sql))
+        (pos offset))
+    (while (and (< pos len) (memq (aref sql pos) '(?\s ?\t)))
+      (cl-incf pos))
+    (cond
+     ((and (< (1+ pos) len)
+           (eq (aref sql pos) ?-) (eq (aref sql (1+ pos)) ?-))
+      (let ((eol (string-search "\n" sql pos)))
+        (if eol (1+ eol) len)))
+     ((and (< (1+ pos) len)
+           (eq (aref sql pos) ?/) (eq (aref sql (1+ pos)) ?*)
+           (not (eq (and (< (+ pos 2) len) (aref sql (+ pos 2))) ?!))
+           (not (and (eq (and (< (+ pos 2) len) (aref sql (+ pos 2))) ?M)
+                     (eq (and (< (+ pos 3) len) (aref sql (+ pos 3))) ?!))))
+      (let ((close (string-search "*/" sql (+ pos 2)))
+            (after nil))
+        (if (not (and close
+                      (not (string-search "\n" (substring sql pos close)))))
+            offset
+          (setq after (+ close 2))
+          (while (and (< after len) (memq (aref sql after) '(?\s ?\t ?\r)))
+            (cl-incf after))
+          (cond ((>= after len) len)
+                ((eq (aref sql after) ?\n) (1+ after))
+                (t offset)))))
+     (t offset))))
 
 (defun clutch-db-sql--bounds-from-breaks (text offset breaks)
   "Return zero-based statement bounds around OFFSET in TEXT given BREAKS.
