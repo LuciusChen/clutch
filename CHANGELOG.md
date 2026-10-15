@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Query and result exports raise Emacs's garbage collection threshold to 32 MB, and the process read size to 64 KB, until they end, and then put both back (a value you set higher stays, one changed meanwhile is left alone). Garbage collection took most of a large export's time at the default threshold, and Emacs 29 reads from a process 4 KB at a time. A 155,000-row, 200-column PostgreSQL export of 181 MB took 15.5 s with Emacs 30 and 404 s with Emacs 29 before, and 3.4 s and 25 s now.
+
 - A batch of many short statements no longer forces a redisplay before and after each one, which made up about half the run time of a script of thousands of single-row updates. Its progress marker is redrawn at most as often as the running timer refreshes, ten times a second.
 
 - Eldoc and completion no longer query a connection that a running batch of statements still holds. Between two statements the backend looks idle, so moving point in the buffer could start a synchronous lookup that made the batch's next statement fail with "Connection busy" and stopped the rest of the batch.
