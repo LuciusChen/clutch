@@ -591,35 +591,52 @@ scopes first, so FROM/JOIN clauses remain visible from inside expressions."
    text point-offset
    (cons 0 (length text))))
 
+(defun clutch--source-end (masked start)
+  "Return the end of the source beginning at START in MASKED, or nil.
+A source is a table name or a parenthesized subquery."
+  ;; Both patterns match at once, empty if need be, so nothing searches ahead.
+  (string-match "[ \t\n\r]*" masked start)
+  (let ((pos (match-end 0)))
+    (if (eq (and (< pos (length masked)) (aref masked pos)) ?\()
+        (clutch-db-sql-scan-code
+         masked pos nil
+         (lambda (close ch depth) (and (eq ch ?\)) (= depth 1) (1+ close)))
+         (clutch-db-connection-sql-dialect clutch-connection) "()")
+      (string-match "[[:alnum:]_$#.`\"]*" masked pos)
+      (and (> (match-end 0) pos) (match-end 0)))))
+
 (defun clutch--find-alias-in-range (text masked alias stmt-beg search-beg search-end)
   "Search for ALIAS definition in TEXT between SEARCH-BEG and SEARCH-END.
-MASKED is the literal/comment-masked version of TEXT.
+MASKED is the literal/comment-masked version of TEXT.  The alias of each
+source, whether a table or a subquery, follows the source after FROM, JOIN,
+UPDATE, INTO or a comma in a FROM list.
 Returns the buffer position (offset by STMT-BEG), or nil."
   (let ((case-fold-search t)
-        (pos search-beg))
-    (catch 'found
-      (while (and (< pos search-end)
-                  (string-match
-                   "\\b\\(from\\|join\\|update\\|into\\)[ \t\n\r]+\\([[:alnum:]_$#.`\"]+\\)"
-                   masked pos))
-        (when (>= (match-beginning 0) search-end)
-          (throw 'found nil))
-        (let ((table-end (match-end 2))
-              (alias-pos nil))
-          (setq pos table-end)
-          (when (and (string-match
-                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alnum:]_$#`\"]+\\)"
-                      masked table-end)
-                     (= (match-beginning 0) table-end)
-                     (< (match-beginning 0) search-end))
-            (let* ((token (match-string 1 text))
-                   (normalized (clutch--normalize-statement-table-token token)))
-              (when (and normalized
-                         (not (clutch--sql-keyword-p normalized))
-                         (string= (downcase normalized) (downcase alias)))
-                (setq alias-pos (+ stmt-beg (match-beginning 1))))))
-          (when alias-pos
-            (throw 'found alias-pos)))))))
+        (pos search-beg)
+        starts)
+    (while (and (< pos search-end)
+                (string-match
+                 "\\b\\(?:from\\|join\\|update\\|into\\)[ \t\n\r]+" masked pos)
+                (< (match-beginning 0) search-end))
+      (push (match-end 0) starts)
+      (setq pos (match-end 0)))
+    (dolist (source (clutch--sql-from-source-positions text))
+      (when (and (>= (car source) search-beg) (< (car source) search-end))
+        (push (car source) starts)))
+    (cl-some
+     (lambda (start)
+       (when-let* ((source-end (clutch--source-end masked start))
+                   ((string-match
+                     "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alnum:]_$#`\"]+\\)"
+                     masked source-end))
+                   ((= (match-beginning 0) source-end))
+                   ((< (match-beginning 0) search-end))
+                   (normalized (clutch--normalize-statement-table-token
+                                (match-string 1 text)))
+                   ((not (clutch--sql-keyword-p normalized)))
+                   ((string= (downcase normalized) (downcase alias))))
+         (+ stmt-beg (match-beginning 1))))
+     (sort (delete-dups starts) #'<))))
 
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.
