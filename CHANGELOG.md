@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `M-.` on a SQL alias now finds the alias of every source in a FROM list, not only the first: a table after a comma (`FROM schema1.table1 a, schema2.table2 b`) and a subquery in parentheses (`JOIN (SELECT ...) b`), with or without `AS`.
+
 ## 0.6.1 - 2026-10-16
 
 ### Added

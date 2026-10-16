@@ -2342,6 +2342,49 @@ then failed with \"Connection busy\"."
                   :id "o"
                   :before "orders "
                   :char ?o)
+            (list :label "comma-separated sources"
+                  :sql (concat "SELECT a.col1, b.col2 FROM schema1.table1 a, "
+                               "schema2.table2 b WHERE a.id = b.id")
+                  :needle "b.id"
+                  :cached t
+                  :id "b"
+                  :before "schema2.table2 "
+                  :char ?b)
+            (list :label "comma-separated sources with AS"
+                  :sql "SELECT x.n FROM users AS u, orders AS x WHERE x.uid = u.id"
+                  :needle "x.n"
+                  :cached t
+                  :id "x"
+                  :before "orders AS "
+                  :char ?x)
+            (list :label "derived table alias"
+                  :sql (concat "SELECT a.col1, b.col2 FROM schema1.table1 a "
+                               "INNER JOIN (SELECT * FROM schema2.table2) b "
+                               "ON a.id = b.id")
+                  :needle "b.id"
+                  :cached t
+                  :id "b"
+                  :before "schema2.table2) "
+                  :char ?b)
+            (list :label "derived table with a parenthesis in a quoted name"
+                  :sql "SELECT d.id FROM (SELECT \"odd)name\" AS id FROM users) d"
+                  :needle "d.id"
+                  :id "d"
+                  :before "users) "
+                  :char ?d)
+            (list :label "derived table with an opening parenthesis in a quoted name"
+                  :sql "SELECT d.id FROM (SELECT \"odd(name\" AS id FROM users) d"
+                  :needle "d.id"
+                  :id "d"
+                  :before "users) "
+                  :char ?d)
+            (list :label "derived table alias with AS"
+                  :sql (concat "SELECT d.n FROM (SELECT count(*) n FROM orders) "
+                               "AS d")
+                  :needle "d.n"
+                  :id "d"
+                  :before ") AS "
+                  :char ?d)
             (list :label "union branch with cache"
                   :sql "SELECT a.id FROM users a\nUNION ALL\nSELECT a.id FROM orders a"
                   :pre-needle "UNION ALL\n"
