@@ -594,23 +594,16 @@ scopes first, so FROM/JOIN clauses remain visible from inside expressions."
 (defun clutch--source-end (masked start)
   "Return the end of the source beginning at START in MASKED, or nil.
 A source is a table name or a parenthesized subquery."
-  (let ((case-fold-search t))
-    (cond
-     ((and (string-match "[ \t\n\r]*(" masked start)
-           (= (match-beginning 0) start))
-      (let ((depth 0)
-            (pos (1- (match-end 0)))
-            end)
-        (while (and (not end) (< pos (length masked)))
-          (pcase (aref masked pos)
-            (?\( (cl-incf depth))
-            (?\) (cl-decf depth)
-                 (when (zerop depth) (setq end (1+ pos)))))
-          (cl-incf pos))
-        end))
-     ((and (string-match "[ \t\n\r]*[[:alnum:]_$#.`\"]+" masked start)
-           (= (match-beginning 0) start))
-      (match-end 0)))))
+  ;; Both patterns match at once, empty if need be, so nothing searches ahead.
+  (string-match "[ \t\n\r]*" masked start)
+  (let ((pos (match-end 0)))
+    (if (eq (and (< pos (length masked)) (aref masked pos)) ?\()
+        (clutch-db-sql-scan-code
+         masked pos nil
+         (lambda (close ch depth) (and (eq ch ?\)) (= depth 1) (1+ close)))
+         (clutch-db-connection-sql-dialect clutch-connection) "()")
+      (string-match "[[:alnum:]_$#.`\"]*" masked pos)
+      (and (> (match-end 0) pos) (match-end 0)))))
 
 (defun clutch--find-alias-in-range (text masked alias stmt-beg search-beg search-end)
   "Search for ALIAS definition in TEXT between SEARCH-BEG and SEARCH-END.

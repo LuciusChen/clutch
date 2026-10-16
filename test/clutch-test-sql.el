@@ -2366,6 +2366,18 @@ then failed with \"Connection busy\"."
                   :id "b"
                   :before "schema2.table2) "
                   :char ?b)
+            (list :label "derived table with a parenthesis in a quoted name"
+                  :sql "SELECT d.id FROM (SELECT \"odd)name\" AS id FROM users) d"
+                  :needle "d.id"
+                  :id "d"
+                  :before "users) "
+                  :char ?d)
+            (list :label "derived table with an opening parenthesis in a quoted name"
+                  :sql "SELECT d.id FROM (SELECT \"odd(name\" AS id FROM users) d"
+                  :needle "d.id"
+                  :id "d"
+                  :before "users) "
+                  :char ?d)
             (list :label "derived table alias with AS"
                   :sql (concat "SELECT d.n FROM (SELECT count(*) n FROM orders) "
                                "AS d")
