@@ -41,7 +41,7 @@ flowchart TB
     JDBC["clutch-db-jdbc.el<br/>JDBC adapter and sidecar client"]
   end
 
-  subgraph External["External protocol/runtime packages"]
+  subgraph External["External packages"]
     direction LR
     MySQLExt["mysql.el"]
     PGExt["pgsql.el"]
@@ -182,6 +182,7 @@ sequenceDiagram
 
   Buffer->>Query: Execute statement, region, or buffer
   Query->>Query: Find statement bounds and execution context
+  Note over Query,Adapter: A batch holds the connection between its statements
   Query->>Backend: clutch-db-query-async, through clutch--run-db-query-async
   Backend->>Adapter: Dispatch by connection/backend type
   alt Adapter runs SQL without blocking (MySQL, PostgreSQL, JDBC)
@@ -223,7 +224,7 @@ sequenceDiagram
   end
 ```
 
-The result grid is shared across SQL, document, and key/value query results. Query buffers differ by language helper and statement-boundary rules, but query execution always converges in `clutch-query.el` before calling the generic backend API. A statement starts through `clutch-db-query-async`: an adapter that can run SQL without blocking, as the MySQL, PostgreSQL and JDBC ones do, returns at once and delivers the result from an idle timer, while the connection refuses other foreground work; the others decline, and the statement runs through `clutch-db-query`, blocking Emacs until it ends. Object browsing is intentionally separate: `clutch-object.el` asks the adapter for metadata, definitions, native actions, or browse command text. Browse command text is opened in the matching query-buffer mode instead of pretending that every backend has SQL tables. Result-buffer actions use a single action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on SQL surfaces while native document/key/value surfaces expose only adapter-supported operations.
+The result grid is shared across SQL, document, and key/value query results. Query buffers differ by language helper and statement-boundary rules, but query execution always converges in `clutch-query.el` before calling the generic backend API. A statement starts through `clutch-db-query-async`: an adapter that can run SQL without blocking, as the MySQL, PostgreSQL and JDBC ones do, returns at once and delivers the result from an idle timer, while the connection refuses other foreground work; the others decline, and the statement runs through `clutch-db-query`, blocking Emacs until it ends. A batch keeps its connection reserved for the whole script, so between two statements the backend looks idle although the batch still owns the connection. Eldoc, completion and metadata requests that would query the connection on their own check `clutch-db-in-use-p`, which also covers that reservation, and wait; checking only `clutch-db-busy-p` let their synchronous lookups run between statements and abort the batch with a busy-connection error. Object browsing is intentionally separate: `clutch-object.el` asks the adapter for metadata, definitions, native actions, or browse command text. Browse command text is opened in the matching query-buffer mode instead of pretending that every backend has SQL tables. Result-buffer actions use a single action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on SQL surfaces while native document/key/value surfaces expose only adapter-supported operations.
 
 ## JDBC Runtime Shape
 
