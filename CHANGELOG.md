@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - Unreleased
+
+### Added
+
+- Experimental `clutch-result-searchable-header-mode`, off by default (set `clutch-result-searchable-header` to enable it for every result), keeps a real result header for native isearch. Searches reach the corresponding column, including truncated names, and `n` enters its first data row. The existing fixed header line remains while browsing data; no additional window or ETAF dependency is required.
 
 ### Fixed
 

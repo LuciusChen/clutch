@@ -855,10 +855,13 @@ If the result has columns, shows a table; otherwise shows DML summary."
 (defun clutch-result-down-cell ()
   "Move to the same column in the next row."
   (interactive)
-  (when-let* ((cidx (clutch--col-idx-at-point))
-              (ridx (get-text-property (point) 'clutch-row-idx))
-              ((< (1+ ridx) (length clutch--row-start-positions))))
-    (clutch--goto-cell (1+ ridx) cidx))
+  (if-let* ((header-column (clutch--searchable-header-column)))
+      (when (> (length clutch--row-start-positions) 0)
+        (clutch--goto-cell 0 header-column))
+    (when-let* ((cidx (clutch--col-idx-at-point))
+                (ridx (get-text-property (point) 'clutch-row-idx))
+                ((< (1+ ridx) (length clutch--row-start-positions))))
+      (clutch--goto-cell (1+ ridx) cidx)))
   (clutch--ensure-point-visible-horizontally)
   (when (use-region-p)
     (setq deactivate-mark nil)))
@@ -1086,7 +1089,9 @@ Edit:
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
   (add-hook 'change-major-mode-hook #'clutch--cleanup-cell-preview nil t)
-  (add-hook 'window-size-change-functions #'clutch--window-size-change))
+  (add-hook 'window-size-change-functions #'clutch--window-size-change)
+  (when clutch-result-searchable-header
+    (clutch-result-searchable-header-mode 1)))
 
 ;;;###autoload
 (defun clutch-result-next-page ()
