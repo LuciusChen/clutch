@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 - Unreleased
+
+### Fixed
+
+- The cursor keeps blinking on a searchable result header. Font measurements now run after commands and text scaling instead of during redisplay, which could leave the header's cursor invisible after its first blink.
+
 ## 0.7.0 - 2026-10-18
 
 ### Added

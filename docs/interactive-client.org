@@ -119,7 +119,7 @@ Tip: Result Browser owns its virtual row-number column and disables native displ
 
 An experimental =M-x clutch-result-searchable-header-mode= retains a real header row in the result buffer. It is off by default. Use native =C-r= to search backward from data to a column name; =C-s= reaches the header after wrapping, as in an ordinary buffer. Matching a header brings point to that column, horizontally scrolling it into view. =RET= exits search there, =C-g= returns to the original data position, and =n= enters the matching column's first data row. Complete column names remain searchable even when displayed with truncation. Search also continues to find matching data values; it is not restricted to column names.
 
-While point is in the header, the window displays the real row and suppresses the fixed header-line copy. Returning to data restores the fixed header and hides the real row above the viewport. No additional window or ETAF dependency is used. The real header carries no data-row identity, so Clutch's selected-row copy/export and editing commands do not treat it as a database row. Ordinary Emacs text selection can include its text.
+While point is in the header, the window displays the real row and suppresses the fixed header-line copy. The cursor follows your normal Emacs blinking settings, and changing text scale keeps the header aligned with the data. Returning to data restores the fixed header and hides the real row above the viewport. No additional window or ETAF dependency is used. The real header carries no data-row identity, so Clutch's selected-row copy/export and editing commands do not treat it as a database row. Ordinary Emacs text selection can include its text.
 
 To enable it for every result, including each rerun query:
 
