@@ -4,7 +4,7 @@
 
 ### Changed
 
-- A running query's timer is now a spinner with fixed-width tenths of a second (`⠹ 2.3s`) in the mode line and result footer. Its bold color turns to a warning after `clutch-slow-query-seconds` (5) and an error after `clutch-very-slow-query-seconds` (30); the faces are `clutch-elapsed-running-face`, `clutch-elapsed-slow-face` and `clutch-elapsed-very-slow-face`.
+- A running query's timer is now a spinner with tenths of a second padded to a fixed width (`⠹   2.3s`) in the mode line and result footer. Its bold color turns to a warning after `clutch-slow-query-seconds` (5) and an error after `clutch-very-slow-query-seconds` (30); the faces are `clutch-elapsed-running-face`, `clutch-elapsed-slow-face` and `clutch-elapsed-very-slow-face`.
 
 ### Fixed
 

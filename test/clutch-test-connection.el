@@ -1320,7 +1320,7 @@ A missing JDBC driver or agent points to its own fix command instead."
     (clutch-mode)
     (let ((clutch--execution-start-time (- (float-time) 1.21)))
       (clutch--update-mode-line)
-      (should (string-match-p "\\`clutch . 1\\.2s\\'" mode-name)))))
+      (should (string-match-p "\\`clutch . +1\\.2s\\'" mode-name)))))
 
 (ert-deftest clutch-test-format-elapsed ()
   "Durations under a second show milliseconds; longer ones add whole seconds."
@@ -1337,6 +1337,13 @@ A missing JDBC driver or agent points to its own fix command instead."
                                      (30.0 clutch-elapsed-very-slow-face)))
     (should (eq (get-text-property 0 'face (clutch--format-running-elapsed seconds))
                 face))))
+
+(ert-deftest clutch-test-running-elapsed-keeps-its-width ()
+  "The running timer must not shift what follows it across digit boundaries."
+  (let ((widths (mapcar (lambda (seconds)
+                          (string-width (clutch--format-running-elapsed seconds)))
+                        '(0.0 9.9 10.0 99.9 100.0 999.9))))
+    (should (= (length (delete-dups widths)) 1))))
 
 (ert-deftest clutch-test-update-mode-line-preserves-result-header ()
   "Execution UI updates should keep a result table's header and mode name.
@@ -1361,7 +1368,7 @@ Re-running a query from a result buffer renamed its mode to \"clutch\"."
           (clutch--refresh-footer-display)
           (let ((footer (substring-no-properties
                          (clutch--footer-mode-line-display))))
-            (should (eq (not (null (string-match-p ". 1\\.2s" footer)))
+            (should (eq (not (null (string-match-p ". +1\\.2s" footer)))
                         executing))
             (should (eq (not (null (string-match-p "42ms" footer)))
                         (not executing)))))))))

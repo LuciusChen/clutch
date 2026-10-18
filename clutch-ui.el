@@ -498,9 +498,10 @@ not enforce `min-width' consistently across supported Emacs versions."
 
 (defun clutch--format-running-elapsed (seconds)
   "Return SECONDS of a running query as a spinner frame and a tenth-second time.
+The time is padded to hold up to 999.9 seconds, so what follows stays put.
 Its color follows the slow-query thresholds."
   (propertize
-   (format "%s %.1fs"
+   (format "%s %5.1fs"
            (aref clutch--running-spinner-frames
                  (mod (floor (* 10 (float-time)))
                       (length clutch--running-spinner-frames)))
