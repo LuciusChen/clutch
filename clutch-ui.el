@@ -2226,6 +2226,14 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
       (save-excursion
         (replace-region-contents beg old-end (lambda () text)))
       (setq clutch--buffer-header-end (+ beg (length text)))
+      ;; Characters left unchanged keep their old properties, such as the
+      ;; active column's face, so write the new ones over them.
+      (let ((index 0))
+        (while (< index (length text))
+          (let ((next (next-property-change index text (length text))))
+            (set-text-properties (+ beg index) (+ beg next)
+                                 (text-properties-at index text))
+            (setq index next))))
       (unless (zerop delta)
         (dotimes (index (length clutch--row-start-positions))
           (when-let* ((position (aref clutch--row-start-positions index)))
