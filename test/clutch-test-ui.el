@@ -2628,6 +2628,18 @@ Point left behind made the next cell command scroll back to it."
             (should-not (window-parameter nil 'header-line-format)))
         (when isearch-mode (isearch-exit))))))
 
+(ert-deftest clutch-test-searchable-header-option-enables-each-result ()
+  "The option turns the mode on whenever the result major mode starts."
+  (with-temp-buffer
+    (clutch-result-mode)
+    (should-not clutch-result-searchable-header-mode))
+  (let ((clutch-result-searchable-header t))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (should clutch-result-searchable-header-mode)
+      (clutch-result-mode)
+      (should clutch-result-searchable-header-mode))))
+
 (ert-deftest clutch-test-searchable-header-includes-truncated-column-names ()
   "Search full names even when their display is fitted to a narrow column."
   (clutch-test--with-result-state

@@ -1089,7 +1089,9 @@ Edit:
   (add-hook 'change-major-mode-hook #'clutch--result-buffer-cleanup nil t)
   (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
   (add-hook 'change-major-mode-hook #'clutch--cleanup-cell-preview nil t)
-  (add-hook 'window-size-change-functions #'clutch--window-size-change))
+  (add-hook 'window-size-change-functions #'clutch--window-size-change)
+  (when clutch-result-searchable-header
+    (clutch-result-searchable-header-mode 1)))
 
 ;;;###autoload
 (defun clutch-result-next-page ()
