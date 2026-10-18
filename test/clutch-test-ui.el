@@ -2599,6 +2599,75 @@ Point left behind made the next cell command scroll back to it."
 
 ;;;; Rendering — header-line and footer
 
+(ert-deftest clutch-test-searchable-header-isearch-lands-on-column ()
+  "Native isearch should reach a real header without treating it as data."
+  (clutch-test--with-result-state-buffer buffer
+      (:columns '("id" "customer_email")
+       :column-widths [4 20] :rows '((1 "alice") (2 "bob")) :render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (clutch-result-searchable-header-mode 1)
+      (clutch--goto-cell 1 1)
+      (unwind-protect
+          (progn
+            (isearch-backward nil t)
+            (isearch-yank-string "customer_email")
+            (should isearch-success)
+            (isearch-exit)
+            (clutch--searchable-header-window-update (selected-window))
+            (should (= (get-text-property (1- (point)) 'clutch-header-col) 1))
+            (should-not (clutch--cell-at-point))
+            (should (eq (key-binding (kbd "n")) #'clutch-result-down-cell))
+            (should (< (point) clutch--buffer-header-end))
+            (should (eq (window-parameter nil 'header-line-format) 'none))
+            (should (equal (clutch--rows-in-region (point-min) (point-max)) '(0 1)))
+            (clutch-result-down-cell)
+            (should (= (get-text-property (point) 'clutch-row-idx) 0))
+            (should (= (get-text-property (point) 'clutch-col-idx) 1))
+            (clutch--searchable-header-window-update (selected-window))
+            (should-not (window-parameter nil 'header-line-format)))
+        (when isearch-mode (isearch-exit))))))
+
+(ert-deftest clutch-test-searchable-header-includes-truncated-column-names ()
+  "Search full names even when their display is fitted to a narrow column."
+  (clutch-test--with-result-state
+      (:columns '("long_customer_email_address")
+       :column-widths [8] :rows '(("value")) :render t)
+    (clutch-result-searchable-header-mode 1)
+    (goto-char (point-min))
+    (should (search-forward "long_customer_email_address" nil t))
+    (should (= (get-text-property (1- (point)) 'clutch-header-col) 0))
+    (should-not (clutch--row-idx-at-line))
+    (let ((header-position (point))
+          (data (buffer-substring clutch--buffer-header-end (point-max))))
+      (clutch--refresh-header-line)
+      (should (= (point) header-position))
+      (should (equal data (buffer-substring clutch--buffer-header-end (point-max)))))
+    (goto-char (point-min))
+    (clutch--render-result)
+    (should (= (point) (point-min)))
+    (clutch-result-searchable-header-mode -1)
+    (should-not (save-excursion
+                  (goto-char (point-min))
+                  (search-forward "long_customer_email_address" nil t)))
+    (should (= (point-min) (aref clutch--row-start-positions 0)))))
+
+(ert-deftest clutch-test-searchable-header-restores-reassigned-window ()
+  "Leaving a header must restore the window's previous header-line setting."
+  (clutch-test--with-result-state-buffer buffer (:render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (set-window-parameter nil 'header-line-format "custom")
+      (clutch-result-searchable-header-mode 1)
+      (goto-char (point-min))
+      (clutch--searchable-header-window-update (selected-window))
+      (should (eq (window-parameter nil 'header-line-format) 'none))
+      (set-window-buffer nil (get-buffer-create " *header other*"))
+      (clutch--searchable-header-window-buffer-change (selected-window))
+      (should (equal (window-parameter nil 'header-line-format) "custom"))
+      (set-window-parameter nil 'header-line-format nil)
+      (kill-buffer " *header other*"))))
+
 (ert-deftest clutch-test-header-line-display-contract ()
   "Header-line display should track hscroll and preserve pixel alignment."
   (ert-info ("hscroll offset")
