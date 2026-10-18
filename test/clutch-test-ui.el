@@ -2682,35 +2682,24 @@ Point left behind made the next cell command scroll back to it."
         (should (equal (marked-columns) (list col))))
       (should (= (get-text-property (point) 'clutch-header-col) 0)))))
 
-(ert-deftest clutch-test-searchable-header-restores-reassigned-window ()
-  "Leaving a header must restore the window's previous header-line setting."
-  (clutch-test--with-result-state-buffer buffer (:render t)
-    (save-window-excursion
-      (switch-to-buffer buffer)
-      (set-window-parameter nil 'header-line-format "custom")
-      (clutch-result-searchable-header-mode 1)
-      (goto-char (point-min))
-      (clutch--searchable-header-window-update (selected-window))
-      (should (eq (window-parameter nil 'header-line-format) 'none))
-      (set-window-buffer nil (get-buffer-create " *header other*"))
-      (clutch--searchable-header-window-buffer-change (selected-window))
-      (should (equal (window-parameter nil 'header-line-format) "custom"))
-      (set-window-parameter nil 'header-line-format nil)
-      (kill-buffer " *header other*"))))
-
 (ert-deftest clutch-test-searchable-header-restores-windows-of-a-frame ()
-  "The global hook passes a frame; every window's saved header line comes back."
-  (clutch-test--with-result-state-buffer buffer (:render t)
-    (save-window-excursion
-      (switch-to-buffer buffer)
-      (clutch-result-searchable-header-mode 1)
-      (goto-char (point-min))
-      (clutch--searchable-header-window-update (selected-window))
-      (should (eq (window-parameter nil 'header-line-format) 'none))
-      (set-window-buffer nil (get-buffer-create " *header other*"))
-      (clutch--searchable-header-window-buffer-change (selected-frame))
-      (should-not (window-parameter nil 'header-line-format))
-      (kill-buffer " *header other*"))))
+  "The frame hook must restore default and custom window header lines."
+  (dolist (header '(nil "custom"))
+    (ert-info ((format "previous header-line parameter %S" header))
+      (clutch-test--with-result-state-buffer buffer (:render t)
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (set-window-parameter nil 'header-line-format header)
+          (clutch-result-searchable-header-mode 1)
+          (goto-char (point-min))
+          (clutch--searchable-header-window-update (selected-window))
+          (should (eq (window-parameter nil 'header-line-format) 'none))
+          (set-window-buffer nil (get-buffer-create " *header other*"))
+          (run-hook-with-args 'window-buffer-change-functions (selected-frame))
+          (should (equal (window-parameter nil 'header-line-format) header))
+          (should-not (window-parameter nil 'clutch-searchable-header))
+          (set-window-parameter nil 'header-line-format nil)
+          (kill-buffer " *header other*"))))))
 
 (ert-deftest clutch-test-searchable-header-refresh-keeps-the-region ()
   "Moving between cells with a region must not deactivate it."
