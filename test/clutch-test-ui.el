@@ -2652,6 +2652,36 @@ Point left behind made the next cell command scroll back to it."
                   (search-forward "long_customer_email_address" nil t)))
     (should (= (point-min) (aref clutch--row-start-positions 0)))))
 
+(ert-deftest clutch-test-searchable-header-highlights-the-column-at-point ()
+  "The real header must mark the column point is in, as the fixed header does."
+  (clutch-test--with-result-state
+      (:columns '("id" "customer_email" "n")
+       :column-widths [4 20 6] :rows '((1 "alice" 5) (2 "bob" 6)) :render t)
+    (clutch-result-searchable-header-mode 1)
+    (cl-flet ((marked-columns ()
+                (cl-loop for col below 3
+                         when (let* ((beg (text-property-any
+                                           (point-min) clutch--buffer-header-end
+                                           'clutch-header-col col))
+                                     (end (next-single-property-change
+                                           beg 'clutch-header-col nil
+                                           clutch--buffer-header-end)))
+                                (cl-loop for pos from beg below end
+                                         thereis (memq 'clutch-header-active-face
+                                                       (ensure-list
+                                                        (get-text-property pos 'face)))))
+                         collect col)))
+      (clutch--goto-cell 1 1)
+      (clutch--sync-result-cursor-ui)
+      (clutch--render-result)
+      (should (equal (marked-columns) '(1)))
+      (dolist (col '(2 0))
+        (goto-char (1+ (text-property-any (point-min) clutch--buffer-header-end
+                                          'clutch-header-col col)))
+        (clutch--sync-result-cursor-ui)
+        (should (equal (marked-columns) (list col))))
+      (should (= (get-text-property (point) 'clutch-header-col) 0)))))
+
 (ert-deftest clutch-test-searchable-header-restores-reassigned-window ()
   "Leaving a header must restore the window's previous header-line setting."
   (clutch-test--with-result-state-buffer buffer (:render t)
