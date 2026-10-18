@@ -83,8 +83,6 @@ of the four inputs changes.")
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--buffer-header-end nil
   "Position after the optional searchable header row, or nil.")
-(defvar-local clutch-result-searchable-header-mode nil
-  "Non-nil when result column headers are searchable buffer text.")
 (defvar-local clutch--header-sort-function nil
   "Function called by header sort clicks.
 The function is called with the column index and the column name captured when
