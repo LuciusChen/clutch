@@ -2640,6 +2640,38 @@ Point left behind made the next cell command scroll back to it."
       (clutch-result-mode)
       (should clutch-result-searchable-header-mode))))
 
+(ert-deftest clutch-test-searchable-header-checks-fonts-outside-redisplay ()
+  "Font measurements must not damage the real header during cursor redisplay."
+  (clutch-test--with-result-state-buffer buffer
+      (:columns '("id" "customer_email")
+       :column-widths [4 20] :rows '((1 "alice")) :render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (clutch-result-searchable-header-mode 1)
+      (goto-char (point-min))
+      (clutch--sync-result-cursor-ui)
+      (let* ((metric '(7 nil (7 7 7 14)))
+             (clutch--column-pixel-widths [28 140])
+             (clutch--column-pixel-metric metric)
+             (checks 0))
+        (cl-letf (((symbol-function 'clutch--pixel-metric-signature)
+                   (lambda ()
+                     (cl-incf checks)
+                     metric)))
+          (run-hook-with-args 'pre-redisplay-functions (selected-window))
+          (should (= checks 0))
+          (run-hooks 'post-command-hook)
+          (should (= checks 1))
+          (text-scale-set 1)
+          (should (= checks 2))
+          (run-hook-with-args 'pre-redisplay-functions (selected-window))
+          (should (= checks 2))
+          (clutch-result-searchable-header-mode -1)
+          (let ((before checks))
+            (run-hooks 'post-command-hook)
+            (text-scale-set 0)
+            (should (= checks before))))))))
+
 (ert-deftest clutch-test-searchable-header-includes-truncated-column-names ()
   "Search full names even when their display is fitted to a narrow column."
   (clutch-test--with-result-state

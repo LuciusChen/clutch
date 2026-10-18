@@ -2204,9 +2204,6 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
     (if (and clutch--buffer-header-end
              (< (window-point window) clutch--buffer-header-end))
         (progn
-          ;; The fixed header normally checks font changes.  Keep doing so
-          ;; while its buffer counterpart is visible instead.
-          (clutch--schedule-pixel-metric-refresh)
           (unless (window-parameter window 'clutch-searchable-header)
             (set-window-parameter
              window 'clutch-searchable-header
@@ -2216,6 +2213,14 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
       (when (and clutch--buffer-header-end
                  (< (window-start window) clutch--buffer-header-end))
         (set-window-start window clutch--buffer-header-end t)))))
+
+(defun clutch--searchable-header-check-font ()
+  "Check for changed fonts outside redisplay while point is in the real header."
+  ;; `string-pixel-width' uses the window's glyph matrix.  Measuring from
+  ;; pre-redisplay can clobber the first text row and hide its blinking cursor.
+  (when (and clutch--buffer-header-end
+             (< (point) clutch--buffer-header-end))
+    (clutch--schedule-pixel-metric-refresh)))
 
 (defun clutch--refresh-buffer-header ()
   "Refresh the real header while preserving native search and data positions."
@@ -2262,10 +2267,14 @@ Full column names remain searchable even when their display is truncated."
       (progn
         (add-hook 'pre-redisplay-functions
                   #'clutch--searchable-header-window-update nil t)
+        (add-hook 'post-command-hook #'clutch--searchable-header-check-font nil t)
+        (add-hook 'text-scale-mode-hook #'clutch--searchable-header-check-font nil t)
         (add-hook 'window-buffer-change-functions
                   #'clutch--searchable-header-window-buffer-change))
     (remove-hook 'pre-redisplay-functions
                  #'clutch--searchable-header-window-update t)
+    (remove-hook 'post-command-hook #'clutch--searchable-header-check-font t)
+    (remove-hook 'text-scale-mode-hook #'clutch--searchable-header-check-font t)
     (dolist (window (get-buffer-window-list nil nil t))
       (clutch--searchable-header-restore-window window)))
   (clutch--refresh-display))
