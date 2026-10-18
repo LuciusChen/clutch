@@ -482,6 +482,35 @@ not enforce `min-width' consistently across supported Emacs versions."
         (format "%dms" ms)
       (format "%ds %03dms" (/ ms 1000) (% ms 1000)))))
 
+(defcustom clutch-slow-query-seconds 5
+  "Running time in seconds after which a query's timer turns to a warning."
+  :type 'number
+  :group 'clutch)
+
+(defcustom clutch-very-slow-query-seconds 30
+  "Running time in seconds after which a query's timer shows an error."
+  :type 'number
+  :group 'clutch)
+
+(defconst clutch--running-spinner-frames
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Frames of the running-query indicator, one per tenth of a second.")
+
+(defun clutch--format-running-elapsed (seconds)
+  "Return SECONDS of a running query as a spinner frame and a tenth-second time.
+Its color follows the slow-query thresholds."
+  (propertize
+   (format "%s %.1fs"
+           (aref clutch--running-spinner-frames
+                 (mod (floor (* 10 (float-time)))
+                      (length clutch--running-spinner-frames)))
+           seconds)
+   'face (cond ((>= seconds clutch-very-slow-query-seconds)
+                'clutch-elapsed-very-slow-face)
+               ((>= seconds clutch-slow-query-seconds)
+                'clutch-elapsed-slow-face)
+               (t 'clutch-elapsed-running-face))))
+
 (defun clutch--execution-elapsed-seconds ()
   "Return the running query's elapsed seconds to the tenth, or nil when idle."
   (when clutch--execution-start-time
@@ -1810,8 +1839,7 @@ records one-row lookahead."
         (running (clutch--execution-elapsed-seconds)))
     (when-let* ((payload (cond
                           (running
-                           (propertize (clutch--format-elapsed running)
-                                       'face 'success))
+                           (clutch--format-running-elapsed running))
                           (clutch--query-elapsed
                            (propertize
                             (clutch--format-elapsed clutch--query-elapsed)

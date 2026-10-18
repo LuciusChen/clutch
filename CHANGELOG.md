@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- A running query's timer is now a spinner with fixed-width tenths of a second (`⠹ 2.3s`) in the mode line and result footer. Its bold color turns to a warning after `clutch-slow-query-seconds` (5) and an error after `clutch-very-slow-query-seconds` (30); the faces are `clutch-elapsed-running-face`, `clutch-elapsed-slow-face` and `clutch-elapsed-very-slow-face`.
+
 ### Fixed
 
 - `M-.` on a SQL alias now finds the alias of every source in a FROM list, not only the first: a table after a comma (`FROM schema1.table1 a, schema2.table2 b`) and a subquery in parentheses (`JOIN (SELECT ...) b`), with or without `AS`.

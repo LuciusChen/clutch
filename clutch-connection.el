@@ -1180,8 +1180,7 @@ the high-frequency execution indicator."
     (setq mode-name
           (if elapsed
               (concat base " "
-                      (propertize (clutch--format-elapsed elapsed)
-                                  'face 'success)
+                      (clutch--format-running-elapsed elapsed)
                       (and cancelling
                            (propertize " cancelling" 'face 'warning)))
             base)))

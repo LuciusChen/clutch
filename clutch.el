@@ -193,6 +193,21 @@ Underlined to indicate clickable (RET to follow)."
   "Face for the gutter marker of SQL that is being cancelled."
   :group 'clutch)
 
+(defface clutch-elapsed-running-face
+  '((t :inherit success :weight bold))
+  "Face for the running time of a query that has just started."
+  :group 'clutch)
+
+(defface clutch-elapsed-slow-face
+  '((t :inherit warning :weight bold))
+  "Face for the running time of a query past `clutch-slow-query-seconds'."
+  :group 'clutch)
+
+(defface clutch-elapsed-very-slow-face
+  '((t :inherit error :weight bold))
+  "Face for the running time of a query past `clutch-very-slow-query-seconds'."
+  :group 'clutch)
+
 (defface clutch-running-sql-face
   '((t :inherit secondary-selection :extend nil))
   "Face for the background of SQL that is still running."
