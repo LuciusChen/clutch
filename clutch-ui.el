@@ -2187,11 +2187,16 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
     (set-window-parameter window 'header-line-format (cdr saved))
     (set-window-parameter window 'clutch-searchable-header nil)))
 
-(defun clutch--searchable-header-window-buffer-change (window)
-  "Restore WINDOW's header line when its result buffer was replaced."
-  (when-let* ((saved (window-parameter window 'clutch-searchable-header))
-              ((not (eq (car saved) (window-buffer window)))))
-    (clutch--searchable-header-restore-window window)))
+(defun clutch--searchable-header-window-buffer-change (frame-or-window)
+  "Restore the header line of windows whose result buffer was replaced.
+FRAME-OR-WINDOW is a frame, as `window-buffer-change-functions' passes to
+its default value, or a single window."
+  (dolist (window (if (framep frame-or-window)
+                      (window-list frame-or-window 'no-minibuf)
+                    (list frame-or-window)))
+    (when-let* ((saved (window-parameter window 'clutch-searchable-header))
+                ((not (eq (car saved) (window-buffer window)))))
+      (clutch--searchable-header-restore-window window))))
 
 (defun clutch--searchable-header-window-update (window)
   "Display WINDOW's real header at point, or its fixed header-line mirror."
@@ -2222,7 +2227,9 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
            (beg (point-min))
            (old-end clutch--buffer-header-end)
            (delta (- (length text) (- old-end beg)))
-           (inhibit-read-only t))
+           (inhibit-read-only t)
+           ;; Refreshing the header is not an edit the user made.
+           (deactivate-mark deactivate-mark))
       (save-excursion
         (replace-region-contents beg old-end (lambda () text)))
       (setq clutch--buffer-header-end (+ beg (length text)))

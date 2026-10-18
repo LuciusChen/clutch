@@ -2698,6 +2698,37 @@ Point left behind made the next cell command scroll back to it."
       (set-window-parameter nil 'header-line-format nil)
       (kill-buffer " *header other*"))))
 
+(ert-deftest clutch-test-searchable-header-restores-windows-of-a-frame ()
+  "The global hook passes a frame; every window's saved header line comes back."
+  (clutch-test--with-result-state-buffer buffer (:render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (clutch-result-searchable-header-mode 1)
+      (goto-char (point-min))
+      (clutch--searchable-header-window-update (selected-window))
+      (should (eq (window-parameter nil 'header-line-format) 'none))
+      (set-window-buffer nil (get-buffer-create " *header other*"))
+      (clutch--searchable-header-window-buffer-change (selected-frame))
+      (should-not (window-parameter nil 'header-line-format))
+      (kill-buffer " *header other*"))))
+
+(ert-deftest clutch-test-searchable-header-refresh-keeps-the-region ()
+  "Moving between cells with a region must not deactivate it."
+  (clutch-test--with-result-state-buffer buffer
+      (:columns '("id" "customer_email" "n") :column-widths [4 20 6]
+       :rows '((1 "alice" 5) (2 "bob" 6)) :render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (transient-mark-mode 1)
+      (dolist (mode '(-1 1))
+        (clutch-result-searchable-header-mode mode)
+        (clutch--goto-cell 0 0)
+        (execute-kbd-macro (kbd "C-SPC TAB"))
+        (ert-info ((format "searchable header mode %s" mode))
+          (should (use-region-p))
+          (should (= (get-text-property (point) 'clutch-col-idx) 1)))
+        (deactivate-mark)))))
+
 (ert-deftest clutch-test-header-line-display-contract ()
   "Header-line display should track hscroll and preserve pixel alignment."
   (ert-info ("hscroll offset")
