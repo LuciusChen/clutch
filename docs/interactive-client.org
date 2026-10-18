@@ -121,13 +121,13 @@ An experimental =M-x clutch-result-searchable-header-mode= retains a real header
 
 While point is in the header, the window displays the real row and suppresses the fixed header-line copy. Returning to data restores the fixed header and hides the real row above the viewport. No additional window or ETAF dependency is used. The real header carries no data-row identity, so Clutch's selected-row copy/export and editing commands do not treat it as a database row. Ordinary Emacs text selection can include its text.
 
-To enable it for newly opened or refreshed results:
+To enable it for every result, including each rerun query:
 
 #+begin_src emacs-lisp
-(add-hook 'clutch-result-mode-hook #'clutch-result-searchable-header-mode)
+(setopt clutch-result-searchable-header t)
 #+end_src
 
-Invoking the mode again removes the real header and restores the usual result layout. Enabling it only in an existing result applies to that buffer until its major mode is initialized again, for example by rerunning the query.
+Invoking the mode again removes the real header and restores the usual result layout. Toggling it in an existing result applies to that buffer only until its major mode is initialized again, for example by rerunning the query.
 
 Tip: staged changes can be previewed with =C-c C-p= and copied/saved from the result transient as the exact staged SQL batch. Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong real table name.
 

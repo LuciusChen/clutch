@@ -81,6 +81,12 @@ evaluates the header on every frame; the crop is recomputed only when one
 of the four inputs changes.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
+(defcustom clutch-result-searchable-header nil
+  "Non-nil makes new result buffers keep a real header for native isearch.
+`clutch-result-searchable-header-mode' toggles it for one result buffer."
+  :type 'boolean
+  :group 'clutch)
+
 (defvar-local clutch--buffer-header-end nil
   "Position after the optional searchable header row, or nil.")
 (defvar-local clutch--header-sort-function nil
