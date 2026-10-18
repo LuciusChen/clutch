@@ -53,6 +53,8 @@ For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Deta
 - **See connection state where it matters:** keep separate query consoles, reconnect from preserved parameters, and view schema-refresh, transaction, timeout, and diagnostic state in the relevant buffers.
 - **Choose the backend path you need:** use native or pure-Elisp integrations when available, or the Java 17+ [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) for JDBC databases.
 
+Result buffers offer an experimental searchable header, off by default: set `clutch-result-searchable-header` to `t`, or toggle `M-x clutch-result-searchable-header-mode` for one result. It keeps column names as real buffer text: `C-r` finds a header above the data, and `C-s` can reach it after wrapping. `RET` leaves point at the matching header, with horizontal scrolling when needed; `n` enters that column's first data cell. The existing fixed header line remains while browsing data. See the [interactive guide](docs/interactive-client.org) for setup.
+
 ### Row-editing boundaries
 
 Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source row:

@@ -81,6 +81,14 @@ evaluates the header on every frame; the crop is recomputed only when one
 of the four inputs changes.")
 (defvar-local clutch--header-line-string nil
   "Full header-line string before hscroll adjustment.")
+(defcustom clutch-result-searchable-header nil
+  "Non-nil makes new result buffers keep a real header for native isearch.
+`clutch-result-searchable-header-mode' toggles it for one result buffer."
+  :type 'boolean
+  :group 'clutch)
+
+(defvar-local clutch--buffer-header-end nil
+  "Position after the optional searchable header row, or nil.")
 (defvar-local clutch--header-sort-function nil
   "Function called by header sort clicks.
 The function is called with the column index and the column name captured when
@@ -1981,10 +1989,11 @@ HINTS is a list of (KEY DESCRIPTION) pairs."
         (push (propertize name 'face 'clutch-field-name-face) parts))
       (string-join parts "\n"))))
 
-(defun clutch--header-cell (cidx widths &optional active-cidx)
+(defun clutch--header-cell (cidx widths &optional active-cidx searchable)
   "Build a single header cell string for column CIDX.
 WIDTHS is the effective width vector.
-ACTIVE-CIDX is the highlighted column index, if any."
+ACTIVE-CIDX is the highlighted column index, if any.
+SEARCHABLE retains a truncated name as buffer text with its fitted display."
   (let* ((name (nth cidx clutch--result-columns))
          (w (aref widths cidx))
          (pixel-width (and (vectorp clutch--column-pixel-widths)
@@ -1995,13 +2004,25 @@ ACTIVE-CIDX is the highlighted column index, if any."
          (pad-str (make-string clutch-column-padding ?\s))
          (sort-map (clutch--header-sort-keymap cidx name))
          (body nil))
+    (when searchable
+      (when-let* ((start (text-property-any 0 (length label)
+                                           'clutch-header-name t label))
+                  (end (next-single-property-change
+                        start 'clutch-header-name label (length label)))
+                  ((not (equal (substring-no-properties label start end) name))))
+        (setq label
+              (concat (substring label 0 start)
+                      (propertize (copy-sequence name)
+                                  'display (substring label start end)
+                                  'clutch-header-name t)
+                      (substring label end)))))
     (setq body (concat pad-str label pad-str))
     (when (eql cidx active-cidx)
       (add-face-text-property 0 (length body) 'clutch-header-active-face
                               'append body))
     (add-text-properties 0 (length body)
                          `(clutch-header-col ,cidx
-                           local-map ,sort-map
+                           local-map ,(unless searchable sort-map)
                            keymap ,sort-map
                            mouse-face mode-line-highlight
                            help-echo ,(format "mouse-1: cycle sort by %s" name))
@@ -2009,15 +2030,17 @@ ACTIVE-CIDX is the highlighted column index, if any."
     (concat (propertize "│" 'face 'clutch-border-face)
             body)))
 
-(defun clutch--build-header-line (visible-cols widths nw &optional active-cidx)
+(defun clutch--build-header-line (visible-cols widths nw
+                                             &optional active-cidx searchable)
   "Build the `header-line-format' string for the column header row.
 VISIBLE-COLS, WIDTHS describe columns.
 NW is the digit width for the row number column.
-ACTIVE-CIDX highlights that column when non-nil."
+ACTIVE-CIDX highlights that column when non-nil.
+SEARCHABLE retains full column names behind their fitted display strings."
   (let* ((bface 'clutch-border-face)
          (pad-str (make-string clutch-column-padding ?\s))
          (cells (mapcar (lambda (cidx)
-                          (clutch--header-cell cidx widths active-cidx))
+                          (clutch--header-cell cidx widths active-cidx searchable))
                         visible-cols))
          (data-header (concat (apply #'concat cells)
                               (propertize "│" 'face bface))))
@@ -2152,6 +2175,101 @@ RENDER-STATE contains render lookup tables for staged UI state."
                          row iidx ridx visible-cols widths nw render-state
                          column-specs)))))
 
+(defun clutch--searchable-header-column (&optional position)
+  "Return the header column at POSITION, or nil outside the buffer header.
+POSITION defaults to point.  Accept the end of a name as isearch's match end."
+  (let ((position (or position (point))))
+    (when (and clutch--buffer-header-end
+               (< position clutch--buffer-header-end))
+      (or (get-text-property position 'clutch-header-col)
+          (and (> position (point-min))
+               (get-text-property (1- position) 'clutch-header-col))))))
+
+(defun clutch--searchable-header-restore-window (window)
+  "Restore WINDOW's header-line setting after displaying a real header."
+  (when-let* ((saved (window-parameter window 'clutch-searchable-header)))
+    (set-window-parameter window 'header-line-format (cdr saved))
+    (set-window-parameter window 'clutch-searchable-header nil)))
+
+(defun clutch--searchable-header-window-buffer-change (frame)
+  "Restore header lines in FRAME after result buffers were replaced."
+  (dolist (window (window-list frame 'no-minibuf))
+    (when-let* ((saved (window-parameter window 'clutch-searchable-header))
+                ((not (eq (car saved) (window-buffer window)))))
+      (clutch--searchable-header-restore-window window))))
+
+(defun clutch--searchable-header-window-update (window)
+  "Display WINDOW's real header at point, or its fixed header-line mirror."
+  (when (eq (window-buffer window) (current-buffer))
+    (if (and clutch--buffer-header-end
+             (< (window-point window) clutch--buffer-header-end))
+        (progn
+          ;; The fixed header normally checks font changes.  Keep doing so
+          ;; while its buffer counterpart is visible instead.
+          (clutch--schedule-pixel-metric-refresh)
+          (unless (window-parameter window 'clutch-searchable-header)
+            (set-window-parameter
+             window 'clutch-searchable-header
+             (cons (current-buffer) (window-parameter window 'header-line-format))))
+          (set-window-parameter window 'header-line-format 'none))
+      (clutch--searchable-header-restore-window window)
+      (when (and clutch--buffer-header-end
+                 (< (window-start window) clutch--buffer-header-end))
+        (set-window-start window clutch--buffer-header-end t)))))
+
+(defun clutch--refresh-buffer-header ()
+  "Refresh the real header while preserving native search and data positions."
+  (when clutch--buffer-header-end
+    (let* ((text (concat (clutch--build-header-line
+                         (clutch--visible-columns) (clutch--effective-widths)
+                         (clutch--row-number-digits) clutch--header-active-col t)
+                        "\n"))
+           (beg (point-min))
+           (old-end clutch--buffer-header-end)
+           (delta (- (length text) (- old-end beg)))
+           (inhibit-read-only t)
+           ;; Refreshing the header is not an edit the user made.
+           (deactivate-mark deactivate-mark))
+      (save-excursion
+        (replace-region-contents beg old-end (lambda () text)))
+      (setq clutch--buffer-header-end (+ beg (length text)))
+      ;; Characters left unchanged keep their old properties, such as the
+      ;; active column's face, so write the new ones over them.
+      (let ((index 0))
+        (while (< index (length text))
+          (let ((next (next-property-change index text (length text))))
+            (set-text-properties (+ beg index) (+ beg next)
+                                 (text-properties-at index text))
+            (setq index next))))
+      (unless (zerop delta)
+        (dotimes (index (length clutch--row-start-positions))
+          (when-let* ((position (aref clutch--row-start-positions index)))
+            (aset clutch--row-start-positions index (+ position delta))))))))
+
+;;;###autoload
+(define-minor-mode clutch-result-searchable-header-mode
+  "Keep a real result header that native isearch can find.
+The fixed header line remains while browsing data.  When point reaches the
+real header, its window shows that row instead of a duplicate header line.
+Full column names remain searchable even when their display is truncated."
+  :lighter " SearchHeader"
+  :group 'clutch
+  (when (and clutch-result-searchable-header-mode
+             (not (derived-mode-p 'clutch-result-mode)))
+    (setq clutch-result-searchable-header-mode nil)
+    (user-error "Searchable headers require a result buffer"))
+  (if clutch-result-searchable-header-mode
+      (progn
+        (add-hook 'pre-redisplay-functions
+                  #'clutch--searchable-header-window-update nil t)
+        (add-hook 'window-buffer-change-functions
+                  #'clutch--searchable-header-window-buffer-change))
+    (remove-hook 'pre-redisplay-functions
+                 #'clutch--searchable-header-window-update t)
+    (dolist (window (get-buffer-window-list nil nil t))
+      (clutch--searchable-header-restore-window window)))
+  (clutch--refresh-display))
+
 (defun clutch--refresh-header-line ()
   "Rebuild the header-line format without touching the table body."
   (if clutch--column-widths
@@ -2161,7 +2279,8 @@ RENDER-STATE contains render lookup tables for staged UI state."
         (setq clutch--header-line-string
               (clutch--build-header-line visible-cols widths nw
                                          clutch--header-active-col))
-        (setq header-line-format '(:eval (clutch--header-line-display))))
+        (setq header-line-format '(:eval (clutch--header-line-display)))
+        (clutch--refresh-buffer-header))
     (setq clutch--header-line-string nil
           header-line-format nil)))
 
@@ -2242,7 +2361,8 @@ be clamped to the result grid."
         (clutch--update-row-highlight)
         (clutch--refresh-footer-cursor)
         (force-mode-line-update)
-        (let ((cidx (clutch--col-idx-at-point)))
+        (let ((cidx (or (clutch--col-idx-at-point)
+                        (clutch--searchable-header-column))))
           (unless (eql cidx clutch--header-active-col)
             (setq clutch--header-active-col cidx)
             (clutch--refresh-header-line)))))))
@@ -2318,6 +2438,9 @@ right on the current line to find the nearest cell."
 Preserves point position (row + column) across the render."
   (let* ((save-ridx (or (get-text-property (point) 'clutch-row-idx)
                         (clutch--row-idx-at-line)))
+         (save-in-header (and clutch--buffer-header-end
+                              (< (point) clutch--buffer-header-end)))
+         (save-header-column (clutch--searchable-header-column))
          (save-cidx (or (get-text-property (point) 'clutch-col-idx)
                         (and (equal save-ridx (car-safe clutch--last-cell-position))
                              (cdr-safe clutch--last-cell-position))))
@@ -2341,10 +2464,16 @@ Preserves point position (row + column) across the render."
             clutch--column-pixel-metric pixel-metric
             clutch--column-pixel-logical-widths
             (and pixel-widths (copy-sequence widths))))
+    (setq clutch--buffer-header-end nil)
     (erase-buffer)
     (setq clutch--row-start-positions row-positions)
     (clutch--refresh-footer-line)
     (clutch--refresh-header-line)
+    (when clutch-result-searchable-header-mode
+      (insert (clutch--build-header-line visible-cols widths nw
+                                         clutch--header-active-col t)
+              "\n")
+      (setq clutch--buffer-header-end (point)))
     (clutch--insert-data-rows rows row-positions visible-cols widths nw
                               render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
@@ -2355,9 +2484,18 @@ Preserves point position (row + column) across the render."
                (substitute-command-keys
                 "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
                'face 'shadow)))
-    (if save-ridx
-        (clutch--goto-cell save-ridx save-cidx)
-      (goto-char (point-min)))))
+    (cond
+     ((and save-in-header clutch--buffer-header-end)
+      (goto-char (point-min))
+      (when-let* (save-header-column
+                  (position (text-property-any
+                            (point-min) clutch--buffer-header-end
+                            'clutch-header-col save-header-column)))
+        (goto-char position)))
+     (save-ridx (clutch--goto-cell save-ridx save-cidx))
+     ((and clutch--buffer-header-end (> (length row-positions) 0))
+      (clutch--goto-cell 0 nil))
+     (t (goto-char (point-min))))))
 
 (defun clutch--rendered-row-line (ridx nrows rows)
   "Return the rendered line for row RIDX, or nil if unsafe to splice in place.
@@ -2677,10 +2815,14 @@ IGNORE-BUFFER does not count as a remaining result buffer."
                           (with-current-buffer buf
                             (derived-mode-p 'clutch-result-mode))))
                    (buffer-list))
-    (remove-hook 'window-size-change-functions #'clutch--window-size-change)))
+    (remove-hook 'window-size-change-functions #'clutch--window-size-change)
+    (remove-hook 'window-buffer-change-functions
+                 #'clutch--searchable-header-window-buffer-change)))
 
 (defun clutch--result-buffer-cleanup ()
   "Cleanup hook state when a result buffer is being removed."
+  (dolist (window (get-buffer-window-list nil nil t))
+    (clutch--searchable-header-restore-window window))
   (when (timerp clutch--column-width-refresh-timer)
     (cancel-timer clutch--column-width-refresh-timer)
     (setq clutch--column-width-refresh-timer nil))
