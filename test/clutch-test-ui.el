@@ -2599,46 +2599,157 @@ Point left behind made the next cell command scroll back to it."
 
 ;;;; Rendering — header-line and footer
 
-(ert-deftest clutch-test-searchable-header-isearch-lands-on-column ()
-  "Native isearch should reach a real header without treating it as data."
-  (clutch-test--with-result-state-buffer buffer
-      (:columns '("id" "customer_email")
-       :column-widths [4 20] :rows '((1 "alice") (2 "bob")) :render t)
-    (save-window-excursion
-      (switch-to-buffer buffer)
-      (clutch-result-searchable-header-mode 1)
-      (clutch--goto-cell 1 1)
-      (unwind-protect
-          (progn
-            (isearch-backward nil t)
-            (isearch-yank-string "customer_email")
-            (should isearch-success)
-            (isearch-exit)
-            (clutch--searchable-header-window-update (selected-window))
-            (should (= (get-text-property (1- (point)) 'clutch-header-col) 1))
-            (should-not (clutch--cell-at-point))
-            (should (eq (key-binding (kbd "n")) #'clutch-result-down-cell))
-            (should (< (point) clutch--buffer-header-end))
-            (should (eq (window-parameter nil 'header-line-format) 'none))
-            (should (equal (clutch--rows-in-region (point-min) (point-max)) '(0 1)))
-            (clutch-result-down-cell)
-            (should (= (get-text-property (point) 'clutch-row-idx) 0))
-            (should (= (get-text-property (point) 'clutch-col-idx) 1))
-            (clutch--searchable-header-window-update (selected-window))
-            (should-not (window-parameter nil 'header-line-format)))
-        (when isearch-mode (isearch-exit))))))
+(defmacro clutch-test--with-header-isearch (&rest body)
+  "Run BODY in a displayed two-row result with the searchable header available."
+  (declare (indent 0))
+  `(clutch-test--with-result-state-buffer buffer
+       (:columns '("id" "customer_email")
+        :column-widths [4 20] :rows '((1 "alice") (2 "bob")) :render t)
+     (save-window-excursion
+       (switch-to-buffer buffer)
+       (unwind-protect (progn ,@body)
+         (when isearch-mode (ignore-errors (isearch-done t)))))))
 
-(ert-deftest clutch-test-searchable-header-option-enables-each-result ()
-  "The option turns the mode on whenever the result major mode starts."
+(ert-deftest clutch-test-searchable-header-exists-only-during-isearch ()
+  "The header is real text while searching and gone before and after."
+  (clutch-test--with-header-isearch
+    (let ((data (buffer-string)))
+      (should-not clutch--buffer-header-end)
+      (clutch--goto-cell 1 1)
+      (isearch-backward nil t)
+      (should clutch--buffer-header-end)
+      (isearch-yank-string "customer_email")
+      (should isearch-success)
+      (isearch-exit)
+      (should-not clutch--buffer-header-end)
+      (should (equal (buffer-string) data))
+      (should (= (aref clutch--row-start-positions 0) (point-min))))))
+
+(ert-deftest clutch-test-searchable-header-keyboard-search-round-trip ()
+  "Typed searches and C-x h leave a header-free buffer with its data selected."
+  (clutch-test--with-header-isearch
+    (let ((data (buffer-string)))
+      (clutch--goto-cell 1 0)
+      (execute-kbd-macro (kbd "C-r customer_email RET"))
+      (should (= (get-text-property (point) 'clutch-col-idx) 1))
+      (execute-kbd-macro (kbd "C-s zzz C-g"))
+      (should-not clutch--buffer-header-end)
+      (should (equal (buffer-string) data)))))
+
+(ert-deftest clutch-test-searchable-header-every-exit-removes-the-header ()
+  "Each way of ending a search leaves the data buffer and its start mark."
+  (dolist (keys '("C-s bob RET"
+                  "C-s bob M-s h r RET"
+                  "C-s bob M-s h l RET"
+                  "M-: (isearch-forward) RET bob RET"))
+    (ert-info (keys)
+      (clutch-test--with-header-isearch
+        (clutch--goto-cell 0 0)
+        (let ((start (point)))
+          (execute-kbd-macro (kbd keys))
+          (should-not isearch-mode)
+          (should-not clutch--buffer-header-end)
+          (should (= (aref clutch--row-start-positions 0) (point-min)))
+          (should (= (mark t) start))
+          (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1)))))))
+
+(ert-deftest clutch-test-searchable-header-survives-editing-the-search ()
+  "Editing the search string suspends the search without losing its match."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 0 0)
+    (execute-kbd-macro (kbd "C-s bob M-e RET RET"))
+    (should-not clutch--buffer-header-end)
+    (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1))
+    (should (equal (buffer-substring-no-properties (- (point) 3) (point)) "bob"))
+    (should isearch-success)))
+
+(ert-deftest clutch-test-searchable-header-match-lands-on-the-column ()
+  "Leaving a search on a column name puts point in that column's first cell."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 1 0)
+    (isearch-backward nil t)
+    (isearch-yank-string "customer_email")
+    (should isearch-success)
+    (should (< (point) clutch--buffer-header-end))
+    (clutch--searchable-header-window-update (selected-window))
+    (should (eq (window-parameter nil 'header-line-format) 'none))
+    (isearch-exit)
+    (should (= (get-text-property (point) 'clutch-row-idx) 0))
+    (should (= (get-text-property (point) 'clutch-col-idx) 1))
+    (clutch--searchable-header-window-update (selected-window))
+    (should-not (window-parameter nil 'header-line-format))))
+
+(ert-deftest clutch-test-searchable-header-abort-restores-point ()
+  "Aborting a search returns to the cell the search started from."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 1 1)
+    (let ((origin (point)))
+      (isearch-backward nil t)
+      (isearch-yank-string "customer_email")
+      (condition-case nil (isearch-abort) (quit nil))
+      (should-not clutch--buffer-header-end)
+      (should (= (point) origin))
+      (should (= (get-text-property (point) 'clutch-row-idx) 1)))))
+
+(ert-deftest clutch-test-searchable-header-forward-search-wraps-to-header ()
+  "A forward search that wraps reaches the header, then the next data match."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 1 1)
+    (isearch-forward nil t)
+    (isearch-yank-string "id")
+    (isearch-repeat-forward)
+    (should (< (point) clutch--buffer-header-end))
+    (isearch-exit)
+    (should (= (get-text-property (point) 'clutch-row-idx) 0))
+    (should (= (get-text-property (point) 'clutch-col-idx) 0))))
+
+(ert-deftest clutch-test-searchable-header-data-match-keeps-position ()
+  "A match in data leaves point where the search found it."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 0 0)
+    (isearch-forward nil t)
+    (isearch-yank-string "bob")
+    (isearch-exit)
+    (should-not clutch--buffer-header-end)
+    (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1))))
+
+(ert-deftest clutch-test-searchable-header-search-ending-elsewhere-cleans-start ()
+  "A search that ends in another buffer, as `multi-isearch-buffers' can,
+still removes the header from the buffer it started in."
+  (clutch-test--with-result-state-buffer first
+      (:columns '("id" "name") :column-widths [4 8] :rows '((1 "alice")) :render t)
+    (clutch-test--with-result-state-buffer second
+        (:columns '("id" "name") :column-widths [4 8] :rows '((2 "zed")) :render t)
+      (with-current-buffer first
+        (clutch--searchable-header-open))
+      (should (buffer-local-value 'clutch--buffer-header-end first))
+      (let ((isearch-suspended nil))
+        (clutch--searchable-header-end-search
+         (lambda (&rest _) (set-buffer second))))
+      (should-not (buffer-local-value 'clutch--buffer-header-end first))
+      (should-not clutch--searchable-header-buffers))))
+
+(ert-deftest clutch-test-searchable-header-nested-edit-keeps-the-header-match ()
+  "Editing a search inside the edit of a header search keeps its match."
+  (clutch-test--with-header-isearch
+    (let ((enable-recursive-minibuffers t))
+      (clutch--goto-cell 0 0)
+      (execute-kbd-macro
+       (kbd "C-s customer_email C-s M-e C-M-r customer M-e RET RET RET RET"))
+      (should isearch-success)
+      (should (eql (clutch--col-idx-at-point) 1)))))
+
+(ert-deftest clutch-test-searchable-header-needs-a-result ()
+  "A search leaves buffers that are not results alone."
+  (clutch-test--with-result-state
+      (:columns '("id") :column-widths [4] :rows '((1)) :render t)
+    (clutch--searchable-header-open)
+    (should clutch--buffer-header-end)
+    (clutch--searchable-header-close)
+    (should-not clutch--buffer-header-end))
   (with-temp-buffer
-    (clutch-result-mode)
-    (should-not clutch-result-searchable-header-mode))
-  (let ((clutch-result-searchable-header t))
-    (with-temp-buffer
-      (clutch-result-mode)
-      (should clutch-result-searchable-header-mode)
-      (clutch-result-mode)
-      (should clutch-result-searchable-header-mode))))
+    (clutch--searchable-header-open)
+    (should-not clutch--buffer-header-end)))
 
 (ert-deftest clutch-test-searchable-header-checks-fonts-outside-redisplay ()
   "Font measurements must not damage the real header during cursor redisplay."
@@ -2647,7 +2758,7 @@ Point left behind made the next cell command scroll back to it."
        :column-widths [4 20] :rows '((1 "alice")) :render t)
     (save-window-excursion
       (switch-to-buffer buffer)
-      (clutch-result-searchable-header-mode 1)
+      (clutch--searchable-header-open)
       (goto-char (point-min))
       (clutch--sync-result-cursor-ui)
       (let* ((metric '(7 nil (7 7 7 14)))
@@ -2666,7 +2777,7 @@ Point left behind made the next cell command scroll back to it."
           (should (= checks 2))
           (run-hook-with-args 'pre-redisplay-functions (selected-window))
           (should (= checks 2))
-          (clutch-result-searchable-header-mode -1)
+          (clutch--searchable-header-close)
           (let ((before checks))
             (run-hooks 'post-command-hook)
             (text-scale-set 0)
@@ -2677,7 +2788,8 @@ Point left behind made the next cell command scroll back to it."
   (clutch-test--with-result-state
       (:columns '("long_customer_email_address")
        :column-widths [8] :rows '(("value")) :render t)
-    (clutch-result-searchable-header-mode 1)
+    (should-not clutch--buffer-header-end)
+    (clutch--searchable-header-open)
     (goto-char (point-min))
     (should (search-forward "long_customer_email_address" nil t))
     (should (= (get-text-property (1- (point)) 'clutch-header-col) 0))
@@ -2690,7 +2802,7 @@ Point left behind made the next cell command scroll back to it."
     (goto-char (point-min))
     (clutch--render-result)
     (should (= (point) (point-min)))
-    (clutch-result-searchable-header-mode -1)
+    (clutch--searchable-header-close)
     (should-not (save-excursion
                   (goto-char (point-min))
                   (search-forward "long_customer_email_address" nil t)))
@@ -2701,7 +2813,7 @@ Point left behind made the next cell command scroll back to it."
   (clutch-test--with-result-state
       (:columns '("id" "customer_email" "n")
        :column-widths [4 20 6] :rows '((1 "alice" 5) (2 "bob" 6)) :render t)
-    (clutch-result-searchable-header-mode 1)
+    (clutch--searchable-header-open)
     (cl-flet ((marked-columns ()
                 (cl-loop for col below 3
                          when (let* ((beg (text-property-any
@@ -2717,7 +2829,6 @@ Point left behind made the next cell command scroll back to it."
                          collect col)))
       (clutch--goto-cell 1 1)
       (clutch--sync-result-cursor-ui)
-      (clutch--render-result)
       (should (equal (marked-columns) '(1)))
       (dolist (col '(2 0))
         (goto-char (1+ (text-property-any (point-min) clutch--buffer-header-end
@@ -2725,6 +2836,42 @@ Point left behind made the next cell command scroll back to it."
         (clutch--sync-result-cursor-ui)
         (should (equal (marked-columns) (list col))))
       (should (= (get-text-property (point) 'clutch-header-col) 0)))))
+
+(ert-deftest clutch-test-searchable-header-skips-the-hidden-fixed-header ()
+  "Moving along the real header leaves the hidden fixed header for later."
+  (clutch-test--with-result-state
+      (:columns '("id" "customer_email" "n")
+       :column-widths [4 20 6] :rows '((1 "alice" 5)) :render t)
+    (clutch--searchable-header-open)
+    (let ((rebuilds 0))
+      (advice-add 'clutch--refresh-header-line :before
+                  (lambda () (cl-incf rebuilds)) '((name . count)))
+      (unwind-protect
+          (progn
+            (dolist (col '(0 1 2))
+              (goto-char (1+ (text-property-any (point-min) clutch--buffer-header-end
+                                                'clutch-header-col col)))
+              (clutch--sync-result-cursor-ui))
+            (should (= rebuilds 0))
+            (clutch--searchable-header-close)
+            (clutch--sync-result-cursor-ui)
+            (should (= rebuilds 1))
+            (should (= clutch--header-line-active-col 2)))
+        (advice-remove 'clutch--refresh-header-line 'count)))))
+
+(ert-deftest clutch-test-searchable-header-shows-the-top-for-header-point ()
+  "Point in the real header puts the viewport at the top before redisplay."
+  (clutch-test--with-result-state-buffer buffer
+      (:columns '("id" "name") :column-widths [4 6]
+       :rows (cl-loop for n below 80 collect (list n "x")) :render t)
+    (save-window-excursion
+      (switch-to-buffer buffer)
+      (clutch--searchable-header-open)
+      (clutch--goto-cell 70 0)
+      (set-window-start nil (point))
+      (goto-char (point-min))
+      (clutch--searchable-header-window-update (selected-window))
+      (should (= (window-start) (point-min))))))
 
 (ert-deftest clutch-test-searchable-header-restores-windows-of-a-frame ()
   "The frame hook must restore default and custom window header lines."
@@ -2734,7 +2881,7 @@ Point left behind made the next cell command scroll back to it."
         (save-window-excursion
           (switch-to-buffer buffer)
           (set-window-parameter nil 'header-line-format header)
-          (clutch-result-searchable-header-mode 1)
+          (clutch--searchable-header-open)
           (goto-char (point-min))
           (clutch--searchable-header-window-update (selected-window))
           (should (eq (window-parameter nil 'header-line-format) 'none))
@@ -2753,14 +2900,11 @@ Point left behind made the next cell command scroll back to it."
     (save-window-excursion
       (switch-to-buffer buffer)
       (transient-mark-mode 1)
-      (dolist (mode '(-1 1))
-        (clutch-result-searchable-header-mode mode)
-        (clutch--goto-cell 0 0)
-        (execute-kbd-macro (kbd "C-SPC TAB"))
-        (ert-info ((format "searchable header mode %s" mode))
-          (should (use-region-p))
-          (should (= (get-text-property (point) 'clutch-col-idx) 1)))
-        (deactivate-mark)))))
+      (clutch--goto-cell 0 0)
+      (execute-kbd-macro (kbd "C-SPC TAB"))
+      (should (use-region-p))
+      (should (= (get-text-property (point) 'clutch-col-idx) 1))
+      (deactivate-mark))))
 
 (ert-deftest clutch-test-header-line-display-contract ()
   "Header-line display should track hscroll and preserve pixel alignment."
