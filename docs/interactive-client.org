@@ -117,17 +117,9 @@ Tip: Press =s= to cycle sort state for the result column at point.  Simple table
 
 Tip: Result Browser owns its virtual row-number column and disables native display line numbers whenever a result is opened or refreshed. Use ={= and =}= for data-grid edges; =C-a= and =C-e= retain their standard physical-line behavior and may move into the row prefix or beyond the final cell.
 
-An experimental option, =clutch-result-searchable-header=, lets native isearch find column names. It is off by default. When a search starts, Clutch inserts a real header row at the top of the result buffer, and removes it when the search ends, so the header is never part of the buffer while you browse, select, copy or aggregate. Use native =C-r= to search backward from data to a column name; =C-s= reaches the header after wrapping, as in an ordinary buffer. Matching a header brings point to that column, horizontally scrolling it into view. =RET= ends the search and leaves point on that column's first data cell, and =C-g= returns to the original position. Complete column names remain searchable even when displayed with truncation. Search also continues to find matching data values; it is not restricted to column names.
+Native isearch also finds column names. When a search starts, Clutch inserts a real header row at the top of the result buffer, and removes it when the search ends, so the header is never part of the buffer while you browse, select, copy or aggregate. Use native =C-r= to search backward from data to a column name; =C-s= reaches the header after wrapping, as in an ordinary buffer. Matching a header brings point to that column, horizontally scrolling it into view. =RET= ends the search and leaves point on that column's first data cell, and =C-g= returns to the original position. Complete column names remain searchable even when displayed with truncation. Search also continues to find matching data values; it is not restricted to column names.
 
 While point is in the header during a search, the window displays the real row and suppresses the fixed header-line copy. The cursor follows your normal Emacs blinking settings, and changing text scale keeps the header aligned with the data. No additional window or ETAF dependency is used. Other search commands, such as =occur= or =consult-line=, only see the header if they run isearch.
-
-To enable it:
-
-#+begin_src emacs-lisp
-(setopt clutch-result-searchable-header t)
-#+end_src
-
-The option is read when a search starts, so it applies to every result, including each rerun query, and can also be set buffer-locally in one result.
 
 Tip: staged changes can be previewed with =C-c C-p= and copied/saved from the result transient as the exact staged SQL batch. Tip: INSERT copy/export from joined, derived, or otherwise ambiguous result queries uses =MY_TABLE= as a placeholder target instead of guessing a wrong real table name.
 
