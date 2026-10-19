@@ -2542,11 +2542,12 @@ Preserves point position (row + column) across the render."
                               render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
-    (when (and clutch--filter-pattern (null rows)
-               (null clutch--pending-inserts))
+    (when (and (null rows) (null clutch--pending-inserts))
       (insert (propertize
-               (substitute-command-keys
-                "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
+               (if clutch--filter-pattern
+                   (substitute-command-keys
+                    "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
+                 "No rows.\n")
                'face 'shadow)))
     (cond
      ((and save-in-header clutch--buffer-header-end)
