@@ -5,6 +5,7 @@
 ### Fixed
 
 - The cursor keeps blinking on a searchable result header. Font measurements now run after commands and text scaling instead of during redisplay, which could leave the header's cursor invisible after its first blink.
+- Selecting the whole buffer with a searchable header, then copying or aggregating, uses the data rows instead of failing with "No cell at region start".
 
 ## 0.7.0 - 2026-10-18
 

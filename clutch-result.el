@@ -2187,7 +2187,9 @@ latest matching result buffer; it does not execute the SQL being copied."
   "Return rectangle row/column indices from active region.
 Result is a cons cell (ROW-INDICES . COL-INDICES)."
   (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch--cell-at-or-near
-                                     (region-beginning))
+                                     ;; A searchable header holds no cells.
+                                     (max (region-beginning)
+                                          (or clutch--buffer-header-end 0)))
                                     (user-error "No cell at region start")))
                (`(,r2 ,c2 ,_v2) (or (clutch--cell-at-or-near
                                       (max (point-min) (1- (region-end))))
