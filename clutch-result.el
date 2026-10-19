@@ -4282,14 +4282,6 @@ Selects JSON, XML, or binary string view based on column type and content."
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
   [:description clutch-result--dispatch-context-description
-   ["Navigate"
-    ("TAB" "Next cell"       clutch-result-next-cell)
-    ("<backtab>" "Prev cell" clutch-result-prev-cell)
-    ("n" "Down row"          clutch-result-down-cell)
-    ("p" "Up row"            clutch-result-up-cell)
-    ("C" "Go to column"      clutch-result-goto-column)
-    ("{" "First column"      clutch-result-first-column)
-    ("}" "Last column"       clutch-result-last-column)]
    ["Pages"
     ("N" "Next page"         clutch-result-next-page)
     ("P" "Prev page"         clutch-result-prev-page)
