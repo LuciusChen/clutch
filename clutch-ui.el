@@ -2272,6 +2272,13 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
       (dolist (window (get-buffer-window-list nil nil t))
         (clutch--searchable-header-restore-window window)))))
 
+(defun clutch--searchable-header-end-search (&optional _nopush edit)
+  "Remove the real header once a native search has ended for good.
+Editing the search string with EDIT only suspends it, and `isearch-done'
+pushes the mark after its end hook, so this runs as its after advice."
+  (unless edit
+    (clutch--searchable-header-close)))
+
 (defun clutch--move-buffer-header-active-column (old new)
   "Move the active-column face in the real header from column OLD to NEW."
   (when clutch--buffer-header-end
@@ -2312,12 +2319,11 @@ searchable even when their display is truncated."
                   #'clutch--searchable-header-window-update nil t)
         (add-hook 'post-command-hook #'clutch--searchable-header-check-font nil t)
         (add-hook 'text-scale-mode-hook #'clutch--searchable-header-check-font nil t)
-        (add-hook 'isearch-mode-end-hook #'clutch--searchable-header-close nil t)
         (advice-add 'isearch-mode :before #'clutch--searchable-header-open)
+        (advice-add 'isearch-done :after #'clutch--searchable-header-end-search)
         (add-hook 'window-buffer-change-functions
                   #'clutch--searchable-header-window-buffer-change))
     (clutch--searchable-header-close)
-    (remove-hook 'isearch-mode-end-hook #'clutch--searchable-header-close t)
     (remove-hook 'pre-redisplay-functions
                  #'clutch--searchable-header-window-update t)
     (remove-hook 'post-command-hook #'clutch--searchable-header-check-font t)
