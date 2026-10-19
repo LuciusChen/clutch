@@ -2183,13 +2183,28 @@ latest matching result buffer; it does not execute the SQL being copied."
 
 ;;;; Cell and region selection
 
+(defun clutch-result--region-start-cell ()
+  "Return the cell at the region start.
+A start inside a searchable header maps to the first data row, in the header's
+column when the start is on one."
+  (if (and clutch--buffer-header-end
+           (< (region-beginning) clutch--buffer-header-end))
+      (when-let* ((row-start (and (> (length clutch--row-start-positions) 0)
+                                  (aref clutch--row-start-positions 0))))
+        (clutch--cell-at-or-near
+         (or (and-let* ((column (clutch--searchable-header-column
+                                 (region-beginning))))
+               (save-excursion
+                 (goto-char row-start)
+                 (text-property-any (point) (line-end-position)
+                                    'clutch-col-idx column)))
+             row-start)))
+    (clutch--cell-at-or-near (region-beginning))))
+
 (defun clutch-result--region-rectangle-indices ()
   "Return rectangle row/column indices from active region.
 Result is a cons cell (ROW-INDICES . COL-INDICES)."
-  (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch--cell-at-or-near
-                                     ;; A searchable header holds no cells.
-                                     (max (region-beginning)
-                                          (or clutch--buffer-header-end 0)))
+  (pcase-let* ((`(,r1 ,c1 ,_v1) (or (clutch-result--region-start-cell)
                                     (user-error "No cell at region start")))
                (`(,r2 ,c2 ,_v2) (or (clutch--cell-at-or-near
                                       (max (point-min) (1- (region-end))))

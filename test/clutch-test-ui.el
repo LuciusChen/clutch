@@ -2707,6 +2707,19 @@ Point left behind made the next cell command scroll back to it."
     (should (equal (clutch-result--region-rectangle-indices)
                    '((0 1) . (0 1))))))
 
+(ert-deftest clutch-test-searchable-header-region-keeps-its-start-column ()
+  "A region starting on a header name selects from that column down."
+  (clutch-test--with-result-state
+      (:columns '("a" "b" "c") :column-widths [4 4 4]
+       :rows '((1 2 10) (3 4 20)) :render t)
+    (clutch-result-searchable-header-mode 1)
+    (goto-char (point-min))
+    (search-forward "c")
+    (push-mark (point-max) t t)
+    (goto-char (1- (point)))
+    (should (equal (clutch-result--region-rectangle-indices)
+                   '((0 1) . (2))))))
+
 (ert-deftest clutch-test-searchable-header-highlights-the-column-at-point ()
   "The real header must mark the column point is in, as the fixed header does."
   (clutch-test--with-result-state
