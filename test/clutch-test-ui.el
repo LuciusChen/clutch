@@ -2637,14 +2637,22 @@ Point left behind made the next cell command scroll back to it."
       (should-not clutch--buffer-header-end)
       (should (equal (buffer-string) data)))))
 
-(ert-deftest clutch-test-searchable-header-keeps-the-search-start-mark ()
-  "The mark pushed when a search ends is the cell it started from."
-  (clutch-test--with-header-isearch
-    (clutch--goto-cell 5 1)
-    (let ((start (point)))
-      (execute-kbd-macro (kbd "C-s bob RET"))
-      (should-not clutch--buffer-header-end)
-      (should (= (mark t) start)))))
+(ert-deftest clutch-test-searchable-header-every-exit-removes-the-header ()
+  "Each way of ending a search leaves the data buffer and its start mark."
+  (dolist (keys '("C-s bob RET"
+                  "C-s bob M-s h r RET"
+                  "C-s bob M-s h l RET"
+                  "M-: (isearch-forward) RET bob RET"))
+    (ert-info (keys)
+      (clutch-test--with-header-isearch
+        (clutch--goto-cell 0 0)
+        (let ((start (point)))
+          (execute-kbd-macro (kbd keys))
+          (should-not isearch-mode)
+          (should-not clutch--buffer-header-end)
+          (should (= (aref clutch--row-start-positions 0) (point-min)))
+          (should (= (mark t) start))
+          (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1)))))))
 
 (ert-deftest clutch-test-searchable-header-survives-editing-the-search ()
   "Editing the search string suspends the search without losing its match."
