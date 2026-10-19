@@ -4263,9 +4263,25 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 ;;;; Dispatch menus
 
+(defun clutch-result--dispatch-context-description ()
+  "Return the connection and page the result menu acts on, for its heading."
+  (let ((rows (length clutch--result-rows)))
+    (mapconcat
+     #'identity
+     (delq nil
+           (list (and clutch-connection
+                      (clutch--connection-alive-p clutch-connection)
+                      (propertize (clutch--connection-display-key
+                                   clutch-connection)
+                                  'face 'transient-value))
+                 (format "%d row%s" rows (if (= rows 1) "" "s"))
+                 (and (or (> clutch--page-current 0) clutch--page-has-more)
+                      (format "page %d" (1+ clutch--page-current)))))
+     (propertize " · " 'face 'transient-delimiter))))
+
 (transient-define-prefix clutch-result-dispatch ()
   "Dispatch menu for clutch result buffer."
-  [
+  [:description clutch-result--dispatch-context-description
    ["Navigate"
     ("TAB" "Next cell"       clutch-result-next-cell)
     ("<backtab>" "Prev cell" clutch-result-prev-cell)
