@@ -2600,7 +2600,7 @@ Point left behind made the next cell command scroll back to it."
 ;;;; Rendering — header-line and footer
 
 (defmacro clutch-test--with-header-isearch (&rest body)
-  "Run BODY in a displayed two-row result with the searchable header mode on."
+  "Run BODY in a displayed two-row result with the searchable header available."
   (declare (indent 0))
   `(clutch-test--with-result-state-buffer buffer
        (:columns '("id" "customer_email")

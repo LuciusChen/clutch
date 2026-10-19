@@ -2240,6 +2240,20 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
 A search that moves to another buffer, as `multi-isearch-buffers' does, ends
 there, so the buffer it started in has to be remembered.")
 
+(defun clutch--searchable-header-hooks (enable)
+  "Install the hooks the real header needs when ENABLE, else remove them."
+  (dolist (hook '((pre-redisplay-functions . clutch--searchable-header-window-update)
+                  (post-command-hook . clutch--searchable-header-check-font)
+                  (text-scale-mode-hook . clutch--searchable-header-check-font)))
+    (if enable
+        (add-hook (car hook) (cdr hook) nil t)
+      (remove-hook (car hook) (cdr hook) t)))
+  (if enable
+      (add-hook 'window-buffer-change-functions
+                #'clutch--searchable-header-window-buffer-change)
+    (remove-hook 'window-buffer-change-functions
+                 #'clutch--searchable-header-window-buffer-change)))
+
 (defun clutch--searchable-header-open (&rest _)
   "Insert the real header ahead of a native search in this result buffer."
   (when (and (derived-mode-p 'clutch-result-mode)
@@ -2255,32 +2269,21 @@ there, so the buffer it started in has to be remembered.")
       (setq clutch--buffer-header-end (+ (point-min) (length text)))
       (clutch--shift-row-start-positions (length text)))
     (push (current-buffer) clutch--searchable-header-buffers)
-    (add-hook 'pre-redisplay-functions
-              #'clutch--searchable-header-window-update nil t)
-    (add-hook 'post-command-hook #'clutch--searchable-header-check-font nil t)
-    (add-hook 'text-scale-mode-hook #'clutch--searchable-header-check-font nil t)
-    (add-hook 'window-buffer-change-functions
-              #'clutch--searchable-header-window-buffer-change)))
+    (clutch--searchable-header-hooks t)))
 
 (defun clutch--searchable-header-close ()
   "Remove the real header, leaving point on the data cell of a header match."
   (when clutch--buffer-header-end
-    (let ((column (and (< (point) clutch--buffer-header-end)
-                       (clutch--searchable-header-column)))
-          (in-header (< (point) clutch--buffer-header-end))
-          (length (- clutch--buffer-header-end (point-min)))
-          (inhibit-read-only t))
+    (let* ((in-header (< (point) clutch--buffer-header-end))
+           (column (and in-header (clutch--searchable-header-column)))
+           (length (- clutch--buffer-header-end (point-min)))
+           (inhibit-read-only t))
       (delete-region (point-min) clutch--buffer-header-end)
       (setq clutch--buffer-header-end nil)
       (clutch--shift-row-start-positions (- length))
       (when (and in-header (> (length clutch--row-start-positions) 0))
         (clutch--goto-cell 0 column))
-      (remove-hook 'pre-redisplay-functions
-                   #'clutch--searchable-header-window-update t)
-      (remove-hook 'post-command-hook #'clutch--searchable-header-check-font t)
-      (remove-hook 'text-scale-mode-hook #'clutch--searchable-header-check-font t)
-      (remove-hook 'window-buffer-change-functions
-                   #'clutch--searchable-header-window-buffer-change)
+      (clutch--searchable-header-hooks nil)
       (dolist (window (get-buffer-window-list nil nil t))
         (clutch--searchable-header-restore-window window)))))
 
