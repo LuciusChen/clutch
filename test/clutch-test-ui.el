@@ -2637,6 +2637,25 @@ Point left behind made the next cell command scroll back to it."
       (should-not clutch--buffer-header-end)
       (should (equal (buffer-string) data)))))
 
+(ert-deftest clutch-test-searchable-header-keeps-the-search-start-mark ()
+  "The mark pushed when a search ends is the cell it started from."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 5 1)
+    (let ((start (point)))
+      (execute-kbd-macro (kbd "C-s bob RET"))
+      (should-not clutch--buffer-header-end)
+      (should (= (mark t) start)))))
+
+(ert-deftest clutch-test-searchable-header-survives-editing-the-search ()
+  "Editing the search string suspends the search without losing its match."
+  (clutch-test--with-header-isearch
+    (clutch--goto-cell 0 0)
+    (execute-kbd-macro (kbd "C-s bob M-e RET RET"))
+    (should-not clutch--buffer-header-end)
+    (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1))
+    (should (equal (buffer-substring-no-properties (- (point) 3) (point)) "bob"))
+    (should isearch-success)))
+
 (ert-deftest clutch-test-searchable-header-match-lands-on-the-column ()
   "Leaving a search on a column name puts point in that column's first cell."
   (clutch-test--with-header-isearch
