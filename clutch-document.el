@@ -479,7 +479,8 @@ path expressions."
 ;;;###autoload (autoload 'clutch-mongodb-dispatch "clutch-document" nil t)
 (transient-define-prefix clutch-mongodb-dispatch ()
   "MongoDB query-console dispatch menu."
-  [ :pad-keys t
+  [ :description clutch--dispatch-context-description
+   :pad-keys t
    ["Connection"
     ("c" "Connect"       clutch-connect)
     ("q" "Query console" clutch-query-console)
