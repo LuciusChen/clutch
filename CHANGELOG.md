@@ -5,7 +5,7 @@
 ### Changed
 
 - The searchable result header now exists in the buffer only while a native search runs. Selecting everything, copying and aggregating no longer meet it, and `RET` on a matching column name leaves point on that column's first data cell.
-- `clutch-result-searchable-header-mode` is removed. The option `clutch-result-searchable-header` is read when a search starts and is the only switch.
+- `clutch-result-searchable-header-mode` and the `clutch-result-searchable-header` option are removed. Native isearch in a result buffer always finds column names; nothing needs enabling.
 
 ### Fixed
 

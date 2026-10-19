@@ -83,14 +83,6 @@ of the four inputs changes.")
   "Full header-line string before hscroll adjustment.")
 (defvar-local clutch--header-line-active-col nil
   "Active column that `clutch--header-line-string' was built with.")
-(defcustom clutch-result-searchable-header nil
-  "Non-nil lets native isearch find column names in result buffers.
-A real header row is inserted ahead of a search and removed when it ends, so
-the header never meets selection, copy or aggregation.  Full column names stay
-searchable even when their display is truncated."
-  :type 'boolean
-  :group 'clutch)
-
 (defvar-local clutch--buffer-header-end nil
   "Position after the optional searchable header row, or nil.")
 (defvar-local clutch--header-sort-function nil
@@ -2245,8 +2237,7 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
 
 (defun clutch--searchable-header-open (&rest _)
   "Insert the real header ahead of a native search in this result buffer."
-  (when (and clutch-result-searchable-header
-             (derived-mode-p 'clutch-result-mode)
+  (when (and (derived-mode-p 'clutch-result-mode)
              clutch--column-widths
              (not clutch--buffer-header-end))
     (let ((text (clutch--buffer-header-text))
