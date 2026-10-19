@@ -3973,10 +3973,10 @@ after paging.  Point moves to the first column of the new view."
 (defun clutch-result--fullscreen-transient-description ()
   "Return the transient description for the result window layout."
   (concat
-   "Layout "
+   "Fullscreen "
    (clutch--transient-state-display
-    (if clutch--pre-fullscreen-config 'fullscreen 'window)
-    '((window . "window") (fullscreen . "fullscreen")))))
+    (if clutch--pre-fullscreen-config 'on 'off)
+    '((off . "off") (on . "on")))))
 
 ;;;###autoload
 (defun clutch-result-fullscreen-toggle ()
@@ -4318,11 +4318,11 @@ Selects JSON, XML, or binary string view based on column type and content."
     ("e" "Export..." clutch-result-export)
     ("k" "Copy agent context" clutch-copy-context-for-agent)]
     ["Layout"
-     ("=" "Widen column"      clutch-result-widen-column)
-     ("-" "Narrow column"     clutch-result-narrow-column)
-     ("[" "Scroll left"       clutch-result-scroll-left)
-    ("]" "Scroll right"      clutch-result-scroll-right)
-     ("f" "Fullscreen" clutch-result-fullscreen-toggle
+    ("=" "Widen column"      clutch-result-widen-column :transient t)
+    ("-" "Narrow column"     clutch-result-narrow-column :transient t)
+    ("[" "Scroll left"       clutch-result-scroll-left :transient t)
+    ("]" "Scroll right"      clutch-result-scroll-right :transient t)
+    ("f" "Fullscreen" clutch-result-fullscreen-toggle
       :description clutch-result--fullscreen-transient-description)]])
 
 (transient-define-prefix clutch-record-dispatch ()

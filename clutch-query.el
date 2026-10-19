@@ -2452,58 +2452,71 @@ Key bindings:
 
 ;;;; Transient dispatch menu
 
-(defun clutch--dispatch-transaction-controls-inapt-p ()
-  "Return non-nil when current connection has no transaction controls."
-  (not (and clutch-connection
-            (clutch-db-manual-commit-supported-p clutch-connection))))
+(defun clutch--dispatch-transaction-controls-p ()
+  "Return non-nil when the current connection has transaction controls."
+  (and clutch-connection
+       (clutch-db-manual-commit-supported-p clutch-connection)))
 
 (defun clutch--dispatch-auto-commit-description ()
   "Return the transient description for the current auto-commit state."
-  (if (clutch--dispatch-transaction-controls-inapt-p)
-      (concat "Auto-commit "
-              (propertize "(unavailable)" 'face 'transient-inactive-value))
-    (concat "Auto-commit "
-            (clutch--transient-state-display
-             (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
-             '((manual . "manual") (auto . "auto"))))))
+  (concat "Auto-commit "
+          (clutch--transient-state-display
+           (if (clutch-db-manual-commit-p clutch-connection) 'manual 'auto)
+           '((manual . "manual") (auto . "auto")))))
+
+(defun clutch--dispatch-context-description ()
+  "Return the connection the dispatch menu acts on, for its heading."
+  (if-let* ((conn clutch-connection)
+            ((clutch--connection-alive-p conn)))
+      (mapconcat
+       #'identity
+       (delq nil
+             (list (propertize (clutch--connection-display-key conn)
+                               'face 'transient-value)
+                   (symbol-name (clutch-db-backend-key conn))
+                   (let ((schema (clutch-db-current-schema conn)))
+                     (and (stringp schema) (not (string-empty-p schema))
+                          schema))))
+       " · ")
+    (propertize "Not connected" 'face 'transient-inactive-value)))
 
 ;;;###autoload (autoload 'clutch-dispatch "clutch" nil t)
 (transient-define-prefix clutch-dispatch ()
   "Main dispatch menu for clutch."
-  [:pad-keys t
+  [:description clutch--dispatch-context-description
+   :pad-keys t
    ["Connection"
     ("c" "Connect" clutch-connect)
     ("q" "Query console" clutch-query-console)
     ("f" "SQLite file" clutch-query-sqlite-file)
     ("S" "Prepare SSH" clutch-prepare-ssh-host)
-    ("d" "Disconnect" clutch-disconnect)
-    ("m" "Commit" clutch-commit
-     :inapt-if clutch--dispatch-transaction-controls-inapt-p)
-    ("u" "Rollback" clutch-rollback
-     :inapt-if clutch--dispatch-transaction-controls-inapt-p)
+    ("d" "Disconnect" clutch-disconnect)]
+   ["Transaction"
+    :if clutch--dispatch-transaction-controls-p
+    ("m" "Commit" clutch-commit)
+    ("u" "Rollback" clutch-rollback)
     ("a" "Auto-commit" clutch-toggle-auto-commit
      :description clutch--dispatch-auto-commit-description
      :inapt-if (lambda ()
-                 (or (clutch--dispatch-transaction-controls-inapt-p)
-                     (and clutch-connection
-                          (clutch-db-manual-commit-p clutch-connection)
-                          (clutch--tx-unresolved-p clutch-connection)))))
-    ("R" "REPL" clutch-repl)]
-   ["Execute"
+                 (and (clutch-db-manual-commit-p clutch-connection)
+                      (clutch--tx-unresolved-p clutch-connection))))]
+   ["Run"
     ("x" "DWIM" clutch-execute-dwim)
-    ("e" "Export query to file" clutch-export-query)
     ("r" "Region" clutch-execute-region)
     ("b" "Buffer" clutch-execute-buffer)
     ("p" "Preview execution" clutch-preview-execution-sql)
-    ("k" "Copy agent context" clutch-copy-context-for-agent)]
-   ["Edit"
-    ("'" "Indirect edit" clutch-edit-indirect)]
+    ("e" "Export query to file" clutch-export-query)]]
+  [:pad-keys t
    ["Objects"
     ("j" "Jump to object" clutch-jump)
     ("D" "Describe object" clutch-describe-dwim)
     ("o" "Object actions" clutch-act-dwim)
     ("l" "Switch schema/db" clutch-switch-schema)
-    ("s" "Refresh schema" clutch-refresh-schema)]])
+    ("s" "Refresh schema" clutch-refresh-schema)]
+   ["Tools"
+    ("R" "REPL" clutch-repl)
+    ("'" "Indirect edit" clutch-edit-indirect)
+    ("k" "Copy agent context" clutch-copy-context-for-agent)]])
 
 (provide 'clutch-query)
 ;;; clutch-query.el ends here

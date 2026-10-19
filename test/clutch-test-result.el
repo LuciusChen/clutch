@@ -1527,6 +1527,37 @@ name it captured, not a stale index."
                        'face description)
                       'transient-value)))))))
 
+(ert-deftest clutch-test-dispatch-menu-names-its-connection-and-transactions ()
+  "The main menu heads itself with the connection and hides unused controls."
+  (with-temp-buffer
+    (should (string-match-p "Not connected"
+                            (clutch-test--transient-menu-text 'clutch-dispatch))))
+  (dolist (mode '(auto nil))
+    (with-temp-buffer
+      (setq-local clutch-connection
+                  (make-clutch-test-conn :backend 'mysql :commit-mode mode
+                                         :params '(:host "db" :port 3306
+                                                   :user "me")))
+      (let ((menu (clutch-test--transient-menu-text 'clutch-dispatch)))
+        (should (string-match-p "me@db .* mysql" menu))
+        (should (eq (and (string-match-p "Transaction" menu) t)
+                    (and mode t)))
+        (should (eq (and (string-match-p "Rollback" menu) t)
+                    (and mode t)))))))
+
+(ert-deftest clutch-test-layout-keys-keep-the-result-menu-open ()
+  "Adjusting the layout repeatedly does not reopen the menu each time."
+  (let ((suffixes (transient-suffixes 'clutch-result-dispatch)))
+    (dolist (key '("=" "-" "[" "]"))
+      (ert-info ((format "key: %s" key))
+        (let ((suffix (cl-find-if (lambda (suffix)
+                                    (and (slot-boundp suffix 'key)
+                                         (equal (oref suffix key) key)))
+                                  suffixes)))
+          (should suffix)
+          (should (and (slot-boundp suffix 'transient)
+                       (oref suffix transient))))))))
+
 (ert-deftest clutch-test-query-console-sqli-keys ()
   "Console keys use Clutch results instead of an unrelated SQLi process."
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
@@ -1643,12 +1674,12 @@ name it captured, not a stale index."
     (setq-local clutch--pre-fullscreen-config nil)
     (should (equal (substring-no-properties
                     (clutch-result--fullscreen-transient-description))
-                   "Layout (window|fullscreen)"))
+                   "Fullscreen (off|on)"))
     (setq-local clutch--pre-fullscreen-config 'saved-configuration)
     (let ((description (clutch-result--fullscreen-transient-description)))
       (should (equal (substring-no-properties description)
-                     "Layout (window|fullscreen)"))
-      (should (eq (get-text-property (string-match "fullscreen" description)
+                     "Fullscreen (off|on)"))
+      (should (eq (get-text-property (string-match "on" description)
                                     'face description)
                   'transient-value)))))
 
