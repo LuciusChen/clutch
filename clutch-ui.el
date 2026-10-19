@@ -2236,9 +2236,10 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
       (aset clutch--row-start-positions index (+ position delta)))))
 
 (defvar clutch--searchable-header-buffers nil
-  "Result buffers holding a real header for the running search.
+  "Alist of (BUFFER . MINIBUFFER-DEPTH) for the real headers of running searches.
 A search that moves to another buffer, as `multi-isearch-buffers' does, ends
-there, so the buffer it started in has to be remembered.")
+there, so the buffer it started in has to be remembered.  The depth keeps a
+search inside a recursive minibuffer from ending one still suspended outside.")
 
 (defun clutch--searchable-header-hooks (enable)
   "Install the hooks the real header needs when ENABLE, else remove them."
@@ -2268,7 +2269,8 @@ there, so the buffer it started in has to be remembered.")
       (goto-char (+ position (length text)))
       (setq clutch--buffer-header-end (+ (point-min) (length text)))
       (clutch--shift-row-start-positions (length text)))
-    (push (current-buffer) clutch--searchable-header-buffers)
+    (push (cons (current-buffer) (minibuffer-depth))
+          clutch--searchable-header-buffers)
     (clutch--searchable-header-hooks t)))
 
 (defun clutch--searchable-header-close ()
@@ -2294,11 +2296,14 @@ integer start before the header goes, a search suspended to edit its string
 keeps the header, and a recursive edit leaves by a non-local exit."
   (unwind-protect (apply done args)
     (unless isearch-suspended
-      (dolist (buffer (prog1 clutch--searchable-header-buffers
-                        (setq clutch--searchable-header-buffers nil)))
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (clutch--searchable-header-close)))))))
+      (let ((depth (minibuffer-depth)))
+        (dolist (entry clutch--searchable-header-buffers)
+          (when (>= (cdr entry) depth)
+            (setq clutch--searchable-header-buffers
+                  (delq entry clutch--searchable-header-buffers))
+            (when (buffer-live-p (car entry))
+              (with-current-buffer (car entry)
+                (clutch--searchable-header-close)))))))))
 
 (advice-add 'isearch-mode :before #'clutch--searchable-header-open)
 (advice-add 'isearch-done :around #'clutch--searchable-header-end-search)

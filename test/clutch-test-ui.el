@@ -2729,6 +2729,16 @@ still removes the header from the buffer it started in."
       (should-not (buffer-local-value 'clutch--buffer-header-end first))
       (should-not clutch--searchable-header-buffers))))
 
+(ert-deftest clutch-test-searchable-header-nested-edit-keeps-the-header-match ()
+  "Editing a search inside the edit of a header search keeps its match."
+  (clutch-test--with-header-isearch
+    (let ((enable-recursive-minibuffers t))
+      (clutch--goto-cell 0 0)
+      (execute-kbd-macro
+       (kbd "C-s customer_email C-s M-e C-M-r customer M-e RET RET RET RET"))
+      (should isearch-success)
+      (should (eql (clutch--col-idx-at-point) 1)))))
+
 (ert-deftest clutch-test-searchable-header-needs-a-result ()
   "A search leaves buffers that are not results alone."
   (clutch-test--with-result-state
