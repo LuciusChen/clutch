@@ -6,7 +6,7 @@
 
 - The searchable result header now exists in the buffer only while a native search runs. Selecting everything, copying and aggregating no longer meet it, and `RET` on a matching column name leaves point on that column's first data cell.
 - `clutch-result-searchable-header-mode` and the `clutch-result-searchable-header` option are removed. Native isearch in a result buffer always finds column names; nothing needs enabling.
-- The main dispatch menu is headed by the connection it acts on, shows Transaction controls only on connections that have them, and groups Run, Objects and Tools separately; its keys are unchanged. In the result menu, widening or narrowing a column and scrolling sideways keep the menu open so they can be repeated, and the fullscreen entry shows `(off|on)`.
+- The main dispatch menu is headed by the connection it acts on, shows Transaction controls only on connections that have them, and groups Run, Objects and Tools separately; its keys are unchanged. The result menu is headed by its connection, row count and page. In it, widening or narrowing a column and scrolling sideways keep the menu open so they can be repeated, and the fullscreen entry shows `(off|on)`.
 
 ### Fixed
 

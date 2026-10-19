@@ -1545,6 +1545,22 @@ name it captured, not a stale index."
         (should (eq (and (string-match-p "Rollback" menu) t)
                     (and mode t)))))))
 
+(ert-deftest clutch-test-result-menu-heads-itself-with-connection-and-page ()
+  "The result menu names its connection, row count and page."
+  (clutch-test--with-result-state
+      (:columns '("id") :column-widths [4] :rows '((1) (2)) :render t)
+    (setq-local clutch-connection
+                (make-clutch-test-conn :backend 'mysql
+                                       :params '(:host "db" :port 3306
+                                                 :user "me")))
+    (should (string-match-p "me@db · 2 rows\n"
+                            (clutch-test--transient-menu-text
+                             'clutch-result-dispatch)))
+    (setq-local clutch--page-current 2)
+    (should (string-match-p "me@db · 2 rows · page 3\n"
+                            (clutch-test--transient-menu-text
+                             'clutch-result-dispatch)))))
+
 (ert-deftest clutch-test-layout-keys-keep-the-result-menu-open ()
   "Adjusting the layout repeatedly does not reopen the menu each time."
   (let ((suffixes (transient-suffixes 'clutch-result-dispatch)))
