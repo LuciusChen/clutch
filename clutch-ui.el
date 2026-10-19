@@ -2235,6 +2235,11 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
     (when-let* ((position (aref clutch--row-start-positions index)))
       (aset clutch--row-start-positions index (+ position delta)))))
 
+(defvar clutch--searchable-header-buffers nil
+  "Result buffers holding a real header for the running search.
+A search that moves to another buffer, as `multi-isearch-buffers' does, ends
+there, so the buffer it started in has to be remembered.")
+
 (defun clutch--searchable-header-open (&rest _)
   "Insert the real header ahead of a native search in this result buffer."
   (when (and (derived-mode-p 'clutch-result-mode)
@@ -2249,6 +2254,7 @@ POSITION defaults to point.  Accept the end of a name as isearch's match end."
       (goto-char (+ position (length text)))
       (setq clutch--buffer-header-end (+ (point-min) (length text)))
       (clutch--shift-row-start-positions (length text)))
+    (push (current-buffer) clutch--searchable-header-buffers)
     (add-hook 'pre-redisplay-functions
               #'clutch--searchable-header-window-update nil t)
     (add-hook 'post-command-hook #'clutch--searchable-header-check-font nil t)
@@ -2285,7 +2291,11 @@ integer start before the header goes, a search suspended to edit its string
 keeps the header, and a recursive edit leaves by a non-local exit."
   (unwind-protect (apply done args)
     (unless isearch-suspended
-      (clutch--searchable-header-close))))
+      (dolist (buffer (prog1 clutch--searchable-header-buffers
+                        (setq clutch--searchable-header-buffers nil)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (clutch--searchable-header-close)))))))
 
 (advice-add 'isearch-mode :before #'clutch--searchable-header-open)
 (advice-add 'isearch-done :around #'clutch--searchable-header-end-search)

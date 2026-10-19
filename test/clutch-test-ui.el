@@ -2713,6 +2713,22 @@ Point left behind made the next cell command scroll back to it."
     (should-not clutch--buffer-header-end)
     (should (= (get-text-property (1- (point)) 'clutch-row-idx) 1))))
 
+(ert-deftest clutch-test-searchable-header-search-ending-elsewhere-cleans-start ()
+  "A search that ends in another buffer, as `multi-isearch-buffers' can,
+still removes the header from the buffer it started in."
+  (clutch-test--with-result-state-buffer first
+      (:columns '("id" "name") :column-widths [4 8] :rows '((1 "alice")) :render t)
+    (clutch-test--with-result-state-buffer second
+        (:columns '("id" "name") :column-widths [4 8] :rows '((2 "zed")) :render t)
+      (with-current-buffer first
+        (clutch--searchable-header-open))
+      (should (buffer-local-value 'clutch--buffer-header-end first))
+      (let ((isearch-suspended nil))
+        (clutch--searchable-header-end-search
+         (lambda (&rest _) (set-buffer second))))
+      (should-not (buffer-local-value 'clutch--buffer-header-end first))
+      (should-not clutch--searchable-header-buffers))))
+
 (ert-deftest clutch-test-searchable-header-needs-a-result ()
   "A search leaves buffers that are not results alone."
   (clutch-test--with-result-state
