@@ -3111,12 +3111,16 @@ header string and column pixel widths, then reused."
         (last-window (substring-no-properties
                       (clutch--render-footer 500 1 500 578 78 nil)))
         (empty-page (substring-no-properties
-                     (clutch--render-footer 0 0 500 nil))))
+                     (clutch--render-footer 0 0 500 nil)))
+        (past-the-end (substring-no-properties
+                       (clutch--render-footer 0 1 500 nil))))
     (should (string-match-p (regexp-quote "1-500 of 501+ rows") first-page))
     (should (string-match-p (regexp-quote "501-1000 of 1001+ rows") middle-page))
     (should (string-match-p (regexp-quote "501-578 of 578 rows") next-last-page))
     (should (string-match-p (regexp-quote "79-578 of 578 rows") last-window))
-    (should (string-match-p (regexp-quote "0 of 0 rows") empty-page)))
+    (should (string-match-p (regexp-quote "0 rows") empty-page))
+    (should-not (string-match-p "0 of" empty-page))
+    (should (string-match-p (regexp-quote "0 of 500 rows") past-the-end)))
   (let ((footer (substring-no-properties
                  (clutch--render-footer 78 1 500 578))))
     (should-not (string-match-p "[0-9]+/[0-9]+" footer))))
