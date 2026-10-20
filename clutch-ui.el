@@ -2538,12 +2538,11 @@ Preserves point position (row + column) across the render."
                               render-state)
     (clutch--insert-pending-insert-rows visible-cols widths nw (length rows)
                                         row-positions render-state)
-    (when (and (null rows) (null clutch--pending-inserts))
+    (when (and clutch--filter-pattern (null rows)
+               (null clutch--pending-inserts))
       (insert (propertize
-               (if clutch--filter-pattern
-                   (substitute-command-keys
-                    "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
-                 "No rows.\n")
+               (substitute-command-keys
+                "No matches on this page.  \\[clutch-result-filter] to change or clear filter.\n")
                'face 'shadow)))
     (cond
      ((and save-in-header clutch--buffer-header-end)
@@ -2639,7 +2638,7 @@ Falls back to `clutch--refresh-display' when row-local replacement is unsafe."
          (old-count (and (vectorp clutch--row-start-positions)
                          (length clutch--row-start-positions))))
     (if (or (not old-count)
-            (zerop old-count)
+            (and (zerop old-count) clutch--filter-pattern)
             (/= old-count ridx))
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))
@@ -2671,7 +2670,7 @@ renumbering later rendered rows."
                         (< ridx old-count)
                         (aref clutch--row-start-positions ridx))))
     (if (or (not line-pos)
-            (= old-count 1)
+            (and (= old-count 1) clutch--filter-pattern)
             (not (= ridx (1- old-count))))
         (clutch--refresh-display)
       (let* ((save-ridx (get-text-property (point) 'clutch-row-idx))

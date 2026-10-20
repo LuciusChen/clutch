@@ -2042,21 +2042,6 @@ Point left behind made the next cell command scroll back to it."
    (should (= 0 (length clutch--row-start-positions)))
    (should (string-match-p "No matches on this page" (buffer-string)))))
 
-(ert-deftest clutch-test-empty-note-follows-staged-inserts ()
-  "The note of an unfiltered empty result goes with the first staged row."
-  (clutch-test--with-result-state
-      (:columns '("id" "name") :column-widths [4 8] :rows nil :render t)
-    (should (string-match-p "No rows" (buffer-string)))
-    (setq-local clutch--pending-inserts '((("name" . "new"))))
-    (clutch--append-pending-insert-row 0)
-    (should-not (string-match-p "No rows" (buffer-string)))
-    (should (= 1 (length clutch--row-start-positions)))
-    (should (= (point) (aref clutch--row-start-positions 0)))
-    (setq-local clutch--pending-inserts nil)
-    (clutch--delete-row-at-index 0)
-    (should (= 0 (length clutch--row-start-positions)))
-    (should (string-match-p "No rows" (buffer-string)))))
-
 (ert-deftest clutch-test-delete-pending-insert-middle-row-falls-back ()
   "Deleting a non-final rendered row should fall back to a full redraw."
   (with-temp-buffer

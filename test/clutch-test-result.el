@@ -1546,16 +1546,6 @@ name it captured, not a stale index."
         (should (eq (and (string-match-p "Rollback" menu) t)
                     (and mode t)))))))
 
-(ert-deftest clutch-test-empty-result-says-so ()
-  "A result with no rows says so, and the note is not a cell."
-  (clutch-test--with-result-state
-      (:columns '("id" "name") :column-widths [4 8] :rows nil :render t)
-    (should (equal (buffer-string) "No rows.\n"))
-    (should-not (get-text-property (point-min) 'clutch-row-idx))
-    (setq-local clutch--result-rows '((1 "alice")))
-    (clutch--render-result)
-    (should-not (string-match-p "No rows" (buffer-string)))))
-
 (ert-deftest clutch-test-result-menu-heads-itself-with-connection-and-page ()
   "The result menu names its connection, row count and page."
   (clutch-test--with-result-state
