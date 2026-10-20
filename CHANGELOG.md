@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- A result for a different query is shown from its first row and column, instead of at the place the previous result was scrolled to. Running the same query again still keeps the view.
 - Searching a wide result with the searchable header no longer stalls for seconds when a match lands in the header, nor when moving between column names.
 
 ## 0.7.0 - 2026-10-18

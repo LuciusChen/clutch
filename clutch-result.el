@@ -547,6 +547,17 @@ Returns column names."
    :page-offset page-offset
    :page-has-more page-has-more))
 
+(defun clutch-result--reset-view (buffer)
+  "Show BUFFER from its first row and column in every window displaying it.
+A result for another query must not inherit where the previous one was
+scrolled to."
+  (with-current-buffer buffer
+    (goto-char (point-min)))
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (set-window-point window (point-min))
+    (set-window-start window (point-min))
+    (set-window-hscroll window 0)))
+
 (cl-defun clutch-result--display-select
     (connection sql result elapsed
                 &key row-identity-prep server-pageable
@@ -556,6 +567,9 @@ ROW-IDENTITY-PREP, SERVER-PAGEABLE, RESULT-CONTEXT, RESOLUTION-CONTEXT,
 SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
   (let* ((page-size clutch-result-max-rows)
          (buf (get-buffer-create (clutch-result--buffer-name)))
+         (same-query (with-current-buffer buf
+                       (and (derived-mode-p 'clutch-result-mode)
+                            (equal clutch--last-query sql))))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
          (analysis-sql (clutch-db-sql-normalize sql))
@@ -612,6 +626,8 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
       (with-current-buffer source-buffer
         (setq-local clutch--last-result-buffer buf)))
     (clutch-result--show-buffer buf)
+    (unless same-query
+      (clutch-result--reset-view buf))
     (when col-names
       (with-current-buffer buf
         (clutch--refresh-display)))
