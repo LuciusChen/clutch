@@ -62,6 +62,11 @@ Oracle installs also keep the active JDBC line unambiguous: =clutch-jdbc-install
 
 SQL Server installs use Microsoft's classifier-based Maven artifacts (for example =mssql-jdbc-13.4.0.jre11.jar=) and normalize the local filename to =mssql-jdbc.jar=.  If you manage the driver manually, use the JRE-classified artifact from Maven Central rather than a nonexistent plain =mssql-jdbc-<version>.jar= path.
 
+** Agent Launch Options
+
+- =clutch-jdbc-agent-java-executable= is the Java executable that starts the agent (default =java=).
+- =clutch-jdbc-agent-jvm-args= lists extra JVM arguments, such as ="-Xmx256m"= to cap the heap; the default is =("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")=.
+
 ** Connection Examples
 
 #+begin_src emacs-lisp
