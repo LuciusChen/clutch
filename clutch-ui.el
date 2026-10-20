@@ -1133,8 +1133,7 @@ Accounts for the line-number gutter when `display-line-numbers-mode' is on."
   "Mark SQL region BEG..END with execution STATUS.
 MESSAGE, when non-nil, is used as hover text for failed SQL.  While the
 SQL runs or is being cancelled, the mark also gives its text a
-background.  A region left with no SQL, as when its text was deleted,
-keeps no mark."
+background.  The mark goes away when the statement's text is deleted."
   (clutch--clear-executed-sql-overlay)
   (when-let* ((trimmed (clutch--trim-sql-bounds beg end))
               (tbeg (car trimmed))
@@ -1148,16 +1147,13 @@ keeps no mark."
             (set-window-margins window
                                 (max width (or (car margins) 0))
                                 (cdr margins))))))
-    (let ((face (pcase status
-                  ('running 'clutch-running-sql-face)
-                  ('cancelling 'clutch-cancelling-sql-face))))
-      (if face
-          ;; Text typed at either end stays outside the statement.
-          (progn
-            (setq clutch--executed-sql-overlay (make-overlay tbeg tend nil t nil))
-            (overlay-put clutch--executed-sql-overlay 'face face))
-        (let ((bol (save-excursion (goto-char tbeg) (line-beginning-position))))
-          (setq clutch--executed-sql-overlay (make-overlay bol bol nil nil nil)))))
+    ;; Text typed at either end stays outside the statement.
+    (setq clutch--executed-sql-overlay (make-overlay tbeg tend nil t nil))
+    (overlay-put clutch--executed-sql-overlay 'evaporate t)
+    (when-let* ((face (pcase status
+                        ('running 'clutch-running-sql-face)
+                        ('cancelling 'clutch-cancelling-sql-face))))
+      (overlay-put clutch--executed-sql-overlay 'face face))
     (overlay-put clutch--executed-sql-overlay 'before-string
                  (clutch--sql-status-marker-before-string status))
     (overlay-put clutch--executed-sql-overlay 'help-echo
