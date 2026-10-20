@@ -1538,6 +1538,7 @@ name it captured, not a stale index."
                   (make-clutch-test-conn :backend 'mysql :commit-mode mode
                                          :params '(:host "db" :port 3306
                                                    :user "me")))
+      (clutch--refresh-connection-render-state)
       (let ((menu (clutch-test--transient-menu-text 'clutch-dispatch)))
         (should (string-match-p "me@db .* mysql" menu))
         (should (eq (and (string-match-p "Transaction" menu) t)
@@ -1563,6 +1564,7 @@ name it captured, not a stale index."
                 (make-clutch-test-conn :backend 'mysql
                                        :params '(:host "db" :port 3306
                                                  :user "me")))
+    (clutch--refresh-connection-render-state)
     (should (string-match-p "me@db · 2 rows\n"
                             (clutch-test--transient-menu-text
                              'clutch-result-dispatch)))
@@ -1570,6 +1572,25 @@ name it captured, not a stale index."
     (should (string-match-p "me@db · 2 rows · page 3\n"
                             (clutch-test--transient-menu-text
                              'clutch-result-dispatch)))))
+
+(ert-deftest clutch-test-menu-headings-ask-the-server-nothing ()
+  "Opening a dispatch menu reads cached state, as a schema query can block."
+  (let ((conn (make-clutch-test-conn :backend 'mysql :commit-mode 'auto
+                                     :params '(:host "db" :port 3306
+                                               :user "me"))))
+    (clutch-test--with-result-state
+        (:columns '("id") :column-widths [4] :rows '((1)) :render t)
+      (setq-local clutch-connection conn)
+      (clutch--refresh-connection-render-state)
+      (let* ((asked nil)
+             (probe (lambda (&rest _) (setq asked t))))
+        (advice-add 'clutch-db-current-schema :before probe)
+        (unwind-protect
+            (progn
+              (clutch-test--transient-menu-text 'clutch-dispatch)
+              (clutch-test--transient-menu-text 'clutch-result-dispatch))
+          (advice-remove 'clutch-db-current-schema probe))
+        (should-not asked)))))
 
 (ert-deftest clutch-test-layout-keys-keep-the-result-menu-open ()
   "Adjusting the layout repeatedly does not reopen the menu each time."
