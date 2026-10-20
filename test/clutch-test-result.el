@@ -1527,6 +1527,84 @@ name it captured, not a stale index."
                        'face description)
                       'transient-value)))))))
 
+(ert-deftest clutch-test-dispatch-menu-names-its-connection-and-transactions ()
+  "The main menu heads itself with the connection and hides unused controls."
+  (with-temp-buffer
+    (should (string-match-p "Not connected"
+                            (clutch-test--transient-menu-text 'clutch-dispatch))))
+  (dolist (mode '(auto nil))
+    (with-temp-buffer
+      (setq-local clutch-connection
+                  (make-clutch-test-conn :backend 'mysql :commit-mode mode
+                                         :params '(:host "db" :port 3306
+                                                   :user "me")))
+      (clutch--refresh-connection-render-state)
+      (let ((menu (clutch-test--transient-menu-text 'clutch-dispatch)))
+        (should (string-match-p "me@db .* mysql" menu))
+        (should (eq (and (string-match-p "Transaction" menu) t)
+                    (and mode t)))
+        (should (eq (and (string-match-p "Rollback" menu) t)
+                    (and mode t)))))))
+
+(ert-deftest clutch-test-empty-result-says-so ()
+  "A result with no rows says so, and the note is not a cell."
+  (clutch-test--with-result-state
+      (:columns '("id" "name") :column-widths [4 8] :rows nil :render t)
+    (should (equal (buffer-string) "No rows.\n"))
+    (should-not (get-text-property (point-min) 'clutch-row-idx))
+    (setq-local clutch--result-rows '((1 "alice")))
+    (clutch--render-result)
+    (should-not (string-match-p "No rows" (buffer-string)))))
+
+(ert-deftest clutch-test-result-menu-heads-itself-with-connection-and-page ()
+  "The result menu names its connection, row count and page."
+  (clutch-test--with-result-state
+      (:columns '("id") :column-widths [4] :rows '((1) (2)) :render t)
+    (setq-local clutch-connection
+                (make-clutch-test-conn :backend 'mysql
+                                       :params '(:host "db" :port 3306
+                                                 :user "me")))
+    (clutch--refresh-connection-render-state)
+    (should (string-match-p "me@db · 2 rows\n"
+                            (clutch-test--transient-menu-text
+                             'clutch-result-dispatch)))
+    (setq-local clutch--page-current 2)
+    (should (string-match-p "me@db · 2 rows · page 3\n"
+                            (clutch-test--transient-menu-text
+                             'clutch-result-dispatch)))))
+
+(ert-deftest clutch-test-menu-headings-ask-the-server-nothing ()
+  "Opening a dispatch menu reads cached state, as a schema query can block."
+  (let ((conn (make-clutch-test-conn :backend 'mysql :commit-mode 'auto
+                                     :params '(:host "db" :port 3306
+                                               :user "me"))))
+    (clutch-test--with-result-state
+        (:columns '("id") :column-widths [4] :rows '((1)) :render t)
+      (setq-local clutch-connection conn)
+      (clutch--refresh-connection-render-state)
+      (let* ((asked nil)
+             (probe (lambda (&rest _) (setq asked t))))
+        (advice-add 'clutch-db-current-schema :before probe)
+        (unwind-protect
+            (progn
+              (clutch-test--transient-menu-text 'clutch-dispatch)
+              (clutch-test--transient-menu-text 'clutch-result-dispatch))
+          (advice-remove 'clutch-db-current-schema probe))
+        (should-not asked)))))
+
+(ert-deftest clutch-test-layout-keys-keep-the-result-menu-open ()
+  "Adjusting the layout repeatedly does not reopen the menu each time."
+  (let ((suffixes (transient-suffixes 'clutch-result-dispatch)))
+    (dolist (key '("=" "-" "[" "]"))
+      (ert-info ((format "key: %s" key))
+        (let ((suffix (cl-find-if (lambda (suffix)
+                                    (and (slot-boundp suffix 'key)
+                                         (equal (oref suffix key) key)))
+                                  suffixes)))
+          (should suffix)
+          (should (and (slot-boundp suffix 'transient)
+                       (oref suffix transient))))))))
+
 (ert-deftest clutch-test-query-console-sqli-keys ()
   "Console keys use Clutch results instead of an unrelated SQLi process."
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
@@ -1643,12 +1721,12 @@ name it captured, not a stale index."
     (setq-local clutch--pre-fullscreen-config nil)
     (should (equal (substring-no-properties
                     (clutch-result--fullscreen-transient-description))
-                   "Layout (window|fullscreen)"))
+                   "Fullscreen (off|on)"))
     (setq-local clutch--pre-fullscreen-config 'saved-configuration)
     (let ((description (clutch-result--fullscreen-transient-description)))
       (should (equal (substring-no-properties description)
-                     "Layout (window|fullscreen)"))
-      (should (eq (get-text-property (string-match "fullscreen" description)
+                     "Fullscreen (off|on)"))
+      (should (eq (get-text-property (string-match "on" description)
                                     'face description)
                   'transient-value)))))
 
