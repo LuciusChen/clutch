@@ -1949,7 +1949,7 @@ fails signals before any SQL is sent."
     (insert "  SELECT 1;\n  SELECT 2;")
     (clutch--mark-executed-sql-region (point-min) (point-max))
     (should (overlayp clutch--executed-sql-overlay))
-    (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+    (should (= (overlay-start clutch--executed-sql-overlay) 3))
     (let* ((before (overlay-get clutch--executed-sql-overlay 'before-string))
            (display (get-text-property 0 'display before)))
       (if (display-graphic-p)
@@ -1961,6 +1961,17 @@ fails signals before any SQL is sent."
          (should (eq (get-text-property 0 'face (cadr display))
                     'clutch-executed-sql-marker-face))))
     (should-not (overlay-get clutch--executed-sql-overlay 'modification-hooks))))
+
+(ert-deftest clutch-test-executed-sql-mark-goes-with-deleted-statement ()
+  "Deleting the executed statement's text removes its margin mark."
+  (with-temp-buffer
+    (insert "SELECT 1;\nSELECT 2;")
+    (clutch--mark-executed-sql-region (point-min) 10)
+    (let ((overlay clutch--executed-sql-overlay))
+      (delete-region 5 8)
+      (should (overlay-buffer overlay))
+      (delete-region (point-min) 10)
+      (should-not (overlay-buffer overlay)))))
 
 (ert-deftest clutch-test-execute-quit-retires-only-a-connection-it-cannot-interrupt ()
   "Only a quit during the database call should retire the connection.
@@ -2913,8 +2924,8 @@ Its marker shows that it ran even when presenting its result fails."
                    "Last executed"
                    (overlay-get clutch--executed-sql-overlay 'help-echo)))
           (should-not (overlay-get clutch--executed-sql-overlay 'face))
-          (should (= (overlay-start clutch--executed-sql-overlay)
-                     (overlay-end clutch--executed-sql-overlay)))))))
+          (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+          (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))))))
   (with-temp-buffer
     (insert "UPDATE t SET n = 1 WHERE id = 1")
     (setq-local clutch-connection 'async-conn)
