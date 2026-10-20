@@ -2465,20 +2465,23 @@ Key bindings:
            '((manual . "manual") (auto . "auto")))))
 
 (defun clutch--dispatch-context-description ()
-  "Return the connection the dispatch menu acts on, for its heading."
-  (if-let* ((conn clutch-connection)
-            ((clutch--connection-alive-p conn)))
-      (mapconcat
-       #'identity
-       (delq nil
-             (list (propertize (clutch--connection-display-key conn)
-                               'face 'transient-value)
-                   (symbol-name (clutch-db-backend-key conn))
-                   (let ((schema (clutch-db-current-schema conn)))
-                     (and (stringp schema) (not (string-empty-p schema))
-                          schema))))
-       " · ")
-    (propertize "Not connected" 'face 'transient-inactive-value)))
+  "Return the connection the dispatch menu acts on, for its heading.
+It reads the buffer's cached render state, so opening the menu asks the
+server nothing."
+  (let ((state clutch--connection-render-state))
+    (if (plist-get state :connected-p)
+        (mapconcat
+         #'identity
+         (delq nil
+               (list (propertize (plist-get state :connection-label)
+                                 'face 'transient-value)
+                     (plist-get state :backend-label)
+                     (let ((namespace (plist-get state :namespace)))
+                       (and (stringp namespace)
+                            (not (string-empty-p namespace))
+                            namespace))))
+         " · ")
+      (propertize "Not connected" 'face 'transient-inactive-value))))
 
 ;;;###autoload (autoload 'clutch-dispatch "clutch" nil t)
 (transient-define-prefix clutch-dispatch ()

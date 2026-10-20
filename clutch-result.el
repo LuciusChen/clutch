@@ -4264,15 +4264,15 @@ Selects JSON, XML, or binary string view based on column type and content."
 ;;;; Dispatch menus
 
 (defun clutch-result--dispatch-context-description ()
-  "Return the connection and page the result menu acts on, for its heading."
+  "Return the connection and page the result menu acts on, for its heading.
+The connection comes from the cached render state, not from the server."
   (let ((rows (length clutch--result-rows)))
     (mapconcat
      #'identity
      (delq nil
-           (list (and clutch-connection
-                      (clutch--connection-alive-p clutch-connection)
-                      (propertize (clutch--connection-display-key
-                                   clutch-connection)
+           (list (and (plist-get clutch--connection-render-state :connected-p)
+                      (propertize (plist-get clutch--connection-render-state
+                                             :connection-label)
                                   'face 'transient-value))
                  (format "%d row%s" rows (if (= rows 1) "" "s"))
                  (and (or (> clutch--page-current 0) clutch--page-has-more)
