@@ -2322,6 +2322,16 @@ A running query is busy; a backend may also protect an open transaction
 that cannot accept metadata queries.  Foreground SQL can still run in
 such a transaction once its preceding statement has finished.")
 
+(cl-defgeneric clutch-db-request-in-flight-p (conn)
+  "Return non-nil while a request to CONN's server has not finished.
+Unlike `clutch-db-busy-p', an open transaction does not count.  A request
+still in flight makes the driver refuse another command on CONN.  Backends
+that run requests in the background provide a method.")
+
+(cl-defmethod clutch-db-request-in-flight-p ((_conn t))
+  "Return nil; backends without background requests never have one in flight."
+  nil)
+
 ;; Metadata
 
 (cl-defgeneric clutch-db-user (conn)
