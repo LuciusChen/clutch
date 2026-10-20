@@ -800,7 +800,9 @@ answer can change has to invalidate or extend it correctly."
       (should (= (overlay-start clutch--executed-sql-overlay)
                  (save-excursion
                    (goto-char (point-max))
-                   (line-beginning-position)))))))
+                   (beginning-of-line)
+                   (skip-chars-forward " ")
+                   (point)))))))
 
 (ert-deftest clutch-test-execute-statements-marks-final-select ()
   "A final SELECT in a statement batch should keep its source bounds."
