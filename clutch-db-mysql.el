@@ -822,6 +822,10 @@ ORDER BY ORDINAL_POSITION"
 
 ;;;; Re-entrancy guard
 
+(cl-defmethod clutch-db-request-in-flight-p ((conn mysql-conn))
+  "Return non-nil while MySQL CONN has a request in flight."
+  (mysql-busy-p conn))
+
 (cl-defmethod clutch-db-busy-p ((conn mysql-conn))
   "Return non-nil if MySQL CONN is executing a query."
   (mysql-busy-p conn))
