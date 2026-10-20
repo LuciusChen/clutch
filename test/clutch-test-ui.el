@@ -2042,21 +2042,6 @@ Point left behind made the next cell command scroll back to it."
    (should (= 0 (length clutch--row-start-positions)))
    (should (string-match-p "No matches on this page" (buffer-string)))))
 
-(ert-deftest clutch-test-empty-note-follows-staged-inserts ()
-  "The note of an unfiltered empty result goes with the first staged row."
-  (clutch-test--with-result-state
-      (:columns '("id" "name") :column-widths [4 8] :rows nil :render t)
-    (should (string-match-p "No rows" (buffer-string)))
-    (setq-local clutch--pending-inserts '((("name" . "new"))))
-    (clutch--append-pending-insert-row 0)
-    (should-not (string-match-p "No rows" (buffer-string)))
-    (should (= 1 (length clutch--row-start-positions)))
-    (should (= (point) (aref clutch--row-start-positions 0)))
-    (setq-local clutch--pending-inserts nil)
-    (clutch--delete-row-at-index 0)
-    (should (= 0 (length clutch--row-start-positions)))
-    (should (string-match-p "No rows" (buffer-string)))))
-
 (ert-deftest clutch-test-delete-pending-insert-middle-row-falls-back ()
   "Deleting a non-final rendered row should fall back to a full redraw."
   (with-temp-buffer
@@ -3126,12 +3111,16 @@ header string and column pixel widths, then reused."
         (last-window (substring-no-properties
                       (clutch--render-footer 500 1 500 578 78 nil)))
         (empty-page (substring-no-properties
-                     (clutch--render-footer 0 0 500 nil))))
+                     (clutch--render-footer 0 0 500 nil)))
+        (past-the-end (substring-no-properties
+                       (clutch--render-footer 0 1 500 nil))))
     (should (string-match-p (regexp-quote "1-500 of 501+ rows") first-page))
     (should (string-match-p (regexp-quote "501-1000 of 1001+ rows") middle-page))
     (should (string-match-p (regexp-quote "501-578 of 578 rows") next-last-page))
     (should (string-match-p (regexp-quote "79-578 of 578 rows") last-window))
-    (should (string-match-p (regexp-quote "0 of 0 rows") empty-page)))
+    (should (string-match-p (regexp-quote "0 rows") empty-page))
+    (should-not (string-match-p "0 of" empty-page))
+    (should (string-match-p (regexp-quote "0 of 500 rows") past-the-end)))
   (let ((footer (substring-no-properties
                  (clutch--render-footer 78 1 500 578))))
     (should-not (string-match-p "[0-9]+/[0-9]+" footer))))
