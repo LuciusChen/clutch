@@ -6,6 +6,8 @@
 
 - The searchable result header now exists in the buffer only while a native search runs. Selecting everything, copying and aggregating no longer meet it, and `RET` on a matching column name leaves point on that column's first data cell.
 - `clutch-result-searchable-header-mode` and the `clutch-result-searchable-header` option are removed. Native isearch in a result buffer always finds column names; nothing needs enabling.
+- The main dispatch menu is headed by the connection it acts on, shows Transaction controls only on connections that have them, and groups Run, Objects and Tools separately. The result menu is headed by its connection, row count and page, no longer lists the cell and column movement keys (they work in the buffer as before), keeps itself open while a column is widened or narrowed or the grid is scrolled sideways, and shows the fullscreen state as `(off|on)`. No key changed.
+- A result with no rows now says "No rows." under its header instead of an empty buffer.
 
 ### Fixed
 
