@@ -1411,6 +1411,10 @@ ORDER BY c.ordinal_position"
 
 ;;;; Re-entrancy guard
 
+(cl-defmethod clutch-db-request-in-flight-p ((conn clutch-db-pg--connection))
+  "Return non-nil while PostgreSQL CONN has a request in flight."
+  (pgsql-busy-p (clutch-db-pg--connection-client conn)))
+
 (cl-defmethod clutch-db-busy-p ((conn clutch-db-pg--connection))
   "Return non-nil if PostgreSQL CONN is executing a query."
   (pgsql-busy-p (clutch-db-pg--connection-client conn)))

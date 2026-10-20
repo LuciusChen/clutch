@@ -2501,6 +2501,23 @@ Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
                   t)))
        ,@body)))
 
+(ert-deftest clutch-test-statement-waits-for-a-background-request ()
+  "A statement sent while background metadata holds the connection waits for it.
+The driver refuses a command on a connection with a request in flight."
+  (with-temp-buffer
+    (setq-local clutch-connection 'async-conn)
+    (clutch-test--with-async-statements finishes
+      (let* ((held t)
+             (probe (lambda (_orig _conn) held)))
+        (advice-add 'clutch-db-request-in-flight-p :around probe)
+        (unwind-protect
+            (progn
+              (run-with-timer 0.2 nil (lambda () (setq held nil)))
+              (clutch--execute-statement "SELECT 1" 'async-conn t nil #'ignore)
+              (should-not held)
+              (should (equal (mapcar #'car finishes) '("SELECT 1"))))
+          (advice-remove 'clutch-db-request-in-flight-p probe))))))
+
 (ert-deftest clutch-test-result-context-interruption-keeps-the-successful-reply ()
   "A failed context lookup must not lose a successful asynchronous query.
 An interrupted lookup ran before the activity guard, leaving its timer
