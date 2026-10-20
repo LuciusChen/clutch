@@ -120,11 +120,7 @@
   :group 'clutch)
 
 (defface clutch-header-active-face
-  '((((class color) (background light))
-     :background "#e5e7eb" :weight bold)
-    (((class color) (background dark))
-     :background "#263238" :weight bold)
-    (t :weight bold))
+  '((t :inherit hl-line :weight bold))
   "Face for the column header under the cursor."
   :group 'clutch)
 
@@ -213,26 +209,24 @@ Underlined to indicate clickable (RET to follow)."
 
 (defface clutch-pending-delete-face
   '((((class color) (background light))
-     :background "#fde8e8" :foreground "#9b1c1c" :strike-through t)
+     :inherit error :background "#fde8e8" :strike-through t)
     (((class color) (background dark))
-     :background "#3b1212" :foreground "#fca5a5" :strike-through t)
-    (t :strike-through t))
+     :inherit error :background "#3b1212" :strike-through t)
+    (t :inherit error :strike-through t))
   "Face for rows staged for deletion."
   :group 'clutch)
 
 (defface clutch-pending-insert-face
   '((((class color) (background light))
-     :background "#e6f4ea" :foreground "#1e4620")
+     :inherit success :background "#e6f4ea")
     (((class color) (background dark))
-     :background "#1a3320" :foreground "#86efac")
+     :inherit success :background "#1a3320")
     (t :inherit success))
   "Face for rows staged for insertion."
   :group 'clutch)
 
 (defface clutch-error-summary-face
-  '((((class color) (background dark)) :foreground "#ffb4b4" :weight semibold)
-    (((class color) (background light)) :foreground "#b42318" :weight semibold)
-    (t :inherit error :weight bold))
+  '((t :inherit error :weight semibold))
   "Face for SQL execution error summaries."
   :group 'clutch)
 

@@ -4,6 +4,7 @@
 
 ### Changed
 
+- The active result header, staged insert and delete rows and the SQL error summary take their colors from the theme (`hl-line`, `success` and `error`) instead of fixed light and dark hex values.
 - The searchable result header now exists in the buffer only while a native search runs. Selecting everything, copying and aggregating no longer meet it, and `RET` on a matching column name leaves point on that column's first data cell.
 - `clutch-result-searchable-header-mode` and the `clutch-result-searchable-header` option are removed. Native isearch in a result buffer always finds column names; nothing needs enabling.
 
