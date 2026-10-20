@@ -1730,6 +1730,55 @@ name it captured, not a stale index."
                                     'face description)
                   'transient-value)))))
 
+(defun clutch-test--result-view-after (first second)
+  "Present FIRST, scroll its result far down, present SECOND; return the view.
+The console stays selected and the result sits in another window, as when a
+statement runs from the console.  Return (START-LINE POINT-LINE) of the
+result window."
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (console (generate-new-buffer " *console*")))
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query conn "CREATE TABLE t (id INTEGER)")
+          (dotimes (i 200)
+            (clutch-db-query conn (format "INSERT INTO t VALUES (%d)" (1+ i))))
+          (delete-other-windows)
+          (switch-to-buffer console)
+          (clutch-test--execute-and-present first conn)
+          (let* ((result (window-buffer (selected-window)))
+                 (window (selected-window)))
+            (with-current-buffer result
+              (set-window-point window (aref clutch--row-start-positions 150))
+              (set-window-start window (aref clutch--row-start-positions 145)))
+            (redisplay t)
+            (select-window (split-window))
+            (switch-to-buffer console)
+            (clutch-test--execute-and-present second conn)
+            (redisplay t)
+            (let ((window (get-buffer-window result)))
+              (with-current-buffer result
+                (list (line-number-at-pos (window-start window))
+                      (line-number-at-pos (window-point window)))))))
+      (kill-buffer console)
+      (dolist (buffer (buffer-list))
+        (when (with-current-buffer buffer
+                (derived-mode-p 'clutch-result-mode))
+          (kill-buffer buffer)))
+      (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-another-query-starts-at-the-top ()
+  "A result for a different query is shown from its first row."
+  (should (equal (clutch-test--result-view-after
+                  "SELECT id FROM t" "SELECT id FROM t WHERE id > 0")
+                 '(1 1))))
+
+(ert-deftest clutch-test-rerun-keeps-the-scrolled-view ()
+  "Running the same query again keeps where the result was scrolled to."
+  (let ((view (clutch-test--result-view-after
+               "SELECT id FROM t" "SELECT id FROM t")))
+    (should (> (car view) 100))
+    (should (> (cadr view) 100))))
+
 (ert-deftest clutch-test-sort-transient-description-contract ()
   "Result sort transient description should reflect current sort context."
   (clutch-test--with-result-state
