@@ -1640,7 +1640,7 @@ ORDER BY ordinal_position"
                               (if (equal name "_id") "NO" "YES")
                               nil nil nil nil
                               (and (member name clutch-db-pg--xtdb-system-columns)
-                                   "YES")
+                                   "ALWAYS")
                               nil)
                         '("_id") nil)))
            ;; The details row takes a single type name only.
