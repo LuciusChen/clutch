@@ -808,14 +808,14 @@ ORDER BY ORDINAL_POSITION"
            (let* ((nullable (string= nullable-str "YES"))
                   (pk-p (member name pk-cols))
                   (fk (cdr (assoc name fks)))
-                  (generated (and extra
-                                  (string-match-p
-                                   "\\_<\\(auto_increment\\|VIRTUAL GENERATED\\|STORED GENERATED\\)\\_>"
-                                   extra)))
                   (read-only (and extra
                                   (string-match-p
                                    "\\_<\\(VIRTUAL\\|STORED\\) GENERATED\\_>"
-                                   extra))))
+                                   extra)))
+                  (generated (or read-only
+                                 (and extra
+                                      (string-match-p "\\_<auto_increment\\_>"
+                                                      extra)))))
              (list :name name :type type :nullable nullable
                    :primary-key (and pk-p t)
                    :foreign-key fk
