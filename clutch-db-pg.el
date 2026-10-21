@@ -654,7 +654,8 @@ information_schema type."
 
 (defun clutch-db-pg--column-details-row (row pk-cols fks)
   "Convert a column-details ROW to a clutch-db column plist.
-ROW's ninth value is \"YES\" for an identity or generated column.
+ROW's ninth value is \"ALWAYS\" for a column the server computes and
+refuses to update, and \"YES\" for any other identity column.
 PK-COLS is a list of primary key column names.
 FKS is an alist of (column-name . fk-plist)."
   (pcase-let ((`(,name ,dtype ,backend-type ,nullable-str ,max-len
@@ -663,7 +664,7 @@ FKS is an alist of (column-name . fk-plist)."
            (nullable (equal nullable-str "YES"))
            (pk-p     (member name pk-cols))
            (fk       (cdr (assoc name fks)))
-           (generated (or (equal generated-str "YES")
+           (generated (or (member generated-str '("YES" "ALWAYS"))
                           (and (stringp default-val)
                                (string-match-p "\\`nextval(" default-val)))))
       (let ((detail (list :name name :type type :nullable nullable
@@ -671,6 +672,7 @@ FKS is an alist of (column-name . fk-plist)."
                           :foreign-key fk
                           :default (and default-val (not generated) default-val)
                           :generated (and generated t)
+                          :read-only (equal generated-str "ALWAYS")
                           :comment (and (stringp comment)
                                         (not (string-empty-p comment))
                                         comment))))
@@ -1392,7 +1394,8 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
                (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
 c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
 c.column_default, \
-CASE WHEN c.is_identity = 'YES' OR c.is_generated = 'ALWAYS' THEN 'YES' END, \
+CASE WHEN c.is_generated = 'ALWAYS' OR c.identity_generation = 'ALWAYS' THEN 'ALWAYS' \
+WHEN c.is_identity = 'YES' THEN 'YES' END, \
 col_description(pc.oid, a.attnum) \
 FROM information_schema.columns c \
 JOIN pg_class pc ON pc.relname = c.table_name \
@@ -1637,7 +1640,7 @@ ORDER BY ordinal_position"
                               (if (equal name "_id") "NO" "YES")
                               nil nil nil nil
                               (and (member name clutch-db-pg--xtdb-system-columns)
-                                   "YES")
+                                   "ALWAYS")
                               nil)
                         '("_id") nil)))
            ;; The details row takes a single type name only.

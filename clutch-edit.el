@@ -709,7 +709,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                                :hscroll (window-hscroll win))))
              (edit-buf (get-buffer-create
                         (format "*clutch-edit: [%d].%s*" ridx col-name))))
-        (when (plist-get detail :generated)
+        (when (plist-get detail :read-only)
           (user-error "Cannot %s: source column %s is generated"
                       op source-column))
         (with-current-buffer edit-buf
@@ -1027,7 +1027,7 @@ Signal a `user-error' for OP when a column is not a writable source column."
         columns invalid)
     (dolist (cidx col-indices)
       (let ((detail (clutch-result--writable-source-detail table cidx op details)))
-        (if (and detail (not (plist-get detail :generated)))
+        (if (and detail (not (plist-get detail :read-only)))
             (let ((name (plist-get detail :name)))
               (push (cons cidx (cons name (clutch-result--column-backend-type
                                            table name cidx)))
