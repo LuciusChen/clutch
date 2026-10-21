@@ -4982,6 +4982,20 @@ the text that is sent."
           (should (equal (clutch-db-result-rows result) '(("ok"))))
           (should (= (clutch-db-result-affected-rows result) 1)))))))
 
+(ert-deftest clutch-db-test-pg-column-details-read-only-means-always ()
+  "Only a column the server computes refuses UPDATE; a serial or BY DEFAULT one takes it."
+  (require 'clutch-db-pg)
+  (cl-flet ((detail (default generated)
+              (clutch-db-pg--column-details-row
+               (list "c" "integer" "int4" "NO" nil nil nil default generated nil)
+               nil nil)))
+    (dolist (case '(("ALWAYS" nil t t) ("YES" nil t nil)
+                    ("NO" "nextval('s'::regclass)" t nil) ("NO" nil nil nil)))
+      (pcase-let ((`(,generated ,default ,generated-p ,read-only-p) case))
+        (let ((detail (detail default generated)))
+          (should (eq (and (plist-get detail :generated) t) generated-p))
+          (should (eq (plist-get detail :read-only) read-only-p)))))))
+
 (ert-deftest clutch-db-test-pg-column-details-keep-array-display-type ()
   "PostgreSQL column details should keep display type while saving backend type."
   (require 'clutch-db-pg)
@@ -6895,15 +6909,18 @@ PostgreSQL refuses a value for either."
              (format "CREATE TABLE %s (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
                      table))
-            (cl-flet ((generated-p (name)
-                        (plist-get (cl-find name (clutch-db-column-details conn table)
-                                            :key (lambda (detail)
-                                                   (plist-get detail :name))
-                                            :test #'equal)
-                                   :generated)))
+            (cl-flet* ((detail-of (name)
+                         (cl-find name (clutch-db-column-details conn table)
+                                  :key (lambda (detail) (plist-get detail :name))
+                                  :test #'equal))
+                       (generated-p (name) (plist-get (detail-of name) :generated))
+                       (read-only-p (name) (plist-get (detail-of name) :read-only)))
               (should (generated-p "id"))
               (should-not (generated-p "price"))
-              (should (generated-p "doubled"))))
+              (should (generated-p "doubled"))
+              (should (read-only-p "id"))
+              (should-not (read-only-p "price"))
+              (should (read-only-p "doubled"))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-row-identity-uses-ctid ()

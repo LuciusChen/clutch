@@ -719,7 +719,7 @@ It should explain an ended session and work on a lost one."
                           (:name "generated_name" :type-category text))
                   :row '(1 "alice")
                   :indices '(0 1)
-                  :details '((:name "id") (:name "generated_name" :generated t))
+                  :details '((:name "id") (:name "generated_name" :generated t :read-only t))
                   :message "Cannot copy UPDATE SQL: selected columns are not writable source columns: generated_name")))
     (ert-info ((format "copy UPDATE rejection: %s" (plist-get case :label)))
       (clutch-test--with-result-state
@@ -739,11 +739,27 @@ It should explain an ended session and work on a lost one."
                    (regexp-quote (plist-get case :message))
                    (error-message-string err))))))))
 
+(ert-deftest clutch-test-copy-update-accepts-columns-the-database-fills ()
+  "A column the database fills on INSERT, like an auto-increment one, takes UPDATE.
+Only a column the database computes refuses it."
+  (clutch-test--with-result-state
+      (:connection (make-clutch-test-conn :table "users"
+                                          :columns '((:name "id")
+                                                     (:name "seq" :generated t)))
+       :source-table "users"
+       :columns '("id" "seq")
+       :column-defs '((:name "id" :type-category numeric)
+                      (:name "seq" :type-category numeric))
+       :row-identity (clutch-test--primary-row-identity "users" '("id") '(0)))
+    (should (equal (clutch-result--build-update-statements-for-rows
+                    '((1 5)) '(1) "copy UPDATE SQL")
+                   '("UPDATE \"users\" SET \"seq\" = 5 WHERE \"id\" = 1")))))
+
 (ert-deftest clutch-test-staged-update-rejects-non-writable-source-columns ()
   "A staged edit should not build an UPDATE of a column no longer writable.
 Editing refuses such a column, so this happens when the table changes
 after the edit is staged."
-  (dolist (case '(("generated" ((:name "id") (:name "name" :generated t)))
+  (dolist (case '(("generated" ((:name "id") (:name "name" :generated t :read-only t)))
                   ("missing" ((:name "id")))))
     (ert-info ((car case))
       (with-temp-buffer
