@@ -2312,7 +2312,9 @@ Returns a list of plists with keys:
   :name STR  :type STR  :nullable BOOL
   :primary-key BOOL  :foreign-key PLIST-OR-NIL  :comment STR-OR-NIL
 Optional keys:
-  :default STR-OR-NIL  :generated BOOL  :backend-type ANY")
+  :default STR-OR-NIL  :backend-type ANY
+  :generated BOOL  the database fills the column on INSERT
+  :read-only BOOL  the database computes the column and refuses UPDATE")
 
 ;; Re-entrancy guard
 
