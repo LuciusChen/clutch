@@ -5042,6 +5042,8 @@ value is sent as, and the :null a union gains with a NULL adds none."
             (should (get "_id" :primary-key))
             (should-not (get "_id" :nullable))
             (should (get "_valid_from" :generated))
+            (should (get "_valid_from" :read-only))
+            (should-not (get "age" :read-only))
             (should (equal (get "age" :type) "bigint"))
             (should (equal (get "age" :backend-type) "int8"))
             (should (get "age" :nullable))
