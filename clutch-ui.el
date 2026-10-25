@@ -155,16 +155,27 @@ include text properties.  Return nil to fall back to default rendering."
   :group 'clutch)
 
 (defcustom clutch-number-format nil
-  "Pattern for the numbers of numeric result columns, or nil to show them as is.
+  "Pattern for the decimals of numeric result columns, or nil to show them as is.
 A subset of Java's DecimalFormat, as in DataGrip: a comma in the integer
 part groups thousands by three, and the fraction part sets the decimal
 places, with 0 for a digit always shown and # for one shown only when it is
 not zero.  \"#,##0.00\" shows 1234.5 as 1,234.50 and \"#,##0.##\" shows it as
-1,234.5.  Only what is displayed changes: copying, exporting, viewing and
+1,234.5.  Only values written with a decimal point are shaped; integers show
+as they are.  Only what is displayed changes: copying, exporting, viewing and
 editing use the stored value.  Digits are rounded half up, so 2.675 with
 \"0.00\" shows 2.68.  Text that is not plain decimal digits stays as it is."
   :type '(choice (const :tag "Off" nil)
                  (string :tag "Pattern"))
+  :group 'clutch)
+
+(defcustom clutch-number-grouping-separator ","
+  "Text that separates the thousands of a number shaped by `clutch-number-format'."
+  :type 'string
+  :group 'clutch)
+
+(defcustom clutch-number-decimal-separator "."
+  "Text that precedes the decimals of a number shaped by `clutch-number-format'."
+  :type 'string
   :group 'clutch)
 
 (defun clutch--case-insensitive-string= (left right)
@@ -294,19 +305,19 @@ and JSON values → JSON strings."
   "Return decimal TEXT shaped by the `clutch-number-format' PATTERN.
 Round half up on the digits of TEXT, which a float or an integer of fixed
 width cannot hold exactly.
-Return TEXT as it is when PATTERN or TEXT is not of the supported form."
+Return TEXT as it is when PATTERN is not of the supported form or TEXT is
+not decimal digits with a decimal point."
   (cl-block nil
     (unless (string-match "\\`\\([#0,]*\\)\\(?:\\.\\([0#]*\\)\\)?\\'" pattern)
       (cl-return text))
     (let ((group (string-search "," (match-string 1 pattern)))
           (min-places (cl-count ?0 (match-string 2 pattern)))
           (max-places (length (match-string 2 pattern))))
-      (unless (string-match "\\`\\(-?\\)\\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?\\'"
-                            text)
+      (unless (string-match "\\`\\(-?\\)\\([0-9]+\\)\\.\\([0-9]+\\)\\'" text)
         (cl-return text))
       (let ((sign (match-string 1 text))
             (int (match-string 2 text))
-            (frac (or (match-string 3 text) "")))
+            (frac (match-string 3 text)))
         (when (> (length frac) max-places)
           (let* ((digits (concat int (substring frac 0 max-places)))
                  (rounded (if (>= (aref frac max-places) ?5)
@@ -324,10 +335,11 @@ Return TEXT as it is when PATTERN or TEXT is not of the supported form."
                        (cons (substring int 0 head)
                              (cl-loop for i from head below (length int) by 3
                                       collect (substring int i (+ i 3))))
-                       ","))))
+                       clutch-number-grouping-separator))))
         (concat (and (string-match-p "[1-9]" (concat int frac)) sign)
                 int
-                (and (not (string-empty-p frac)) (concat "." frac)))))))
+                (and (not (string-empty-p frac))
+                     (concat clutch-number-decimal-separator frac)))))))
 
 (defun clutch--cell-text (val col-def)
   "Return VAL as result-cell text, shaped by `clutch-number-format' in COL-DEF."
@@ -1470,7 +1482,9 @@ scanning, or a list of changed column indices."
   "Return the cell render cache for PIXEL-METRIC."
   (let ((signature (list pixel-metric
                          clutch--column-displayer-version
-                         clutch-number-format
+                         (list clutch-number-format
+                               clutch-number-grouping-separator
+                               clutch-number-decimal-separator)
                          clutch--result-source-table
                          clutch--result-columns)))
     (unless (and (hash-table-p clutch--cell-render-cache)

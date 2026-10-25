@@ -4,7 +4,7 @@
 
 ### Added
 
-- `clutch-number-format` shapes the numbers of numeric result columns with a DecimalFormat-style pattern such as `"#,##0.00"` (thousands grouping and decimal places). It changes only what is displayed; copying, exporting and editing keep the stored value.
+- `clutch-number-format` shapes the decimals of numeric result columns with a DecimalFormat-style pattern such as `"#,##0.00"` (thousands grouping and decimal places); integers show as they are. `clutch-number-grouping-separator` and `clutch-number-decimal-separator` set the symbols it uses. It changes only what is displayed; copying, exporting and editing keep the stored value.
 
 ### Changed
 
