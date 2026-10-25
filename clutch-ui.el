@@ -154,6 +154,19 @@ include text properties.  Return nil to fall back to default rendering."
   :set #'clutch--set-column-displayers
   :group 'clutch)
 
+(defcustom clutch-number-format nil
+  "Pattern for the numbers of numeric result columns, or nil to show them as is.
+A subset of Java's DecimalFormat, as in DataGrip: a comma in the integer
+part groups thousands by three, and the fraction part sets the decimal
+places, with 0 for a digit always shown and # for one shown only when it is
+not zero.  \"#,##0.00\" shows 1234.5 as 1,234.50 and \"#,##0.##\" shows it as
+1,234.5.  Only what is displayed changes: copying, exporting, viewing and
+editing use the stored value.  Text that is not plain decimal digits stays as
+it is, and so does a value that needs rounding to more than 15 digits."
+  :type '(choice (const :tag "Off" nil)
+                 (string :tag "Pattern"))
+  :group 'clutch)
+
 (defun clutch--case-insensitive-string= (left right)
   "Return non-nil when LEFT and RIGHT match case-insensitively."
   (and (stringp left)
@@ -265,6 +278,51 @@ and JSON values → JSON strings."
              value)))
       (clutch--json-serialize-text (null-elements val) "query result value")))
    (t (format "%S" val))))
+
+(defun clutch--format-number-text (text pattern)
+  "Return decimal TEXT shaped by the `clutch-number-format' PATTERN.
+Return TEXT as it is when PATTERN or TEXT is not of the supported form, or
+when rounding it would need a float to hold more than 15 digits."
+  (cl-block nil
+    (unless (string-match "\\`\\([#0,]*\\)\\(?:\\.\\([0#]*\\)\\)?\\'" pattern)
+      (cl-return text))
+    (let ((group (string-search "," (match-string 1 pattern)))
+          (min-places (cl-count ?0 (match-string 2 pattern)))
+          (max-places (length (match-string 2 pattern)))
+          (number "\\`\\(-?\\)\\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?\\'"))
+      (unless (string-match number text)
+        (cl-return text))
+      (let ((sign (match-string 1 text))
+            (int (match-string 2 text))
+            (frac (or (match-string 3 text) "")))
+        (when (> (length frac) max-places)
+          (when (> (+ (length int) (length frac)) 15)
+            (cl-return text))
+          (let ((rounded (format (format "%%.%df" max-places)
+                                 (abs (string-to-number text)))))
+            (string-match number rounded)
+            (setq int (match-string 2 rounded)
+                  frac (or (match-string 3 rounded) ""))))
+        (setq frac (string-trim-right frac "0+"))
+        (setq frac (concat frac (make-string
+                                 (max 0 (- min-places (length frac))) ?0)))
+        (let (groups)
+          (while (and group (> (length int) 3))
+            (push (substring int -3) groups)
+            (setq int (substring int 0 -3)))
+          (concat (and (string-match-p "[1-9]" (concat int (string-join groups) frac))
+                       sign)
+                  (string-join (cons int groups) ",")
+                  (and (not (string-empty-p frac)) (concat "." frac))))))))
+
+(defun clutch--cell-text (val col-def)
+  "Return VAL as result-cell text, shaped by `clutch-number-format' in COL-DEF."
+  (let ((text (clutch--format-value val)))
+    (if (and clutch-number-format
+             (clutch--numeric-type-p col-def)
+             (or (numberp val) (stringp val)))
+        (clutch--format-number-text text clutch-number-format)
+      text)))
 
 (defun clutch--json-normalize-text (text)
   "Return TEXT parsed and serialized as compact JSON."
@@ -711,11 +769,11 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
     (:clutch-default-placeholder "<default>")
     (_ nil)))
 
-(defun clutch--column-width-sample (val)
-  "Return the untruncated result-cell text used to size VAL."
+(defun clutch--column-width-sample (val col-def)
+  "Return the untruncated result-cell text used to size VAL in COL-DEF."
   (or (clutch--cell-placeholder-value val)
       (and (null val) clutch--null-cell-display-text)
-      (clutch--format-value val)))
+      (clutch--cell-text val col-def)))
 
 (defun clutch--capped-string-width (text limit)
   "Return the display width of TEXT, stopping once LIMIT is reached.
@@ -760,7 +818,8 @@ Returns a vector of integers."
                  (cl-loop for row in sample
                           while (< width max-w)
                           for formatted = (clutch--column-width-sample
-                                           (and (< i (length row)) (aref row i)))
+                                           (and (< i (length row)) (aref row i))
+                                           (car defs))
                           do (setq width
                                    (max width (clutch--capped-string-width
                                                formatted max-w))))
@@ -1267,7 +1326,8 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
                          (cons clutch--null-cell-display-text nil))
                         (t
                          (clutch--cell-visible-prefix
-                          (clutch--format-value display-val)
+                          (clutch--cell-text display-val
+                                             (unless edited col-def))
                           w)))))
          (s (car-safe display))
          (value-truncated (cdr-safe display))
@@ -1396,6 +1456,7 @@ scanning, or a list of changed column indices."
   "Return the cell render cache for PIXEL-METRIC."
   (let ((signature (list pixel-metric
                          clutch--column-displayer-version
+                         clutch-number-format
                          clutch--result-source-table
                          clutch--result-columns)))
     (unless (and (hash-table-p clutch--cell-render-cache)
