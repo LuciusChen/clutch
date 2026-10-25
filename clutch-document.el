@@ -514,9 +514,7 @@ path expressions."
     (set-keymap-parent map prog-mode-map)
     (clutch-mongodb--install-query-keybindings map)
     (define-key map (kbd "C-c TAB") #'clutch-mongodb-complete-at-point)
-    (define-key map (kbd "C-c <tab>") #'clutch-mongodb-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-mongodb-complete-or-indent)
-    (define-key map (kbd "<tab>") #'clutch-mongodb-complete-or-indent)
     map)
   "Keymap for `clutch-mongodb-mode'.")
 
