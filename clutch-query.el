@@ -2418,9 +2418,7 @@ It appears where a query shows its result."
     (define-key map (kbd "C-c C-z") #'clutch-show-result)
     (define-key map (kbd "C-c C-n") #'undefined)
     (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
-    (define-key map (kbd "C-c <tab>") #'clutch-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
-    (define-key map (kbd "<tab>") #'clutch-complete-qualified-or-indent)
     map)
   "Keymap for `clutch-mode'.")
 
