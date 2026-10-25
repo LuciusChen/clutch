@@ -161,8 +161,8 @@ part groups thousands by three, and the fraction part sets the decimal
 places, with 0 for a digit always shown and # for one shown only when it is
 not zero.  \"#,##0.00\" shows 1234.5 as 1,234.50 and \"#,##0.##\" shows it as
 1,234.5.  Only what is displayed changes: copying, exporting, viewing and
-editing use the stored value.  Text that is not plain decimal digits stays as
-it is, and so does a value that needs rounding to more than 15 digits."
+editing use the stored value.  Digits are rounded half up, so 2.675 with
+\"0.00\" shows 2.68.  Text that is not plain decimal digits stays as it is."
   :type '(choice (const :tag "Off" nil)
                  (string :tag "Pattern"))
   :group 'clutch)
@@ -279,41 +279,55 @@ and JSON values → JSON strings."
       (clutch--json-serialize-text (null-elements val) "query result value")))
    (t (format "%S" val))))
 
+(defun clutch--increment-digit-string (digits)
+  "Return the decimal digit string DIGITS plus one, a carry adding a digit."
+  (let ((end (length digits)))
+    (while (and (> end 0) (eq (aref digits (1- end)) ?9))
+      (setq end (1- end)))
+    (if (zerop end)
+        (concat "1" (make-string (length digits) ?0))
+      (concat (substring digits 0 (1- end))
+              (string (1+ (aref digits (1- end))))
+              (make-string (- (length digits) end) ?0)))))
+
 (defun clutch--format-number-text (text pattern)
   "Return decimal TEXT shaped by the `clutch-number-format' PATTERN.
-Return TEXT as it is when PATTERN or TEXT is not of the supported form, or
-when rounding it would need a float to hold more than 15 digits."
+Round half up on the digits of TEXT, which a float or an integer of fixed
+width cannot hold exactly.
+Return TEXT as it is when PATTERN or TEXT is not of the supported form."
   (cl-block nil
     (unless (string-match "\\`\\([#0,]*\\)\\(?:\\.\\([0#]*\\)\\)?\\'" pattern)
       (cl-return text))
     (let ((group (string-search "," (match-string 1 pattern)))
           (min-places (cl-count ?0 (match-string 2 pattern)))
-          (max-places (length (match-string 2 pattern)))
-          (number "\\`\\(-?\\)\\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?\\'"))
-      (unless (string-match number text)
+          (max-places (length (match-string 2 pattern))))
+      (unless (string-match "\\`\\(-?\\)\\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?\\'"
+                            text)
         (cl-return text))
       (let ((sign (match-string 1 text))
             (int (match-string 2 text))
             (frac (or (match-string 3 text) "")))
         (when (> (length frac) max-places)
-          (when (> (+ (length int) (length frac)) 15)
-            (cl-return text))
-          (let ((rounded (format (format "%%.%df" max-places)
-                                 (abs (string-to-number text)))))
-            (string-match number rounded)
-            (setq int (match-string 2 rounded)
-                  frac (or (match-string 3 rounded) ""))))
+          (let* ((digits (concat int (substring frac 0 max-places)))
+                 (rounded (if (>= (aref frac max-places) ?5)
+                              (clutch--increment-digit-string digits)
+                            digits))
+                 (split (- (length rounded) max-places)))
+            (setq int (substring rounded 0 split)
+                  frac (substring rounded split))))
         (setq frac (string-trim-right frac "0+"))
         (setq frac (concat frac (make-string
                                  (max 0 (- min-places (length frac))) ?0)))
-        (let (groups)
-          (while (and group (> (length int) 3))
-            (push (substring int -3) groups)
-            (setq int (substring int 0 -3)))
-          (concat (and (string-match-p "[1-9]" (concat int (string-join groups) frac))
-                       sign)
-                  (string-join (cons int groups) ",")
-                  (and (not (string-empty-p frac)) (concat "." frac))))))))
+        (when group
+          (let ((head (if (zerop (% (length int) 3)) 3 (% (length int) 3))))
+            (setq int (string-join
+                       (cons (substring int 0 head)
+                             (cl-loop for i from head below (length int) by 3
+                                      collect (substring int i (+ i 3))))
+                       ","))))
+        (concat (and (string-match-p "[1-9]" (concat int frac)) sign)
+                int
+                (and (not (string-empty-p frac)) (concat "." frac)))))))
 
 (defun clutch--cell-text (val col-def)
   "Return VAL as result-cell text, shaped by `clutch-number-format' in COL-DEF."
