@@ -390,15 +390,28 @@
                   ("2024" "0.00" "2024.00")
                   ("3.14159" "0.##" "3.14")
                   ("999.999" "#,##0.00" "1,000.00")
+                  ;; Exact decimals round on their digits, not through a float.
+                  ("2.675" "0.00" "2.68")
+                  ("1.015" "0.00" "1.02")
+                  ("0.005" "0.00" "0.01")
+                  ("12345678901234567890.125" "#.##" "12345678901234567890.13")
+                  ("12345678901234567890" "#,##0" "12,345,678,901,234,567,890")
                   ("-1234567.891" "#,##0.0#" "-1,234,567.89")
                   ("-0.001" "0.00" "0.00")
-                  ;; Not plain decimals, or too long to round through a float.
+                  ;; Not plain decimals.
                   ("1e+20" "#,##0.00" "1e+20")
-                  ("12345678901234567890.123" "#.##" "12345678901234567890.123")
                   ("1234.5" "not a pattern" "1234.5")))
     (pcase-let ((`(,text ,pattern ,expected) case))
       (ert-info ((format "%s with %s" text pattern))
         (should (equal (clutch--format-number-text text pattern) expected))))))
+
+(ert-deftest clutch-test-number-format-handles-very-long-digit-strings ()
+  "Rounding and grouping work on the digit string, whatever its length."
+  (let* ((nines (make-string 30000 ?9))
+         (carried (clutch--format-number-text (concat nines ".5") "0")))
+    (should (equal carried (concat "1" (make-string 30000 ?0))))
+    (should (= (length (clutch--format-number-text nines "#,##0"))
+               (+ 30000 (/ (1- 30000) 3))))))
 
 (ert-deftest clutch-test-number-format-applies-to-numeric-columns-for-display ()
   "The pattern shows in numeric columns while cells keep the stored value."
