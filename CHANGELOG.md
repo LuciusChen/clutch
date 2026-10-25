@@ -2,6 +2,10 @@
 
 ## 0.7.1 - Unreleased
 
+### Added
+
+- `clutch-number-format` shapes the numbers of numeric result columns with a DecimalFormat-style pattern such as `"#,##0.00"` (thousands grouping and decimal places). It changes only what is displayed; copying, exporting and editing keep the stored value.
+
 ### Changed
 
 - The active result header, staged insert and delete rows and the SQL error summary take their colors from the theme (`hl-line`, `success` and `error`) instead of fixed light and dark hex values.
