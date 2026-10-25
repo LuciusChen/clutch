@@ -1658,6 +1658,21 @@ name it captured, not a stale index."
       (clutch-db-disconnect other)
       (when (clutch-db-live-p conn) (clutch-db-disconnect conn)))))
 
+(ert-deftest clutch-test-editing-maps-leave-the-tab-function-key-alone ()
+  "Query buffers bind TAB and leave <tab> to minor modes that cycle on it.
+A <tab> entry in a major mode map outranks their TAB bindings in a GUI."
+  (require 'clutch-document)
+  (dolist (case '((clutch-mode-map clutch-complete-qualified-or-indent
+                                   clutch-complete-at-point)
+                  (clutch-mongodb-mode-map clutch-mongodb-complete-or-indent
+                                           clutch-mongodb-complete-at-point)))
+    (pcase-let ((`(,map ,tab ,complete) case))
+      (ert-info ((symbol-name map))
+        (should (eq (lookup-key (symbol-value map) (kbd "TAB")) tab))
+        (should (eq (lookup-key (symbol-value map) (kbd "C-c TAB")) complete))
+        (should-not (lookup-key (symbol-value map) [tab]))
+        (should-not (lookup-key (symbol-value map) (kbd "C-c <tab>")))))))
+
 (ert-deftest clutch-test-query-dispatches-route-x-to-dwim ()
   "SQL and MongoDB dispatch menus should share the DWIM execute route."
   (require 'clutch-document)
