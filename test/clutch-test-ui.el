@@ -382,6 +382,55 @@
                  (* 10 (string-width string))))))
     (should (clutch--pixel-metric-signature))))
 
+(ert-deftest clutch-test-number-format-shapes-decimal-text ()
+  "A pattern groups thousands and sets the decimal places of plain decimals."
+  (dolist (case '(("1234.5" "#,##0.00" "1,234.50")
+                  ("1234.5" "#,##0.##" "1,234.5")
+                  ("1234567" "#,##0" "1,234,567")
+                  ("2024" "0.00" "2024.00")
+                  ("3.14159" "0.##" "3.14")
+                  ("999.999" "#,##0.00" "1,000.00")
+                  ;; Exact decimals round on their digits, not through a float.
+                  ("2.675" "0.00" "2.68")
+                  ("1.015" "0.00" "1.02")
+                  ("0.005" "0.00" "0.01")
+                  ("12345678901234567890.125" "#.##" "12345678901234567890.13")
+                  ("12345678901234567890" "#,##0" "12,345,678,901,234,567,890")
+                  ("-1234567.891" "#,##0.0#" "-1,234,567.89")
+                  ("-0.001" "0.00" "0.00")
+                  ;; Not plain decimals.
+                  ("1e+20" "#,##0.00" "1e+20")
+                  ("1234.5" "not a pattern" "1234.5")))
+    (pcase-let ((`(,text ,pattern ,expected) case))
+      (ert-info ((format "%s with %s" text pattern))
+        (should (equal (clutch--format-number-text text pattern) expected))))))
+
+(ert-deftest clutch-test-number-format-handles-very-long-digit-strings ()
+  "Rounding and grouping work on the digit string, whatever its length."
+  (let* ((nines (make-string 30000 ?9))
+         (carried (clutch--format-number-text (concat nines ".5") "0")))
+    (should (equal carried (concat "1" (make-string 30000 ?0))))
+    (should (= (length (clutch--format-number-text nines "#,##0"))
+               (+ 30000 (/ (1- 30000) 3))))))
+
+(ert-deftest clutch-test-number-format-applies-to-numeric-columns-for-display ()
+  "The pattern shows in numeric columns while cells keep the stored value."
+  (let ((clutch-number-format "#,##0.00"))
+    (clutch-test--with-result-state
+        (:columns '("amount" "code")
+         :column-defs '((:name "amount" :type-category numeric)
+                        (:name "code" :type-category text))
+         :rows '((1234.5 "1234.5"))
+         :column-widths [12 8])
+      (cl-letf (((symbol-function 'clutch--refresh-footer-line) #'ignore))
+        (clutch--render-result))
+      (should (string-match-p "1,234.50" (buffer-string)))
+      (should-not (string-match-p "1,234.5[^0]" (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "1,234.50")
+      (should (eql (get-text-property (1- (point)) 'clutch-full-value) 1234.5))
+      (should (string-match-p "1234.5 " (buffer-string))))))
+
 (ert-deftest clutch-test-result-grid-aligns-mixed-width-custom-displays ()
   "Result headers and custom display subregions should share rendered widths."
   (let ((clutch-column-displayers nil)
