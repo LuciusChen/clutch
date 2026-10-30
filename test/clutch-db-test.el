@@ -4448,6 +4448,57 @@ arrives, so it must already be the new one."
             (quit nil)))
         (should (equal calls '((t nil))))))))
 
+(ert-deftest clutch-db-test-mysql-results-show-their-warnings ()
+  "A MySQL result with warnings should show what SHOW WARNINGS lists.
+A statement without warnings asks nothing more, and one whose warnings
+cannot be read still delivers its result, with the reason as a message."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        (readable t)
+        queries)
+    (cl-letf (((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (push sql queries)
+                 (cond
+                  ((not (equal sql "SHOW WARNINGS"))
+                   (make-mysql-result
+                    :connection conn :affected-rows 1
+                    :warnings (if (string-prefix-p "INSERT" sql) 2 0)))
+                  (readable
+                   (make-mysql-result
+                    :connection conn
+                    :rows '(("Warning" 1265 "Data truncated for column 'n' at row 1")
+                            ("Note" 1051 "Unknown table 't'"))))
+                  (t (signal 'mysql-query-error '("lost")))))))
+      (should (equal (clutch-db-result-messages
+                      (clutch-db-query conn "INSERT INTO t VALUES (1)"))
+                     '("Warning (1265): Data truncated for column 'n' at row 1"
+                       "Note (1051): Unknown table 't'")))
+      (setq queries nil)
+      (should-not (clutch-db-result-messages
+                   (clutch-db-query conn "UPDATE t SET n = 1")))
+      (should (equal queries '("UPDATE t SET n = 1")))
+      (setq readable nil)
+      (should (equal (clutch-db-result-messages
+                      (clutch-db-query conn "INSERT INTO t VALUES (2)"))
+                     '("Warnings could not be read: lost"))))
+    ;; Asking for the database after a USE would replace the warnings.
+    (let (finish result)
+      (setq queries nil)
+      (cl-letf (((symbol-function 'mysql-query)
+                 (lambda (_conn sql)
+                   (push sql queries)
+                   (make-mysql-result :connection conn :rows '(("Note" 1 "kept")))))
+                ((symbol-function 'mysql-query-async)
+                 (lambda (_conn _sql callback) (setq finish callback)))
+                ((symbol-function 'mysql-refresh-current-database)
+                 (lambda (_conn) (push "SELECT DATABASE()" queries))))
+        (should (clutch-db-query-async conn "USE app"
+                                       (lambda (r _error) (setq result r))))
+        (funcall finish (make-mysql-result :connection conn :warnings 1) nil)
+        (should (equal (reverse queries) '("SHOW WARNINGS" "SELECT DATABASE()")))
+        (should (equal (clutch-db-result-messages result) '("Note (1): kept")))))))
+
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
   "MySQL schema switching should execute USE and update the connection database."
   (let ((conn (make-mysql-conn :database "sales"))
@@ -6450,6 +6501,18 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
  clutch-db-test--with-mysql
  (:db-live :mysql-live)
  "MySQL")
+
+(ert-deftest clutch-db-test-mysql-live-results-show-warnings ()
+  "MySQL warnings raised by a statement should come with its result."
+  :tags '(:db-live :mysql-live)
+  (clutch-db-test--with-mysql conn
+    (let ((messages (clutch-db-result-messages
+                     (clutch-db-query
+                      conn "DROP TABLE IF EXISTS clutch_no_such_table"))))
+      (should (= (length messages) 1))
+      (should (string-match-p
+               "\\`Note (1051): Unknown table '.*clutch_no_such_table'\\'"
+               (car messages))))))
 
 (ert-deftest clutch-db-test-mysql-live-authinfo-profile-connect ()
   "MySQL should connect through an authinfo `:profile-entry'."
