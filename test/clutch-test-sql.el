@@ -1868,6 +1868,37 @@ Structure is not interpreted here; callers confirm depth and literals through
                           (funcall annotation-function "u.id"))
                          "  u (users)")))))))
 
+(ert-deftest clutch-test-completion-at-point-empty-slots-follow-the-query-scope ()
+  "Empty-slot completion should offer only point's query branch, after no value."
+  (dolist (case '(("select sum(|) from users u union all select id from orders o"
+                   ("id" "name"))
+                  ("select id from users u union all select id from orders o where |"
+                   ("id" "user_id"))
+                  ("select coalesce(/* note */ |) from users u" ("id" "name"))
+                  ("select coalesce('fallback' |) from users u" nil)
+                  ("select 'x' | from users u" nil)))
+    (pcase-let ((`(,sql ,expected) case))
+      (ert-info ((format "sql: %s" sql))
+        (with-temp-buffer
+          (clutch-mode)
+          (insert sql)
+          (goto-char (point-min))
+          (search-forward "|")
+          (delete-char -1)
+          (let ((schema (make-hash-table :test 'equal))
+                (clutch-connection 'fake))
+            (puthash "users" '("id" "name") schema)
+            (puthash "orders" '("id" "user_id") schema)
+            (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                       (lambda (&optional _conn) schema))
+                      ((symbol-function 'clutch-db-busy-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch-db-completion-sync-columns-p)
+                       (lambda (_conn) t)))
+              (let ((capf (clutch-completion-at-point)))
+                (should (equal (and capf (clutch-test--completion-candidates capf))
+                               expected))))))))))
+
 (ert-deftest clutch-test-completion-at-point-resolves-aliases-inside-function-calls ()
   "An alias qualifier inside parentheses should resolve through the outer FROM."
   (dolist (sql '("select count(u.|) from users u join orders o on u.id = o.user_id"

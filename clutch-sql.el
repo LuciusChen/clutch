@@ -575,19 +575,21 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
           (when table (push table tables)))))
     (cons (nreverse tables) (nreverse aliases))))
 
-(defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings in SCHEMA for point's query scope.
+(defun clutch--query-scope-tables-and-aliases (schema)
+  "Return (TABLES . ALIASES) in SCHEMA for point's query scope.
 The scope is the innermost SELECT or set-operation branch around point, so
-expression parentheses like SUM(...) do not hide its FROM/JOIN aliases."
+expression parentheses like SUM(...) do not hide its FROM/JOIN sources.
+Outside every SELECT, it is point's top-level set-operation branch."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (stmt-beg (plist-get entry :beg))
          (text (buffer-substring-no-properties stmt-beg (plist-get entry :end)))
          (range (if-let* ((scope (clutch--completion-query-scope entry)))
                     (cons (nth 0 scope) (nth 1 scope))
-                  (clutch--union-branch-range text (- (point) stmt-beg)))))
+                  (clutch--toplevel-union-branch-range text (- (point) stmt-beg)))))
     (if (equal range (cons 0 (length text)))
-        (plist-get entry :statement-aliases)
-      (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
+        (cons (plist-get entry :statement-tables)
+              (plist-get entry :statement-aliases))
+      (clutch--extract-tables-and-aliases text (car range) (cdr range) t))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
   "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
@@ -838,7 +840,7 @@ like `orders.id' within the current statement."
   (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
               (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
     (or (cdr (assoc-string qualifier
-                           (clutch--table-aliases-in-current-statement schema)
+                           (cdr (clutch--query-scope-tables-and-aliases schema))
                            t))
         (let* ((tables (clutch--tables-in-current-statement schema))
                (matches
@@ -1454,17 +1456,20 @@ loading."
     (cons (point) (point))))
 
 (defun clutch--completion-table-sources (schema tables)
-  "Return visible table sources from SCHEMA for TABLES in the current statement."
-  (let* ((aliases (and schema (clutch--table-aliases-in-current-statement schema)))
-         (aliased-tables (mapcar #'cdr aliases))
-         sources)
+  "Return visible table sources from SCHEMA for TABLES at point.
+Only tables of point's query scope are visible, by alias when they have one."
+  (pcase-let* ((`(,scope-tables . ,aliases)
+                (clutch--query-scope-tables-and-aliases schema))
+               (aliased-tables (mapcar #'cdr aliases))
+               (sources nil))
     (dolist (alias aliases)
       (when (and (car alias) (cdr alias))
         (push (list :qualifier (car alias)
                     :table (cdr alias))
               sources)))
     (dolist (table tables)
-      (unless (member table aliased-tables)
+      (when (and (member table scope-tables)
+                 (not (member table aliased-tables)))
         (push (list :qualifier table :table table)
               sources)))
     (nreverse sources)))
@@ -1537,10 +1542,11 @@ Such a slot directly follows START, a comma or an opening parenthesis."
         last)
     (while (< pos offset)
       (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
-          (if (> skip offset)
-              (setq last 'other
-                    pos offset)
-            (setq pos skip))
+          (progn
+            ;; A string is a value; a comment leaves the slot as it was.
+            (when (or (> skip offset) (not (memq (aref sql pos) '(?- ?/))))
+              (setq last 'other))
+            (setq pos (min skip offset)))
         (let ((ch (aref sql pos)))
           (unless (memq ch '(?\s ?\t ?\n ?\r))
             (setq last ch))
