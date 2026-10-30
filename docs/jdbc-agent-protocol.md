@@ -205,6 +205,8 @@ For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1 
 
 `query-timeout-seconds` limits the statement through `Statement.setQueryTimeout`, and the agent waits one second longer for the statement and for each batch it fetches before cancelling it itself.  `0` sets no limit: the agent waits until the statement ends, is cancelled, or its connection is force-disconnected.  Omitting the field keeps a 29-second limit for older clients, and a negative value is rejected before JDBC work or cursor advancement.  Agents before 0.2.26 treat `0` like omission.  clutch sends a statement it runs without blocking the configured limit, or `0` without one; a request it waits on always carries a positive timeout: the configured limit when shorter, otherwise its RPC timeout less five seconds, and at least one second.
 
+An `execute` or `execute-params` result also carries `messages` when the driver attached warnings to the statement while it ran: the text of its `SQLWarning` chain, oldest first, such as SQL Server `PRINT` output or PostgreSQL notices. Warnings attached later, to a following result or while fetching, are not read. At most 100 are sent, followed by one message counting the rest. A failure to read the chain becomes one message, since the statement itself succeeded. Older agents omit the field.
+
 ## Table metadata payload
 
 `get-tables` returns a cursor-shaped result:

@@ -1185,6 +1185,27 @@ tracks, and a disconnect no longer asked first."
                        '("中文" 17)))
         (should (= (clutch-db-result-affected-rows result) 2))))))
 
+(ert-deftest clutch-db-test-jdbc-results-show-the-agents-messages ()
+  "JDBC results should show the warnings the agent reports for a statement."
+  (let ((conn (make-clutch-jdbc-conn
+               :conn-id 23 :params '(:driver sqlserver :rpc-timeout 12)))
+        (response '(:type "dml" :affected-rows 2
+                    :messages ("10 records moved" "done"))))
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (&rest _) response)))
+      (should (equal (clutch-db-result-messages
+                      (clutch-db-query conn "EXEC move_records"))
+                     '("10 records moved" "done")))
+      (setq response '(:type "query" :columns ("n") :col-types ("INTEGER")
+                       :rows ((1)) :done t :messages ("Warning: note")))
+      (should (equal (clutch-db-result-messages
+                      (clutch-db-query conn "SELECT 1"))
+                     '("Warning: note")))
+      ;; Agents before the field, and statements without warnings.
+      (setq response '(:type "dml" :affected-rows 1))
+      (should-not (clutch-db-result-messages
+                   (clutch-db-query conn "UPDATE t SET n = 1"))))))
+
 (ert-deftest clutch-db-test-native-mysql-manual-commit-follows-autocommit ()
   "Native MySQL manual-commit should mirror session autocommit state."
   (require 'clutch-db-mysql)

@@ -5,6 +5,7 @@
 ### Added
 
 - MySQL and MariaDB warnings show as text above a statement's summary, and in the console, as `Warning (1265): Data truncated for column 'n' at row 1`. Clutch reads at most 100 with `SHOW WARNINGS` right after a statement reports any, and counts the rest.
+- JDBC connections show the warnings a driver attaches to a statement, such as SQL Server `PRINT` output and PostgreSQL notices, above the statement's summary and in the console, at most 100 per statement. This needs a clutch-jdbc-agent that reports them; older agents leave results as before.
 - PostgreSQL server notices, such as `RAISE NOTICE` output and `VACUUM VERBOSE` progress, show above the summary of a statement that returns no rows, and in the console for any statement, the way psql prints them. This needs a pgsql.el that provides `pgsql-result-notices`. A result grid does not show them yet, and JDBC connections do not collect them.
 - `clutch-number-format` shapes the decimals of numeric result columns with a DecimalFormat-style pattern such as `"#,##0.00"` (thousands grouping and decimal places); integers show as they are. `clutch-number-grouping-separator` and `clutch-number-decimal-separator` set the symbols it uses. It changes only what is displayed; copying, exporting and editing keep the stored value.
 
