@@ -1936,6 +1936,20 @@ throughout."
                                                (clutch-test--live-row-prefix-strings row 1))
                                              rows)
                                      (list (list (cadr case))))))))
+                ;; Inside function-call parentheses, an empty argument and an
+                ;; alias without a prefix offer the table's columns.
+                (dolist (sql '("SELECT max(|) FROM %s u"
+                               "SELECT max(u.|) FROM %s u"))
+                  (ert-info (sql)
+                    (erase-buffer)
+                    (insert (string-replace "%s" table sql))
+                    (goto-char (point-min))
+                    (search-forward "|")
+                    (delete-char -1)
+                    (should (clutch-test--live-name-member-p
+                             "UserName"
+                             (clutch-test--completion-candidates
+                              (clutch-completion-at-point))))))
                 (when (eq (clutch-test-live-backend-id) 'oracle)
                   ;; Empty quoted prefixes must reach Oracle's cold search path.
                   (puthash table nil (gethash conn clutch--schema-cache))
