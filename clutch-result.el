@@ -954,11 +954,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
                                    (user-error "Result buffer no longer exists"))))
         (with-current-buffer result-buf
           (clutch-result--discard-pending-at ridx cidx))
-        (clutch-record--render)
-        (goto-char (point-min))
-        (when-let* ((match (text-property-search-forward
-                            'clutch-col-idx cidx #'eq)))
-          (goto-char (prop-match-beginning match))))
+        (clutch-record--revert))
     (let ((ridx (or (clutch--row-idx-at-line)
                     (user-error "No row at point")))
           (cidx (clutch--col-idx-at-point)))
@@ -4043,7 +4039,7 @@ previous window layout."
   \\[clutch-record-view-value]	View current field once
   \\[clutch-record-refresh]	Refresh"
   (setq truncate-lines nil)
-  (setq-local revert-buffer-function #'clutch-record--render)
+  (setq-local revert-buffer-function #'clutch-record--revert)
   (add-hook 'post-command-hook #'clutch--schedule-cell-preview nil t)
   (add-hook 'kill-buffer-hook #'clutch--cleanup-cell-preview nil t)
   (add-hook 'change-major-mode-hook #'clutch--cleanup-cell-preview nil t))
@@ -4273,11 +4269,20 @@ Selects JSON, XML, or binary string view based on column type and content."
                       (nth cidx clutch--result-column-defs)))))
     (clutch--dispatch-view val col-def)))
 
+(defun clutch-record--revert (&optional _ignore-auto _noconfirm)
+  "Render the Record buffer again, keeping point on its field.
+Background metadata reverts the buffer while the user may be on a field."
+  (let ((cidx (get-text-property (point) 'clutch-col-idx)))
+    (clutch-record--render)
+    (when-let* ((cidx)
+                (match (text-property-search-forward 'clutch-col-idx cidx #'eq)))
+      (goto-char (prop-match-beginning match)))))
+
 ;;;###autoload
 (defun clutch-record-refresh ()
   "Refresh the Record buffer."
   (interactive)
-  (clutch-record--render))
+  (clutch-record--revert))
 
 ;;;; Dispatch menus
 

@@ -2338,6 +2338,24 @@ Point left behind made the next cell command scroll back to it."
                                 (clutch--build-render-state))
       (should (string-prefix-p "│E  1 " (buffer-string))))))
 
+(ert-deftest clutch-test-record-revert-keeps-point-on-its-field ()
+  "Reverting a Record buffer, as background metadata does, should keep the field."
+  (clutch-test--with-result-state-buffer result-buf
+      (:columns '("id" "name")
+       :column-defs '((:name "id" :type-category numeric)
+                      (:name "name" :type-category text))
+       :rows '((1 "before")))
+    (with-temp-buffer
+      (clutch-record-mode)
+      (setq-local clutch-record--result-buffer result-buf
+                  clutch-record--row-idx 0
+                  clutch-record--expanded-fields nil)
+      (clutch-record--render)
+      (goto-char (prop-match-beginning
+                  (text-property-search-forward 'clutch-col-idx 1 #'eq)))
+      (revert-buffer t t)
+      (should (eq (get-text-property (point) 'clutch-col-idx) 1)))))
+
 (ert-deftest clutch-test-record-render-contract ()
   "Record render should reflect result state, display rules, and context."
   (clutch-test--with-result-state-buffer result-buf
