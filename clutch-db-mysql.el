@@ -170,21 +170,28 @@ An INSERT of many rows can raise one per row, up to `max_error_count'.")
 
 (defun clutch-db-mysql--warning-messages (conn count)
   "Return the COUNT warnings of CONN's last statement as display strings.
-Past `clutch-db-mysql--max-warning-messages', one message counts the rest.
-The statement already ran, so a failure to read them becomes a message
-rather than its error, which would also stop an asynchronous callback."
+Warnings past `clutch-db-mysql--max-warning-messages', or past the
+server's `max_error_count', are counted in one message.  The statement
+already ran, so a failure to read them becomes a message rather than its
+error, which would also stop an asynchronous callback, after a timeout
+has resynchronized or closed CONN."
   (when (and count (> count 0))
     (condition-case err
-        (append
-         (mapcar (pcase-lambda (`(,level ,code ,message))
-                   (format "%s (%s): %s" level code message))
-                 (mysql-result-rows
-                  (mysql-query conn (format "SHOW WARNINGS LIMIT %d"
-                                            clutch-db-mysql--max-warning-messages))))
-         (when (> count clutch-db-mysql--max-warning-messages)
-           (list (format "%d more warnings not shown"
-                         (- count clutch-db-mysql--max-warning-messages)))))
-      (mysql-error
+        (let ((rows (condition-case timeout
+                        (mysql-result-rows
+                         (mysql-query
+                          conn (format "SHOW WARNINGS LIMIT %d"
+                                       clutch-db-mysql--max-warning-messages)))
+                      (mysql-timeout
+                       (clutch-db-mysql--handle-query-timeout conn timeout)))))
+          (append
+           (mapcar (pcase-lambda (`(,level ,code ,message))
+                     (format "%s (%s): %s" level code message))
+                   rows)
+           (when (> count (length rows))
+             (list (format "%d more warnings not shown"
+                           (- count (length rows)))))))
+      ((clutch-db-error mysql-error)
        (list (format "Warnings could not be read: %s"
                      (clutch-db--error-message err)))))))
 

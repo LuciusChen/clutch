@@ -4464,8 +4464,9 @@ cannot be read still delivers its result, with the reason as a message."
                    (make-mysql-result
                     :connection conn :affected-rows 1
                     :warnings (cond ((string-prefix-p "INSERT" sql) 2)
-                                    ((string-prefix-p "LOAD" sql) 102)
+                                    ((string-prefix-p "LOAD" sql) 80)
                                     (t 0))))
+                  ((eq readable 'timeout) (signal 'mysql-timeout '("read timed out")))
                   (readable
                    (make-mysql-result
                     :connection conn
@@ -4476,10 +4477,10 @@ cannot be read still delivers its result, with the reason as a message."
                       (clutch-db-query conn "INSERT INTO t VALUES (1)"))
                      '("Warning (1265): Data truncated for column 'n' at row 1"
                        "Note (1051): Unknown table 't'")))
-      ;; Warnings past the limit are counted, not read.
+      ;; Warnings the server did not keep, or past the limit, are counted.
       (should (equal (car (last (clutch-db-result-messages
                                  (clutch-db-query conn "LOAD DATA INFILE 'x' INTO TABLE t"))))
-                     "2 more warnings not shown"))
+                     "78 more warnings not shown"))
       (setq queries nil)
       (should-not (clutch-db-result-messages
                    (clutch-db-query conn "UPDATE t SET n = 1")))
@@ -4487,7 +4488,17 @@ cannot be read still delivers its result, with the reason as a message."
       (setq readable nil)
       (should (equal (clutch-db-result-messages
                       (clutch-db-query conn "INSERT INTO t VALUES (2)"))
-                     '("Warnings could not be read: lost"))))
+                     '("Warnings could not be read: lost")))
+      ;; A timeout resynchronizes or closes CONN before the result returns.
+      (let (interrupted)
+        (setq readable 'timeout)
+        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (actual) (setq interrupted actual) t)))
+          (should (string-prefix-p
+                   "Warnings could not be read: "
+                   (car (clutch-db-result-messages
+                         (clutch-db-query conn "INSERT INTO t VALUES (3)")))))
+          (should (eq interrupted conn)))))
     ;; Asking for the database after a USE would replace the warnings.
     (let (finish result)
       (setq queries nil)
