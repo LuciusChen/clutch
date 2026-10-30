@@ -187,13 +187,14 @@
 
 (cl-defstruct (clutch-db-test--pg-result
                (:constructor clutch-db-test--make-pg-result
-                             (&key columns rows command-tag affected-rows))
+                             (&key columns rows command-tag affected-rows notices))
                (:copier nil))
   "Test-owned stand-in for values exposed by pgsql.el result accessors."
   columns
   rows
   command-tag
-  affected-rows)
+  affected-rows
+  notices)
 
 (defmacro clutch-db-test--with-pgsql-results (&rest body)
   "Run BODY with pgsql.el public result accessors serving test fakes."
@@ -205,7 +206,9 @@
              ((symbol-function 'pgsql-result-affected-rows)
               #'clutch-db-test--pg-result-affected-rows)
              ((symbol-function 'pgsql-result-command-tag)
-              #'clutch-db-test--pg-result-command-tag))
+              #'clutch-db-test--pg-result-command-tag)
+             ((symbol-function 'pgsql-result-notices)
+              #'clutch-db-test--pg-result-notices))
      ,@body))
 
 (defmacro clutch-db-test--with-pgsql-client (&rest body)
@@ -1262,63 +1265,22 @@ tracks, and a disconnect no longer asked first."
       (cl-letf (((symbol-function 'pgsql-exec-async) nil))
         (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
 
-(ert-deftest clutch-db-test-pg-results-carry-their-statement-notices ()
-  "Notices the server sends while a statement runs should come with its result."
+(ert-deftest clutch-db-test-pg-results-show-their-statement-notices ()
+  "A result should show its statement's notices as psql prints them."
   (require 'clutch-db-pg)
-  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
-         (client (clutch-db-pg--connection-client conn))
-         finish result)
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
     (clutch-db-test--with-pgsql-client
       (cl-letf (((symbol-function 'pgsql-exec)
-                 (lambda (actual-client _sql)
-                   (run-hook-with-args 'pgsql-notice-functions actual-client
-                                       '(:severity-localized "NOTICE"
-                                         :message "10 records moved"))
-                   (clutch-db-test--make-pg-result)))
-                ((symbol-function 'pgsql-exec-async)
-                 (lambda (_client _sql callback) (setq finish callback))))
-        ;; A notice outside a statement belongs to none.
-        (run-hook-with-args 'pgsql-notice-functions client
-                            '(:severity-localized "WARNING" :message "stray"))
+                 (lambda (&rest _)
+                   (clutch-db-test--make-pg-result
+                    :notices '((:severity-localized "NOTICE"
+                                :message "10 records moved")
+                               (:severity-localized "INFO" :message "vacuuming t"
+                                :detail "pages: 0 removed" :hint "none"))))))
         (should (equal (clutch-db-result-messages
                         (clutch-db-query conn "DO $$ BEGIN END $$"))
-                       '("NOTICE:  10 records moved")))
-        (should (clutch-db-query-async
-                 conn "VACUUM VERBOSE t" (lambda (r _error) (setq result r))))
-        (run-hook-with-args 'pgsql-notice-functions client
-                            '(:severity-localized "INFO" :message "vacuuming t"
-                              :detail "pages: 0 removed" :hint "none"))
-        (funcall finish (clutch-db-test--make-pg-result) nil)
-        (should (equal (clutch-db-result-messages result)
-                       '("INFO:  vacuuming t\nDETAIL:  pages: 0 removed\nHINT:  none")))))))
-
-(ert-deftest clutch-db-test-pg-notice-collection-ends-with-every-statement ()
-  "A failed, cancelled or unstarted statement should stop collecting notices."
-  (require 'clutch-db-pg)
-  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
-         (client (clutch-db-pg--connection-client conn))
-         (server-error '(pgsql-server-error "boom" (:sqlstate "XX000")))
-         finish)
-    (cl-flet ((collecting-p ()
-                (not (eq (gethash client clutch-db-pg--notices 'none) 'none))))
-      (clutch-db-test--with-pgsql-client
-        (cl-letf (((symbol-function 'pgsql-exec)
-                   (lambda (&rest _) (signal (car server-error) (cdr server-error))))
-                  ((symbol-function 'pgsql-exec-async)
-                   (lambda (_client _sql callback) (setq finish callback))))
-          (should-error (clutch-db-query conn "DO $$ BEGIN END $$")
-                        :type 'clutch-db-error)
-          (should-not (collecting-p))
-          (should (clutch-db-query-async conn "SELECT pg_sleep(9)" #'ignore))
-          ;; Collection lasts while the statement runs.
-          (should (collecting-p))
-          (funcall finish nil server-error)
-          (should-not (collecting-p)))
-        (cl-letf (((symbol-function 'pgsql-exec-async)
-                   (lambda (&rest _) (signal (car server-error) (cdr server-error)))))
-          (should-error (clutch-db-query-async conn "SELECT 1" #'ignore)
-                        :type 'clutch-db-error)
-          (should-not (collecting-p)))))))
+                       '("NOTICE:  10 records moved"
+                         "INFO:  vacuuming t\nDETAIL:  pages: 0 removed\nHINT:  none")))))))
 
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
@@ -6783,6 +6745,7 @@ Skips if `clutch-db-test-pg-password' is nil."
 (ert-deftest clutch-db-test-pg-live-results-carry-notices ()
   "PostgreSQL notices raised by a statement should come with its result."
   :tags '(:db-live :pg-live)
+  (skip-unless (fboundp 'pgsql-result-notices))
   (clutch-db-test--with-pg conn
     (should (equal (clutch-db-result-messages
                     (clutch-db-query
