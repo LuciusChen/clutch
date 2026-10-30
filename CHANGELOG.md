@@ -23,6 +23,7 @@
 - A result for a different query is shown from its first row and column, instead of at the place the previous result was scrolled to. Running the same query again still keeps the view.
 - Searching a wide result with the searchable header no longer stalls for seconds when a match lands in the header, nor when moving between column names.
 - Column completion works inside function calls. An empty argument in the SELECT list, such as `sum(|)`, offers the visible columns, and an alias inside parentheses, such as `count(a.|)` or `HAVING sum(a.|)`, offers that table's columns. Completion at an empty slot offers only the tables of the query or UNION branch at point, not those of other branches or nested subqueries, and no longer opens right after a string value such as `'x' |`.
+- A correlated subquery completes the columns of an outer alias, as in `EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.|)`. An alias defined in the subquery itself still takes precedence.
 
 ## 0.7.0 - 2026-10-18
 

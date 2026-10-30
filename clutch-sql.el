@@ -611,6 +611,20 @@ point's top-level set-operation branch."
             (plist-get entry :statement-aliases)))
      (t (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
 
+(defun clutch--outer-scope-aliases (schema)
+  "Return alias-to-table mappings in SCHEMA from scopes enclosing point's query.
+Point's own scope is left to `clutch--query-scope-tables-and-aliases'.
+The rest come innermost first, so a correlated subquery resolves an outer
+alias to its nearest definition."
+  (let* ((entry (clutch--tables-in-query-cache-entry schema))
+         (offset (- (point) (plist-get entry :beg))))
+    (cl-loop for scope in (cdr (seq-sort-by
+                                #'car #'>
+                                (seq-filter (lambda (scope)
+                                              (<= (nth 0 scope) offset (nth 1 scope)))
+                                            (plist-get entry :query-scopes))))
+             append (cdr (clutch--completion-scope-tables-and-aliases (nth 2 scope))))))
+
 (defun clutch--toplevel-union-branch-range (text point-offset)
   "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
 Unlike `clutch--union-branch-range', does not narrow into parenthesized
@@ -856,7 +870,8 @@ For input like `u.name', returns `u' when BEG starts at `name'."
 (defun clutch--qualified-identifier-table (schema beg)
   "Return the table referenced by the qualifier before BEG in SCHEMA, or nil.
 Resolve both statement aliases like `u.name' and direct qualified table names
-like `orders.id' within the current statement."
+like `orders.id' within the current statement.  An alias defined only in an
+enclosing query, as in a correlated subquery, resolves last."
   (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
               (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
     (or (cdr (assoc-string qualifier
@@ -873,7 +888,10 @@ like `orders.id' within the current statement."
                            :test (lambda (a b)
                                    (string-equal-ignore-case
                                     a (replace-regexp-in-string "[\"`]" "" b))))
-              (and (= (length matches) 1) (car matches)))))))
+              (and (= (length matches) 1) (car matches))
+              (cdr (assoc-string qualifier
+                                 (clutch--outer-scope-aliases schema)
+                                 t)))))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"

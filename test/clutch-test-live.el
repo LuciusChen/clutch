@@ -1937,9 +1937,11 @@ throughout."
                                              rows)
                                      (list (list (cadr case))))))))
                 ;; Inside function-call parentheses, an empty argument and an
-                ;; alias without a prefix offer the table's columns.
+                ;; alias without a prefix offer the table's columns, as does an
+                ;; outer alias in a correlated subquery.
                 (dolist (sql '("SELECT max(|) FROM %s u"
-                               "SELECT max(u.|) FROM %s u"))
+                               "SELECT max(u.|) FROM %s u"
+                               "SELECT id FROM %s u WHERE EXISTS (SELECT 1 FROM %s v WHERE v.id = u.|)"))
                   (ert-info (sql)
                     (erase-buffer)
                     (insert (string-replace "%s" table sql))
