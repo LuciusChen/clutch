@@ -1869,11 +1869,15 @@ Structure is not interpreted here; callers confirm depth and literals through
                          "  u (users)")))))))
 
 (ert-deftest clutch-test-completion-at-point-empty-slots-follow-the-query-scope ()
-  "Empty-slot completion should offer only point's query branch, after no value."
+  "Empty-slot completion should offer only point's own query level, after no value."
   (dolist (case '(("select sum(|) from users u union all select id from orders o"
                    ("id" "name"))
                   ("select id from users u union all select id from orders o where |"
                    ("id" "user_id"))
+                  ("select sum(|) from users u where exists (select 1 from orders o)"
+                   ("id" "name"))
+                  ("select sum(|) from users union all select id from orders union all select id from products union all select id from logs"
+                   ("id" "name"))
                   ("select coalesce(/* note */ |) from users u" ("id" "name"))
                   ("select coalesce('fallback' |) from users u" nil)
                   ("select 'x' | from users u" nil)))
@@ -1889,6 +1893,8 @@ Structure is not interpreted here; callers confirm depth and literals through
                 (clutch-connection 'fake))
             (puthash "users" '("id" "name") schema)
             (puthash "orders" '("id" "user_id") schema)
+            (puthash "products" '("id" "sku") schema)
+            (puthash "logs" '("id" "message") schema)
             (cl-letf (((symbol-function 'clutch--schema-for-connection)
                        (lambda (&optional _conn) schema))
                       ((symbol-function 'clutch-db-busy-p)

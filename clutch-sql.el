@@ -177,15 +177,13 @@ BOUNDS, when non-nil, is the already computed statement range."
           :statement-tables statement-tables
           :statement-aliases aliases
           :from-sources from-sources
-          :derived-scopes
+          :query-scopes
           (when (string-match-p "(" text)
             (cl-loop for (start . finish) in (clutch--completion-query-regions text)
                      collect
                      (list start finish
-                           (cl-remove-if-not
-                            (lambda (source) (consp (cdr source)))
-                            (clutch--completion-query-sources
-                             (substring text start finish) output-plans))))))))
+                           (clutch--completion-query-sources
+                            (substring text start finish) output-plans)))))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -371,11 +369,12 @@ Expression parentheses do not create query scopes."
 
 (defun clutch--completion-query-scope (entry)
   "Return the innermost query scope around point in statement cache ENTRY.
-The result is (START END DERIVED-SOURCES) in statement offsets, or nil when
-the statement has no parentheses or point is outside every SELECT."
+The result is (START END SOURCES) in statement offsets, SOURCES being the
+scope's own FROM list as `clutch--completion-query-sources' returns it, or nil
+when the statement has no parentheses or point is outside every SELECT."
   (let ((offset (- (point) (plist-get entry :beg)))
         scope)
-    (dolist (candidate (plist-get entry :derived-scopes))
+    (dolist (candidate (plist-get entry :query-scopes))
       (when (and (<= (nth 0 candidate) offset)
                  (<= offset (nth 1 candidate))
                  (or (not scope)
@@ -386,8 +385,26 @@ the statement has no parentheses or point is outside every SELECT."
 
 (defun clutch--completion-derived-source (entry qualifier)
   "Resolve derived table QUALIFIER in cached statement ENTRY at point."
-  (assoc-string (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
-                (nth 2 (clutch--completion-query-scope entry)) t))
+  (when-let* ((source (assoc-string
+                       (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
+                       (nth 2 (clutch--completion-query-scope entry)) t))
+              ((consp (cdr source))))
+    source))
+
+(defun clutch--completion-scope-tables-and-aliases (sources)
+  "Return (TABLES . ALIASES) for the table SOURCES of a cached query scope.
+SOURCES are (ALIAS . SOURCE) pairs from `clutch--completion-query-sources'.
+Derived tables are skipped, and a table named by itself has no alias."
+  (let (tables aliases)
+    (pcase-dolist (`(,alias . ,source) sources)
+      (when (stringp source)
+        (let ((table (if (clutch-db-sql-table-schema source)
+                         source
+                       (clutch--normalize-statement-table-token source))))
+          (push table tables)
+          (unless (string-equal-ignore-case alias (clutch-db-sql-table-name source))
+            (push (cons alias table) aliases)))))
+    (cons (delete-dups (nreverse tables)) (nreverse aliases))))
 
 (defun clutch--completion-query-sources (sql output-plans)
   "Return (ALIAS . SOURCE) pairs for the outer FROM list of SQL.
@@ -578,18 +595,21 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
 (defun clutch--query-scope-tables-and-aliases (schema)
   "Return (TABLES . ALIASES) in SCHEMA for point's query scope.
 The scope is the innermost SELECT or set-operation branch around point, so
-expression parentheses like SUM(...) do not hide its FROM/JOIN sources.
-Outside every SELECT, it is point's top-level set-operation branch."
+expression parentheses like SUM(...) do not hide its FROM/JOIN sources, and
+the sources of nested queries are not its own.  Outside every SELECT, it is
+point's top-level set-operation branch."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (stmt-beg (plist-get entry :beg))
          (text (buffer-substring-no-properties stmt-beg (plist-get entry :end)))
-         (range (if-let* ((scope (clutch--completion-query-scope entry)))
-                    (cons (nth 0 scope) (nth 1 scope))
-                  (clutch--toplevel-union-branch-range text (- (point) stmt-beg)))))
-    (if (equal range (cons 0 (length text)))
-        (cons (plist-get entry :statement-tables)
-              (plist-get entry :statement-aliases))
-      (clutch--extract-tables-and-aliases text (car range) (cdr range) t))))
+         (scope (clutch--completion-query-scope entry))
+         (range (and (not scope)
+                     (clutch--toplevel-union-branch-range text (- (point) stmt-beg)))))
+    (cond
+     (scope (clutch--completion-scope-tables-and-aliases (nth 2 scope)))
+     ((equal range (cons 0 (length text)))
+      (cons (plist-get entry :statement-tables)
+            (plist-get entry :statement-aliases)))
+     (t (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
   "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
@@ -1402,8 +1422,13 @@ appropriate."
               (and (not qualified-table)
                    (not force-columns-p)
                    (< prefix-len clutch--schema-inline-min-prefix-length)))
-    (let ((tables (or (and qualified-table (list qualified-table))
-                      (clutch--tables-in-current-statement schema))))
+    (let ((tables (cond
+                   (qualified-table (list qualified-table))
+                   ;; An empty slot lists columns by source, so only point's
+                   ;; query counts toward the table limit.
+                   (force-columns-p
+                    (car (clutch--query-scope-tables-and-aliases schema)))
+                   (t (clutch--tables-in-current-statement schema)))))
       (when (and tables
                  (or qualified-table
                      (<= (length tables) clutch--schema-inline-table-limit)))
@@ -1456,20 +1481,18 @@ loading."
     (cons (point) (point))))
 
 (defun clutch--completion-table-sources (schema tables)
-  "Return visible table sources from SCHEMA for TABLES at point.
-Only tables of point's query scope are visible, by alias when they have one."
-  (pcase-let* ((`(,scope-tables . ,aliases)
-                (clutch--query-scope-tables-and-aliases schema))
-               (aliased-tables (mapcar #'cdr aliases))
-               (sources nil))
+  "Return sources from SCHEMA for TABLES of point's query scope.
+A table with an alias in that scope is listed by its alias."
+  (let* ((aliases (cdr (clutch--query-scope-tables-and-aliases schema)))
+         (aliased-tables (mapcar #'cdr aliases))
+         sources)
     (dolist (alias aliases)
       (when (and (car alias) (cdr alias))
         (push (list :qualifier (car alias)
                     :table (cdr alias))
               sources)))
     (dolist (table tables)
-      (when (and (member table scope-tables)
-                 (not (member table aliased-tables)))
+      (unless (member table aliased-tables)
         (push (list :qualifier table :table table)
               sources)))
     (nreverse sources)))
