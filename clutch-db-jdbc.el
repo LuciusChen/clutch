@@ -1554,11 +1554,14 @@ JDBC JSON false sentinels become `:false'."
   (alist-get category clutch-jdbc--object-category-specs))
 
 (defun clutch-jdbc--rpc-result (conn result)
-  "Convert JDBC RPC RESULT for CONN to a `clutch-db-result'."
+  "Convert JDBC RPC RESULT for CONN to a `clutch-db-result'.
+Its messages are the statement's driver warnings, which agents before
+the `messages' field do not report."
   (if (equal (plist-get result :type) "dml")
       (make-clutch-db-result
        :connection conn
-       :affected-rows (plist-get result :affected-rows))
+       :affected-rows (plist-get result :affected-rows)
+       :messages (plist-get result :messages))
     (let* ((first-rows (plist-get result :rows))
            (cursor-id (plist-get result :cursor-id))
            (done (eq t (plist-get result :done)))
@@ -1570,7 +1573,8 @@ JDBC JSON false sentinels become `:false'."
        :columns (clutch-jdbc--make-columns
                  (plist-get result :columns)
                  (plist-get result :col-types))
-       :rows (mapcar #'clutch-jdbc--normalize-row all-rows)))))
+       :rows (mapcar #'clutch-jdbc--normalize-row all-rows)
+       :messages (plist-get result :messages)))))
 
 (defun clutch-jdbc--execute-params (conn payload &optional async)
   "Return agent parameters that run PAYLOAD on CONN.
