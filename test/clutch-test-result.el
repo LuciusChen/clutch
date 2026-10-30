@@ -13,6 +13,21 @@
 
 ;;;; Filter
 
+(ert-deftest clutch-test-dml-result-shows-server-messages ()
+  "A result without rows should show the server's messages before its summary."
+  (with-temp-buffer
+    (clutch-result--display-dml
+     (make-clutch-db-result
+      :affected-rows 0
+      :messages '("NOTICE:  10 records moved" "INFO:  done\nDETAIL:  nothing left"))
+     "DO $$ BEGIN END $$" 0.1)
+    (should (string-match-p
+             (concat "\\`-- DO \\$\\$ BEGIN END \\$\\$\n"
+                     "NOTICE:  10 records moved\n"
+                     "INFO:  done\nDETAIL:  nothing left\n"
+                     "Affected rows: 0\n")
+             (buffer-string)))))
+
 (ert-deftest clutch-test-client-filter-preserves-page-summary ()
   "Filtering must not change page extent or infer a smaller query total."
   (dolist (spec '((5 nil nil) (5 8 nil) (3 8 5)))

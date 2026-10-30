@@ -2259,6 +2259,8 @@ Accumulates input until a top-level semicolon ends it, then executes."
 (defun clutch-repl--format-dml-result (result elapsed)
   "Format a DML RESULT with ELAPSED time as a string for the REPL."
   (let ((msg (concat "\n"
+                     (mapconcat (lambda (message) (concat message "\n"))
+                                (clutch-db-result-messages result))
                      (clutch--message-keyword "Affected rows")
                      ": "
                      (clutch--message-count
@@ -2339,6 +2341,9 @@ Accumulates input until a top-level semicolon ends it, then executes."
                                sql clutch-connection outcome)
                               (output
                                (concat "\n"
+                                       (mapconcat (lambda (message)
+                                                    (concat message "\n"))
+                                                  (clutch-db-result-messages result))
                                        (clutch--message-count row-count)
                                        " "
                                        (if (= row-count 1) "row" "rows")

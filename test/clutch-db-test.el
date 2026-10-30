@@ -1262,6 +1262,36 @@ tracks, and a disconnect no longer asked first."
       (cl-letf (((symbol-function 'pgsql-exec-async) nil))
         (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
 
+(ert-deftest clutch-db-test-pg-results-carry-their-statement-notices ()
+  "Notices the server sends while a statement runs should come with its result."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         finish result)
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (actual-client _sql)
+                   (run-hook-with-args 'pgsql-notice-functions actual-client
+                                       '(:severity-localized "NOTICE"
+                                         :message "10 records moved"))
+                   (clutch-db-test--make-pg-result)))
+                ((symbol-function 'pgsql-exec-async)
+                 (lambda (_client _sql callback) (setq finish callback))))
+        ;; A notice outside a statement belongs to none.
+        (run-hook-with-args 'pgsql-notice-functions client
+                            '(:severity-localized "WARNING" :message "stray"))
+        (should (equal (clutch-db-result-messages
+                        (clutch-db-query conn "DO $$ BEGIN END $$"))
+                       '("NOTICE:  10 records moved")))
+        (should (clutch-db-query-async
+                 conn "VACUUM VERBOSE t" (lambda (r _error) (setq result r))))
+        (run-hook-with-args 'pgsql-notice-functions client
+                            '(:severity-localized "INFO" :message "vacuuming t"
+                              :detail "pages: 0 removed" :hint "none"))
+        (funcall finish (clutch-db-test--make-pg-result) nil)
+        (should (equal (clutch-db-result-messages result)
+                       '("INFO:  vacuuming t\nDETAIL:  pages: 0 removed\nHINT:  none")))))))
+
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
   (require 'clutch-db-pg)
@@ -6721,6 +6751,15 @@ Skips if `clutch-db-test-pg-password' is nil."
  clutch-db-test--with-pg
  (:db-live :pg-live)
  "PostgreSQL")
+
+(ert-deftest clutch-db-test-pg-live-results-carry-notices ()
+  "PostgreSQL notices raised by a statement should come with its result."
+  :tags '(:db-live :pg-live)
+  (clutch-db-test--with-pg conn
+    (should (equal (clutch-db-result-messages
+                    (clutch-db-query
+                     conn "DO $$ BEGIN RAISE NOTICE '% records moved', 10; END $$"))
+                   '("NOTICE:  10 records moved")))))
 
 (ert-deftest clutch-db-test-pg-live-public-value-and-transaction-contract ()
   "PostgreSQL should preserve typed values and recover failed transactions."
