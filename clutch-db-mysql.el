@@ -164,15 +164,26 @@ Each output plist has :name and :type-category."
                                   (plist-get col :character-set))))
           mysql-columns))
 
+(defconst clutch-db-mysql--max-warning-messages 100
+  "Most warnings read for one statement.
+An INSERT of many rows can raise one per row, up to `max_error_count'.")
+
 (defun clutch-db-mysql--warning-messages (conn count)
   "Return the COUNT warnings of CONN's last statement as display strings.
+Past `clutch-db-mysql--max-warning-messages', one message counts the rest.
 The statement already ran, so a failure to read them becomes a message
 rather than its error, which would also stop an asynchronous callback."
   (when (and count (> count 0))
     (condition-case err
-        (mapcar (pcase-lambda (`(,level ,code ,message))
-                  (format "%s (%s): %s" level code message))
-                (mysql-result-rows (mysql-query conn "SHOW WARNINGS")))
+        (append
+         (mapcar (pcase-lambda (`(,level ,code ,message))
+                   (format "%s (%s): %s" level code message))
+                 (mysql-result-rows
+                  (mysql-query conn (format "SHOW WARNINGS LIMIT %d"
+                                            clutch-db-mysql--max-warning-messages))))
+         (when (> count clutch-db-mysql--max-warning-messages)
+           (list (format "%d more warnings not shown"
+                         (- count clutch-db-mysql--max-warning-messages)))))
       (mysql-error
        (list (format "Warnings could not be read: %s"
                      (clutch-db--error-message err)))))))

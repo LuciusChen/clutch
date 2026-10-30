@@ -4460,10 +4460,12 @@ cannot be read still delivers its result, with the reason as a message."
                (lambda (_conn sql)
                  (push sql queries)
                  (cond
-                  ((not (equal sql "SHOW WARNINGS"))
+                  ((not (equal sql "SHOW WARNINGS LIMIT 100"))
                    (make-mysql-result
                     :connection conn :affected-rows 1
-                    :warnings (if (string-prefix-p "INSERT" sql) 2 0)))
+                    :warnings (cond ((string-prefix-p "INSERT" sql) 2)
+                                    ((string-prefix-p "LOAD" sql) 102)
+                                    (t 0))))
                   (readable
                    (make-mysql-result
                     :connection conn
@@ -4474,6 +4476,10 @@ cannot be read still delivers its result, with the reason as a message."
                       (clutch-db-query conn "INSERT INTO t VALUES (1)"))
                      '("Warning (1265): Data truncated for column 'n' at row 1"
                        "Note (1051): Unknown table 't'")))
+      ;; Warnings past the limit are counted, not read.
+      (should (equal (car (last (clutch-db-result-messages
+                                 (clutch-db-query conn "LOAD DATA INFILE 'x' INTO TABLE t"))))
+                     "2 more warnings not shown"))
       (setq queries nil)
       (should-not (clutch-db-result-messages
                    (clutch-db-query conn "UPDATE t SET n = 1")))
@@ -4496,7 +4502,7 @@ cannot be read still delivers its result, with the reason as a message."
         (should (clutch-db-query-async conn "USE app"
                                        (lambda (r _error) (setq result r))))
         (funcall finish (make-mysql-result :connection conn :warnings 1) nil)
-        (should (equal (reverse queries) '("SHOW WARNINGS" "SELECT DATABASE()")))
+        (should (equal (reverse queries) '("SHOW WARNINGS LIMIT 100" "SELECT DATABASE()")))
         (should (equal (clutch-db-result-messages result) '("Note (1): kept")))))))
 
 (ert-deftest clutch-db-test-mysql-set-current-schema-updates-connection-database ()
