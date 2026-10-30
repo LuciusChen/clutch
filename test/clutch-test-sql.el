@@ -1818,6 +1818,7 @@ Structure is not interpreted here; callers confirm depth and literals through
 (ert-deftest clutch-test-completion-at-point-uses-current-columns-at-empty-sql-slots ()
   "CAPF should complete visible columns at empty SQL expression positions."
   (dolist (sql '("select | from users u join orders o on u.id = o.user_id"
+                 "select count(|) from users u join orders o on u.id = o.user_id"
                  "select * from users u join orders o on u.id = o.user_id where |"
                  "select * from users u join orders o on u.id = o.user_id group by |"
                  "select * from users u join orders o on u.id = o.user_id order by |"
@@ -1866,6 +1867,69 @@ Structure is not interpreted here; callers confirm depth and literals through
           (should (equal (substring-no-properties
                           (funcall annotation-function "u.id"))
                          "  u (users)")))))))
+
+(ert-deftest clutch-test-completion-at-point-empty-slots-follow-the-query-scope ()
+  "Empty-slot completion should offer only point's own query level, after no value."
+  (dolist (case '(("select sum(|) from users u union all select id from orders o"
+                   ("id" "name"))
+                  ("select id from users u union all select id from orders o where |"
+                   ("id" "user_id"))
+                  ("select sum(|) from users u where exists (select 1 from orders o)"
+                   ("id" "name"))
+                  ("select sum(|) from users union all select id from orders union all select id from products union all select id from logs"
+                   ("id" "name"))
+                  ("select coalesce(/* note */ |) from users u" ("id" "name"))
+                  ("select coalesce('fallback' |) from users u" nil)
+                  ("select 'x' | from users u" nil)))
+    (pcase-let ((`(,sql ,expected) case))
+      (ert-info ((format "sql: %s" sql))
+        (with-temp-buffer
+          (clutch-mode)
+          (insert sql)
+          (goto-char (point-min))
+          (search-forward "|")
+          (delete-char -1)
+          (let ((schema (make-hash-table :test 'equal))
+                (clutch-connection 'fake))
+            (puthash "users" '("id" "name") schema)
+            (puthash "orders" '("id" "user_id") schema)
+            (puthash "products" '("id" "sku") schema)
+            (puthash "logs" '("id" "message") schema)
+            (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                       (lambda (&optional _conn) schema))
+                      ((symbol-function 'clutch-db-busy-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch-db-completion-sync-columns-p)
+                       (lambda (_conn) t)))
+              (let ((capf (clutch-completion-at-point)))
+                (should (equal (and capf (clutch-test--completion-candidates capf))
+                               expected))))))))))
+
+(ert-deftest clutch-test-completion-at-point-resolves-aliases-inside-function-calls ()
+  "An alias qualifier inside parentheses should resolve through the outer FROM."
+  (dolist (sql '("select count(u.|) from users u join orders o on u.id = o.user_id"
+                 "select u.id from users u join orders o on u.id = o.user_id group by u.id having sum(u.|) > 0"
+                 "select u.id from users u join orders o on u.id = o.user_id order by to_char(u.|)"))
+    (ert-info ((format "sql: %s" sql))
+      (with-temp-buffer
+        (clutch-mode)
+        (insert sql)
+        (goto-char (point-min))
+        (search-forward "|")
+        (delete-char -1)
+        (let ((schema (make-hash-table :test 'equal))
+              (clutch-connection 'fake))
+          (puthash "users" '("id" "name") schema)
+          (puthash "orders" '("id" "user_id") schema)
+          (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                     (lambda (&optional _conn) schema))
+                    ((symbol-function 'clutch-db-busy-p)
+                     (lambda (_conn) nil))
+                    ((symbol-function 'clutch-db-completion-sync-columns-p)
+                     (lambda (_conn) t)))
+            (should (equal (clutch-test--completion-candidates
+                            (clutch-completion-at-point))
+                           '("id" "name")))))))))
 
 (ert-deftest clutch-test-complete-at-point-keeps-empty-column-completion-active ()
   "Manual empty-column completion should keep its completion region valid."

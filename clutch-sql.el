@@ -177,15 +177,13 @@ BOUNDS, when non-nil, is the already computed statement range."
           :statement-tables statement-tables
           :statement-aliases aliases
           :from-sources from-sources
-          :derived-scopes
+          :query-scopes
           (when (string-match-p "(" text)
             (cl-loop for (start . finish) in (clutch--completion-query-regions text)
                      collect
                      (list start finish
-                           (cl-remove-if-not
-                            (lambda (source) (consp (cdr source)))
-                            (clutch--completion-query-sources
-                             (substring text start finish) output-plans))))))))
+                           (clutch--completion-query-sources
+                            (substring text start finish) output-plans)))))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -369,19 +367,44 @@ Expression parentheses do not create query scopes."
       (when (cdr frame) (push (cons (car frame) (length sql)) regions)))
     regions))
 
-(defun clutch--completion-derived-source (entry qualifier)
-  "Resolve derived table QUALIFIER in cached statement ENTRY at point."
+(defun clutch--completion-query-scope (entry)
+  "Return the innermost query scope around point in statement cache ENTRY.
+The result is (START END SOURCES) in statement offsets, SOURCES being the
+scope's own FROM list as `clutch--completion-query-sources' returns it, or nil
+when the statement has no parentheses or point is outside every SELECT."
   (let ((offset (- (point) (plist-get entry :beg)))
         scope)
-    (dolist (candidate (plist-get entry :derived-scopes))
+    (dolist (candidate (plist-get entry :query-scopes))
       (when (and (<= (nth 0 candidate) offset)
                  (<= offset (nth 1 candidate))
                  (or (not scope)
                      (< (- (nth 1 candidate) (nth 0 candidate))
                         (- (nth 1 scope) (nth 0 scope)))))
         (setq scope candidate)))
-    (assoc-string (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
-                  (nth 2 scope) t)))
+    scope))
+
+(defun clutch--completion-derived-source (entry qualifier)
+  "Resolve derived table QUALIFIER in cached statement ENTRY at point."
+  (when-let* ((source (assoc-string
+                       (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
+                       (nth 2 (clutch--completion-query-scope entry)) t))
+              ((consp (cdr source))))
+    source))
+
+(defun clutch--completion-scope-tables-and-aliases (sources)
+  "Return (TABLES . ALIASES) for the table SOURCES of a cached query scope.
+SOURCES are (ALIAS . SOURCE) pairs from `clutch--completion-query-sources'.
+Derived tables are skipped, and a table named by itself has no alias."
+  (let (tables aliases)
+    (pcase-dolist (`(,alias . ,source) sources)
+      (when (stringp source)
+        (let ((table (if (clutch-db-sql-table-schema source)
+                         source
+                       (clutch--normalize-statement-table-token source))))
+          (push table tables)
+          (unless (string-equal-ignore-case alias (clutch-db-sql-table-name source))
+            (push (cons alias table) aliases)))))
+    (cons (delete-dups (nreverse tables)) (nreverse aliases))))
 
 (defun clutch--completion-query-sources (sql output-plans)
   "Return (ALIAS . SOURCE) pairs for the outer FROM list of SQL.
@@ -569,19 +592,24 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
           (when table (push table tables)))))
     (cons (nreverse tables) (nreverse aliases))))
 
-(defun clutch--table-aliases-in-current-statement (schema)
-  "Return alias-to-table mappings in SCHEMA for point's set-operation branch.
-When the statement has no set operation, returns all aliases."
+(defun clutch--query-scope-tables-and-aliases (schema)
+  "Return (TABLES . ALIASES) in SCHEMA for point's query scope.
+The scope is the innermost SELECT or set-operation branch around point, so
+expression parentheses like SUM(...) do not hide its FROM/JOIN sources, and
+the sources of nested queries are not its own.  Outside every SELECT, it is
+point's top-level set-operation branch."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
-         (all-aliases (plist-get entry :statement-aliases))
          (stmt-beg (plist-get entry :beg))
-         (stmt-end (plist-get entry :end))
-         (text (buffer-substring-no-properties stmt-beg stmt-end))
-         (point-offset (- (point) stmt-beg))
-         (range (clutch--union-branch-range text point-offset)))
-    (if (and (= (car range) 0) (= (cdr range) (length text)))
-        all-aliases
-      (cdr (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
+         (text (buffer-substring-no-properties stmt-beg (plist-get entry :end)))
+         (scope (clutch--completion-query-scope entry))
+         (range (and (not scope)
+                     (clutch--toplevel-union-branch-range text (- (point) stmt-beg)))))
+    (cond
+     (scope (clutch--completion-scope-tables-and-aliases (nth 2 scope)))
+     ((equal range (cons 0 (length text)))
+      (cons (plist-get entry :statement-tables)
+            (plist-get entry :statement-aliases)))
+     (t (clutch--extract-tables-and-aliases text (car range) (cdr range) t)))))
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
   "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
@@ -832,7 +860,7 @@ like `orders.id' within the current statement."
   (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
               (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
     (or (cdr (assoc-string qualifier
-                           (clutch--table-aliases-in-current-statement schema)
+                           (cdr (clutch--query-scope-tables-and-aliases schema))
                            t))
         (let* ((tables (clutch--tables-in-current-statement schema))
                (matches
@@ -1394,8 +1422,13 @@ appropriate."
               (and (not qualified-table)
                    (not force-columns-p)
                    (< prefix-len clutch--schema-inline-min-prefix-length)))
-    (let ((tables (or (and qualified-table (list qualified-table))
-                      (clutch--tables-in-current-statement schema))))
+    (let ((tables (cond
+                   (qualified-table (list qualified-table))
+                   ;; An empty slot lists columns by source, so only point's
+                   ;; query counts toward the table limit.
+                   (force-columns-p
+                    (car (clutch--query-scope-tables-and-aliases schema)))
+                   (t (clutch--tables-in-current-statement schema)))))
       (when (and tables
                  (or qualified-table
                      (<= (length tables) clutch--schema-inline-table-limit)))
@@ -1448,8 +1481,9 @@ loading."
     (cons (point) (point))))
 
 (defun clutch--completion-table-sources (schema tables)
-  "Return visible table sources from SCHEMA for TABLES in the current statement."
-  (let* ((aliases (and schema (clutch--table-aliases-in-current-statement schema)))
+  "Return sources from SCHEMA for TABLES of point's query scope.
+A table with an alias in that scope is listed by its alias."
+  (let* ((aliases (cdr (clutch--query-scope-tables-and-aliases schema)))
          (aliased-tables (mapcar #'cdr aliases))
          sources)
     (dolist (alias aliases)
@@ -1525,37 +1559,22 @@ control backend column loading."
     token))
 
 (defun clutch--completion-select-list-ready-p (sql start offset)
-  "Return non-nil when OFFSET is an empty SELECT-list slot in SQL after START."
+  "Return non-nil when OFFSET is an empty expression slot in SQL after START.
+Such a slot directly follows START, a comma or an opening parenthesis."
   (let ((pos start)
-        (depth 0)
-        significant)
+        last)
     (while (< pos offset)
       (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
-          (if (> skip offset)
-              (setq significant 'other
-                    pos offset)
-            (setq pos skip))
+          (progn
+            ;; A string is a value; a comment leaves the slot as it was.
+            (when (or (> skip offset) (not (memq (aref sql pos) '(?- ?/))))
+              (setq last 'other))
+            (setq pos (min skip offset)))
         (let ((ch (aref sql pos)))
-          (cond
-           ((memq ch '(?\s ?\t ?\n ?\r))
-            (cl-incf pos))
-           ((= ch ?\()
-            (when (zerop depth)
-              (setq significant 'other))
-            (cl-incf depth)
-            (cl-incf pos))
-           ((= ch ?\))
-            (when (zerop depth)
-              (setq significant 'other))
-            (setq depth (max 0 (1- depth)))
-            (cl-incf pos))
-           ((zerop depth)
-            (setq significant (if (= ch ?,) 'comma 'other))
-            (cl-incf pos))
-           (t
-            (cl-incf pos))))))
-    (and (zerop depth)
-         (memq significant '(nil comma)))))
+          (unless (memq ch '(?\s ?\t ?\n ?\r))
+            (setq last ch))
+          (cl-incf pos))))
+    (memq last '(nil ?, ?\())))
 
 (defun clutch--completion-select-list-empty-p (sql offset)
   "Return non-nil when OFFSET in statement SQL is an empty SELECT-list slot."
