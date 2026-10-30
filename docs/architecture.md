@@ -14,7 +14,6 @@ flowchart TB
       direction LR
       SQL["clutch-sql.el<br/>SQL context, completion,<br/>Eldoc, xref"]
       Document["clutch-document.el<br/>document query-buffer modes,<br/>current MongoDB helper syntax"]
-      RedisQuery["clutch-redis-mode<br/>Redis command buffers<br/>(defined in clutch-redis.el)"]
       Query["clutch-query.el<br/>query consoles, execution,<br/>statement boundaries"]
     end
 
@@ -29,6 +28,8 @@ flowchart TB
     end
   end
 
+  Diagnostics["clutch-diagnostics.el<br/>leaf diagnostics service:<br/>redacted debug capture, problem records"]
+
   Facade["clutch-backend.el<br/>generic database API,<br/>result struct, capability gates,<br/>shared SQL helpers"]
 
   subgraph Adapters["Backend adapters"]
@@ -37,7 +38,7 @@ flowchart TB
     PG["clutch-db-pg.el<br/>PostgreSQL adapter"]
     SQLite["clutch-db-sqlite.el<br/>SQLite adapter"]
     Mongo["clutch-mongodb.el<br/>MongoDB document adapter"]
-    Redis["clutch-redis.el<br/>Redis key/value adapter"]
+    Redis["clutch-redis.el<br/>Redis key/value adapter<br/>and clutch-redis-mode"]
     JDBC["clutch-db-jdbc.el<br/>JDBC adapter and sidecar client"]
   end
 
@@ -57,12 +58,13 @@ flowchart TB
   style External fill:#f6f8fa,stroke:#6e7781,stroke-width:2px
 
   Entry --> Workflow
+  Workflow --> Diagnostics
   Workflow --> Facade
+  Diagnostics --> Facade
   Facade --> Adapters
 
   SQL --> Query
   Document --> Query
-  RedisQuery --> Query
 
   MySQL --> MySQLExt
   PG --> PGExt
@@ -73,13 +75,46 @@ flowchart TB
   Agent --> Drivers
 ```
 
-This diagram shows primary runtime/workflow ownership, not every `require` form. Arrows between the large groups show layer boundaries. Adapter-to-runtime arrows are expanded only at the bottom layer, where they identify the external protocol package or runtime each adapter delegates to. The facade is the database contract boundary. Workflow modules call generic `clutch-db-*` operations instead of protocol packages. Backend adapters own database-specific connection params, metadata, object definitions, query execution, and type mapping.
+This diagram shows primary runtime/workflow ownership, not every `require` form; the next section shows the `require` edges. Arrows between the large groups show layer boundaries. Adapter-to-runtime arrows are expanded only at the bottom layer, where they identify the external protocol package or runtime each adapter delegates to. The facade is the database contract boundary. Workflow modules call generic `clutch-db-*` operations instead of protocol packages. Backend adapters own database-specific connection params, metadata, object definitions, query execution, and type mapping.
 
-`clutch-query.el` is query-console workflow, not the SQL layer. SQL-specific analysis and completion live in `clutch-sql.el` and are installed by `clutch-mode`, whose major-mode definition lives in `clutch-query.el`. Document query-buffer behavior is selected through backend registry metadata. `clutch-document.el` currently provides `clutch-mongodb-mode` for MongoDB and reuses the shared query workflow for execution. Future document backends should register their own query mode instead of adding MongoDB branches to generic workflow modules. Redis registers `clutch-redis-mode` from its adapter because the mode is Redis-specific and small; protocol work still lives in `redis.el`. `clutch-result.el` owns result buffer lifecycle state, paging/filter/sort state, refine state, and the result action registry. `clutch-edit.el` owns staged mutation payloads. `clutch-ui.el` is a shared rendering/helper module for result grids and connection header-line presentation; it is not a separate workflow entry point or result-state owner, so its same-layer helper edges are omitted from this overview.
+`clutch-query.el` is query-console workflow, not the SQL layer. SQL-specific analysis and completion live in `clutch-sql.el` and are installed by `clutch-mode`, whose major-mode definition lives in `clutch-query.el`. Document query-buffer behavior is selected through backend registry metadata. `clutch-document.el` currently provides `clutch-mongodb-mode` for MongoDB and reuses the shared query workflow for execution. Future document backends should register their own query mode instead of adding MongoDB branches to generic workflow modules. Redis defines `clutch-redis-mode` in its adapter file because the mode is Redis-specific and small, so it sits in the adapter layer above; it reaches the shared query workflow through lazily loaded `declare-function` references, not a `require`. Protocol work still lives in `redis.el`. `clutch-result.el` owns result buffer lifecycle state, paging/filter/sort state, refine state, and the result action registry. `clutch-edit.el` owns staged mutation payloads. `clutch-ui.el` is a shared rendering/helper module for result grids and connection header-line presentation; it is not a separate workflow entry point or result-state owner, so its same-layer helper edges are omitted from this overview.
 
 Staged submission has one backend contract: `clutch-db-call-with-atomic-batch`. `clutch-edit.el` owns statement order, row-count validation, and local staged state. Backends own the database boundary: an Auto-mode transaction or a Manual-mode savepoint. Transaction and savepoint completion are distinct: a failed savepoint release can still be recovered by rolling back to that savepoint, while a failed commit has an unknown outcome and must not be followed by a rollback presented as proof that nothing committed. The same unknown-outcome rule applies to explicit `clutch-commit`. JDBC keeps `java.sql.Savepoint` objects in the agent and exposes only opaque ids; neither SQL savepoint dialects nor partial-statement state leak into the result workflow. Transaction state is tracked as clean, dirty, or uncertain, with uncertain reserved for failed batch recovery or an unknown commit outcome. Rollback or reconnect clears the unsafe session state, but UI messaging preserves the distinction between known discarded work and a historical commit outcome that still requires verification.
 
 `clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug capture, the dedicated debug buffer, and buffer/connection-scoped problem records. Workflow modules call it directly for capture and error context. Problem records retain their source-buffer provenance, and diagnostics derives redacted labels through the generic backend contract, so it has no reverse dependency on connection.
+
+## Module Dependencies
+
+```mermaid
+flowchart LR
+  Backend["clutch-backend.el"]
+  Diagnostics["clutch-diagnostics.el"]
+  Schema["clutch-schema.el"]
+  UI["clutch-ui.el"]
+  SQL["clutch-sql.el"]
+  Conn["clutch-connection.el"]
+  Query["clutch-query.el"]
+  Document["clutch-document.el"]
+  Edit["clutch-edit.el"]
+  Object["clutch-object.el"]
+  Result["clutch-result.el"]
+
+  Diagnostics --> Backend
+  Schema --> Diagnostics
+  UI --> Schema
+  SQL --> Schema
+  Conn --> UI
+  Query --> Conn
+  Query --> SQL
+  Document --> Query
+  Edit --> Conn
+  Object --> Conn
+  Result --> Query
+  Result --> Edit
+  Result --> Object
+```
+
+Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. `clutch.el` requires all of them. The backend adapters require only `clutch-backend.el`. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.
 
 ## Backend And Surface Model
 
@@ -88,10 +123,10 @@ flowchart LR
   Registry["Backend registry<br/>:support-level<br/>:data-model<br/>:query-mode<br/>:surfaces"]
 
   subgraph Relational["Relational SQL data model"]
-    MySQLCore["mysql<br/>core SQL"]
-    PGCore["pg<br/>core SQL"]
+    MySQLCore["mysql<br/>core SQL<br/>clutch-db-mysql.el"]
+    PGCore["pg<br/>core SQL<br/>clutch-db-pg.el"]
     XTDBBasic["xtdb<br/>basic SQL over the<br/>PostgreSQL protocol"]
-    SQLiteCore["sqlite<br/>core SQL"]
+    SQLiteCore["sqlite<br/>core SQL<br/>clutch-db-sqlite.el"]
     OracleCore["oracle<br/>core SQL via JDBC"]
     SQLServerCore["sqlserver<br/>core SQL via JDBC"]
     GenericJDBC["jdbc, clickhouse,<br/>snowflake, redshift, db2<br/>basic SQL / query-first"]
@@ -128,6 +163,8 @@ flowchart LR
   RedisBackend --> RedisNative
   RedisNative --> RedisExt["redis.el native RESP client"]
 ```
+
+Backends fall into two groups by where their registration lives. `mysql`, `pg`, `xtdb`, `sqlite`, `mongodb` and `redis` are entries in `clutch-backend--registry`. `jdbc`, `oracle`, `sqlserver`, `db2`, `snowflake`, `redshift` and `clickhouse` are described by `clutch-jdbc--driver-metadata` in `clutch-db-jdbc.el` and added to the same registry when that file loads; all of them go through the JDBC adapter.
 
 `mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path. `xtdb` is a backend of its own for XTDB 2, which speaks the PostgreSQL protocol: it reuses the PostgreSQL adapter, whose connection subtype overrides it where XTDB differs (postmortem 208).
 
@@ -183,7 +220,7 @@ sequenceDiagram
   Buffer->>Query: Execute statement, region, or buffer
   Query->>Query: Find statement bounds and execution context
   Note over Query,Adapter: A batch holds the connection between its statements
-  Query->>Backend: clutch-db-query-async, through clutch--run-db-query-async
+  Query->>Backend: clutch-db-query-async
   Backend->>Adapter: Dispatch by connection/backend type
   alt Adapter runs SQL without blocking (MySQL, PostgreSQL, JDBC)
     Adapter-->>Query: Started, and the statement shows as running
