@@ -1938,7 +1938,11 @@ Structure is not interpreted here; callers confirm depth and literals through
                   ("select u.id from users u where exists (select 1 from orders u where u.|)"
                    ("id" "user_id"))
                   ("select u.id from users u where exists (select 1 from orders o where o.id = x.|) and exists (select 1 from users x)"
-                   nil)))
+                   nil)
+                  ("select users.id from orders users where exists (select 1 from users u where u.id = users.|)"
+                   ("id" "user_id"))
+                  ("select d.uid from (select id as uid from users) d where exists (select 1 from orders o where o.id = d.|)"
+                   ("uid"))))
     (pcase-let ((`(,sql ,expected) case))
       (ert-info ((format "sql: %s" sql))
         (with-temp-buffer
