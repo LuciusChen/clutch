@@ -314,6 +314,12 @@ A client is present only while a statement started through Clutch runs.")
 
 (add-hook 'pgsql-notice-functions #'clutch-db-pg--record-notice)
 
+(defun clutch-db-pg--take-notices (conn)
+  "Stop collecting notices for CONN's statement and return them in order."
+  (let ((client (clutch-db-pg--connection-client conn)))
+    (prog1 (reverse (gethash client clutch-db-pg--notices))
+      (remhash client clutch-db-pg--notices))))
+
 (defun clutch-db-pg--wrap-result (conn pg-result)
   "Convert PG-RESULT from CONN to a `clutch-db-result'.
 The result takes the notices of the statement that produced it."
@@ -331,9 +337,7 @@ The result takes the notices of the statement that produced it."
      :affected-rows (pgsql-result-affected-rows pg-result)
      :last-insert-id nil
      :warnings nil
-     :messages (let ((client (clutch-db-pg--connection-client conn)))
-                 (prog1 (reverse (gethash client clutch-db-pg--notices))
-                   (remhash client clutch-db-pg--notices))))))
+     :messages (clutch-db-pg--take-notices conn))))
 
 (defun clutch-db-pg--exec (conn sql)
   "Execute SQL through the pgsql.el client owned by CONN."
@@ -418,13 +422,16 @@ transaction included, so a COMMIT tag committed the path."
 
 (defun clutch-db-pg--run-query-with-transaction-state (conn sql thunk)
   "Run THUNK for SQL on CONN after applying lazy-BEGIN semantics.
-Notices are collected from here until the result is wrapped."
+Notices are collected from here until the statement ends: the result takes
+them, and a failure, including one starting an asynchronous statement,
+drops them."
   (condition-case err
       (progn
         (puthash (clutch-db-pg--connection-client conn) nil clutch-db-pg--notices)
         (clutch-db-pg--ensure-foreground-transaction conn sql)
         (funcall thunk))
     (pgsql-error
+     (clutch-db-pg--take-notices conn)
      (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 ;;;; Connect function
@@ -820,10 +827,13 @@ does."
 
 (cl-defmethod clutch-db-query ((conn clutch-db-pg--connection) sql)
   "Execute SQL on PostgreSQL CONN, returning a `clutch-db-result'."
-  (clutch-db-pg--run-query-with-transaction-state
-   conn sql
-   (lambda ()
-     (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql)))))
+  (unwind-protect
+      (clutch-db-pg--run-query-with-transaction-state
+       conn sql
+       (lambda ()
+         (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql))))
+    ;; A quit is no error, so only this ends collection after one.
+    (clutch-db-pg--take-notices conn)))
 
 (cl-defmethod clutch-db-query-async
     ((conn clutch-db-pg--connection) sql callback)
@@ -836,8 +846,9 @@ Decline when the installed pgsql.el cannot execute asynchronously."
        (pgsql-exec-async
         (clutch-db-pg--connection-client conn) sql
         (lambda (result error)
-          (when result
-            (clutch-db-pg--follow-search-path conn sql result))
+          (if result
+              (clutch-db-pg--follow-search-path conn sql result)
+            (clutch-db-pg--take-notices conn))
           (funcall callback
                    (and result (clutch-db-pg--wrap-result conn result))
                    (and error
@@ -873,6 +884,7 @@ COPY."
                                 (1- (length rows)))
                        (length rows))))
           (lambda (result error)
+            (unless result (clutch-db-pg--take-notices conn))
             (funcall callback
                      (and result (clutch-db-pg--wrap-result conn result))
                      (and error
@@ -883,16 +895,18 @@ COPY."
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
   "Execute parameterized SQL on PostgreSQL CONN with PARAMS."
-  (clutch-db-pg--run-query-with-transaction-state
-   conn sql
-   (lambda ()
-     (let* ((pg-sql (clutch-db-pg--rewrite-param-sql
-                     sql (length params)))
-            (typed-arguments (clutch-db-pg--typed-arguments params))
-            (result (pgsql-exec-params
-                     (clutch-db-pg--connection-client conn)
-                     pg-sql typed-arguments)))
-       (clutch-db-pg--wrap-result conn result)))))
+  (unwind-protect
+      (clutch-db-pg--run-query-with-transaction-state
+       conn sql
+       (lambda ()
+         (let* ((pg-sql (clutch-db-pg--rewrite-param-sql
+                         sql (length params)))
+                (typed-arguments (clutch-db-pg--typed-arguments params))
+                (result (pgsql-exec-params
+                         (clutch-db-pg--connection-client conn)
+                         pg-sql typed-arguments)))
+           (clutch-db-pg--wrap-result conn result))))
+    (clutch-db-pg--take-notices conn)))
 
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-db-pg--connection))
   "Interrupt the current PostgreSQL query on CONN without dropping the session."

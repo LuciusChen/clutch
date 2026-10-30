@@ -1292,6 +1292,34 @@ tracks, and a disconnect no longer asked first."
         (should (equal (clutch-db-result-messages result)
                        '("INFO:  vacuuming t\nDETAIL:  pages: 0 removed\nHINT:  none")))))))
 
+(ert-deftest clutch-db-test-pg-notice-collection-ends-with-every-statement ()
+  "A failed, cancelled or unstarted statement should stop collecting notices."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (client (clutch-db-pg--connection-client conn))
+         (server-error '(pgsql-server-error "boom" (:sqlstate "XX000")))
+         finish)
+    (cl-flet ((collecting-p ()
+                (not (eq (gethash client clutch-db-pg--notices 'none) 'none))))
+      (clutch-db-test--with-pgsql-client
+        (cl-letf (((symbol-function 'pgsql-exec)
+                   (lambda (&rest _) (signal (car server-error) (cdr server-error))))
+                  ((symbol-function 'pgsql-exec-async)
+                   (lambda (_client _sql callback) (setq finish callback))))
+          (should-error (clutch-db-query conn "DO $$ BEGIN END $$")
+                        :type 'clutch-db-error)
+          (should-not (collecting-p))
+          (should (clutch-db-query-async conn "SELECT pg_sleep(9)" #'ignore))
+          ;; Collection lasts while the statement runs.
+          (should (collecting-p))
+          (funcall finish nil server-error)
+          (should-not (collecting-p)))
+        (cl-letf (((symbol-function 'pgsql-exec-async)
+                   (lambda (&rest _) (signal (car server-error) (cdr server-error)))))
+          (should-error (clutch-db-query-async conn "SELECT 1" #'ignore)
+                        :type 'clutch-db-error)
+          (should-not (collecting-p)))))))
+
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
   (require 'clutch-db-pg)
