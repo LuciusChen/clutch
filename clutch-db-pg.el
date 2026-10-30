@@ -50,6 +50,7 @@
 (declare-function pgsql-result-affected-rows "pgsql" (result))
 (declare-function pgsql-result-columns "pgsql" (result))
 (declare-function pgsql-result-command-tag "pgsql" (result))
+(declare-function pgsql-result-notices "pgsql" (result))
 (declare-function pgsql-result-rows "pgsql" (result))
 (declare-function pgsql-transaction-status "pgsql" (connection))
 (declare-function pgsql-type-name "pgsql" (oid))
@@ -289,6 +290,20 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
   "Normalize PG ROW using clutch column metadata COLUMNS."
   (cl-mapcar #'clutch-db-pg--normalize-value row columns))
 
+(defun clutch-db-pg--format-notice (fields)
+  "Return notice FIELDS as psql prints them, with DETAIL and HINT lines."
+  (string-join
+   (delq nil
+         (list (format "%s:  %s"
+                       (or (plist-get fields :severity-localized)
+                           (plist-get fields :severity))
+                       (plist-get fields :message))
+               (when-let* ((detail (plist-get fields :detail)))
+                 (format "DETAIL:  %s" detail))
+               (when-let* ((hint (plist-get fields :hint)))
+                 (format "HINT:  %s" hint))))
+   "\n"))
+
 (defun clutch-db-pg--wrap-result (conn pg-result)
   "Convert PG-RESULT from CONN to a `clutch-db-result'."
   (let* ((raw-cols (pgsql-result-columns pg-result))
@@ -304,7 +319,11 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
      :rows rows
      :affected-rows (pgsql-result-affected-rows pg-result)
      :last-insert-id nil
-     :warnings nil)))
+     :warnings nil
+     ;; A pgsql.el without `pgsql-result-notices' keeps no notices.
+     :messages (and (fboundp 'pgsql-result-notices)
+                    (mapcar #'clutch-db-pg--format-notice
+                            (pgsql-result-notices pg-result))))))
 
 (defun clutch-db-pg--exec (conn sql)
   "Execute SQL through the pgsql.el client owned by CONN."

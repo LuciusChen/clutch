@@ -249,7 +249,9 @@
     (let* ((sql "UPDATE t SET x = 1;")
            (old (make-clutch-test-conn :live nil))
            (new (make-clutch-test-conn
-                 :queries (list (cons sql (make-clutch-db-result :affected-rows 3)))))
+                 :queries (list (cons sql (make-clutch-db-result
+                                           :affected-rows 3
+                                           :messages '("NOTICE:  rows touched"))))))
            ensured confirmed output)
       (setq-local clutch-connection old)
       (cl-letf (((symbol-function 'clutch--ensure-connection)
@@ -262,7 +264,7 @@
       (should ensured)
       (should (equal confirmed sql))
       (should-not (clutch-test-conn-queries new))
-      (should (string-match-p "Affected rows" output))
+      (should (string-match-p "NOTICE:  rows touched\nAffected rows" output))
       (should (eq (clutch-test-console--face-at-match "Affected rows" output)
                   'font-lock-keyword-face))
       (should (eq (clutch-test-console--face-at-match "3" output)

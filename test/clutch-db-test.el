@@ -187,13 +187,14 @@
 
 (cl-defstruct (clutch-db-test--pg-result
                (:constructor clutch-db-test--make-pg-result
-                             (&key columns rows command-tag affected-rows))
+                             (&key columns rows command-tag affected-rows notices))
                (:copier nil))
   "Test-owned stand-in for values exposed by pgsql.el result accessors."
   columns
   rows
   command-tag
-  affected-rows)
+  affected-rows
+  notices)
 
 (defmacro clutch-db-test--with-pgsql-results (&rest body)
   "Run BODY with pgsql.el public result accessors serving test fakes."
@@ -205,7 +206,9 @@
              ((symbol-function 'pgsql-result-affected-rows)
               #'clutch-db-test--pg-result-affected-rows)
              ((symbol-function 'pgsql-result-command-tag)
-              #'clutch-db-test--pg-result-command-tag))
+              #'clutch-db-test--pg-result-command-tag)
+             ((symbol-function 'pgsql-result-notices)
+              #'clutch-db-test--pg-result-notices))
      ,@body))
 
 (defmacro clutch-db-test--with-pgsql-client (&rest body)
@@ -1261,6 +1264,23 @@ tracks, and a disconnect no longer asked first."
                                                  :debug (:sqlstate "XX000"))))))
       (cl-letf (((symbol-function 'pgsql-exec-async) nil))
         (should-not (clutch-db-query-async conn "SELECT 1" #'ignore))))))
+
+(ert-deftest clutch-db-test-pg-results-show-their-statement-notices ()
+  "A result should show its statement's notices as psql prints them."
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pg-connection :database "test")))
+    (clutch-db-test--with-pgsql-client
+      (cl-letf (((symbol-function 'pgsql-exec)
+                 (lambda (&rest _)
+                   (clutch-db-test--make-pg-result
+                    :notices '((:severity-localized "NOTICE"
+                                :message "10 records moved")
+                               (:severity-localized "INFO" :message "vacuuming t"
+                                :detail "pages: 0 removed" :hint "none"))))))
+        (should (equal (clutch-db-result-messages
+                        (clutch-db-query conn "DO $$ BEGIN END $$"))
+                       '("NOTICE:  10 records moved"
+                         "INFO:  vacuuming t\nDETAIL:  pages: 0 removed\nHINT:  none")))))))
 
 (ert-deftest clutch-db-test-native-pg-manual-mode-lazy-begin ()
   "Native PostgreSQL manual-commit should lazily BEGIN on the first foreground query."
@@ -6721,6 +6741,16 @@ Skips if `clutch-db-test-pg-password' is nil."
  clutch-db-test--with-pg
  (:db-live :pg-live)
  "PostgreSQL")
+
+(ert-deftest clutch-db-test-pg-live-results-carry-notices ()
+  "PostgreSQL notices raised by a statement should come with its result."
+  :tags '(:db-live :pg-live)
+  (skip-unless (fboundp 'pgsql-result-notices))
+  (clutch-db-test--with-pg conn
+    (should (equal (clutch-db-result-messages
+                    (clutch-db-query
+                     conn "DO $$ BEGIN RAISE NOTICE '% records moved', 10; END $$"))
+                   '("NOTICE:  10 records moved")))))
 
 (ert-deftest clutch-db-test-pg-live-public-value-and-transaction-contract ()
   "PostgreSQL should preserve typed values and recover failed transactions."

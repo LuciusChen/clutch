@@ -743,6 +743,8 @@ loaded."
     (setq-local clutch--dml-result t)
     (insert (propertize (format "-- %s\n" (string-trim sql))
                         'face 'font-lock-comment-face))
+    (dolist (message (clutch-db-result-messages result))
+      (insert message "\n"))
     (insert (format "Affected rows: %s\n"
                     (or (clutch-db-result-affected-rows result) 0)))
     (when-let* ((id (clutch-db-result-last-insert-id result))

@@ -280,8 +280,10 @@ COLUMNS is a list of plists.  Required keys are :name STR and
 text, date, time, datetime, other.  Backends may add :backend-type metadata.
 ROWS is a list of lists (one per row).  Incomplete values use
 `clutch-db-value-preview' and cannot be treated as complete write/export data.
-AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results."
-  connection columns rows affected-rows last-insert-id warnings)
+AFFECTED-ROWS, LAST-INSERT-ID, and WARNINGS are for DML results.
+MESSAGES lists the notices the server sent while the statement ran, as
+display strings in arrival order."
+  connection columns rows affected-rows last-insert-id warnings messages)
 
 (defun clutch-db-result-column-names (columns)
   "Return column names from result COLUMNS as strings."
