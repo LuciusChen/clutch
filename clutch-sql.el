@@ -367,44 +367,37 @@ Expression parentheses do not create query scopes."
       (when (cdr frame) (push (cons (car frame) (length sql)) regions)))
     regions))
 
-(defun clutch--completion-query-scope (entry)
-  "Return the innermost query scope around point in statement cache ENTRY.
-The result is (START END SOURCES) in statement offsets, SOURCES being the
-scope's own FROM list as `clutch--completion-query-sources' returns it, or nil
-when the statement has no parentheses or point is outside every SELECT."
-  (let ((offset (- (point) (plist-get entry :beg)))
-        scope)
-    (dolist (candidate (plist-get entry :query-scopes))
-      (when (and (<= (nth 0 candidate) offset)
-                 (<= offset (nth 1 candidate))
-                 (or (not scope)
-                     (< (- (nth 1 candidate) (nth 0 candidate))
-                        (- (nth 1 scope) (nth 0 scope)))))
-        (setq scope candidate)))
-    scope))
+(defun clutch--completion-query-scopes (entry)
+  "Return the query scopes around point in statement cache ENTRY, innermost first.
+Each is (START END SOURCES) in statement offsets, SOURCES being the scope's
+own FROM list as `clutch--completion-query-sources' returns it.  There are
+none when the statement has no parentheses or point is outside every SELECT."
+  (let ((offset (- (point) (plist-get entry :beg))))
+    ;; Scopes around one point nest, so the innermost starts last.
+    (seq-sort-by #'car #'>
+                 (seq-filter (lambda (scope)
+                               (<= (nth 0 scope) offset (nth 1 scope)))
+                             (plist-get entry :query-scopes)))))
+
+(defun clutch--completion-scope-source (entry qualifier)
+  "Return the (ALIAS . SOURCE) that QUALIFIER names at point, or nil.
+ENTRY is the statement cache.  Scopes are searched innermost first, so a
+correlated subquery reaches an outer source and the nearest definition wins."
+  (let ((name (replace-regexp-in-string "[\"`]" "" (or qualifier ""))))
+    (cl-loop for scope in (clutch--completion-query-scopes entry)
+             thereis (assoc-string name (nth 2 scope) t))))
 
 (defun clutch--completion-derived-source (entry qualifier)
   "Resolve derived table QUALIFIER in cached statement ENTRY at point."
-  (when-let* ((source (assoc-string
-                       (replace-regexp-in-string "[\"`]" "" (or qualifier ""))
-                       (nth 2 (clutch--completion-query-scope entry)) t))
+  (when-let* ((source (clutch--completion-scope-source entry qualifier))
               ((consp (cdr source))))
     source))
 
-(defun clutch--completion-scope-tables-and-aliases (sources)
-  "Return (TABLES . ALIASES) for the table SOURCES of a cached query scope.
-SOURCES are (ALIAS . SOURCE) pairs from `clutch--completion-query-sources'.
-Derived tables are skipped, and a table named by itself has no alias."
-  (let (tables aliases)
-    (pcase-dolist (`(,alias . ,source) sources)
-      (when (stringp source)
-        (let ((table (if (clutch-db-sql-table-schema source)
-                         source
-                       (clutch--normalize-statement-table-token source))))
-          (push table tables)
-          (unless (string-equal-ignore-case alias (clutch-db-sql-table-name source))
-            (push (cons alias table) aliases)))))
-    (cons (delete-dups (nreverse tables)) (nreverse aliases))))
+(defun clutch--completion-source-table (source)
+  "Return the table token for table SOURCE of a cached query scope."
+  (if (clutch-db-sql-table-schema source)
+      source
+    (clutch--normalize-statement-table-token source)))
 
 (defun clutch--completion-query-sources (sql output-plans)
   "Return (ALIAS . SOURCE) pairs for the outer FROM list of SQL.
@@ -601,11 +594,21 @@ point's top-level set-operation branch."
   (let* ((entry (clutch--tables-in-query-cache-entry schema))
          (stmt-beg (plist-get entry :beg))
          (text (buffer-substring-no-properties stmt-beg (plist-get entry :end)))
-         (scope (clutch--completion-query-scope entry))
+         (scope (car (clutch--completion-query-scopes entry)))
          (range (and (not scope)
                      (clutch--toplevel-union-branch-range text (- (point) stmt-beg)))))
     (cond
-     (scope (clutch--completion-scope-tables-and-aliases (nth 2 scope)))
+     (scope
+      ;; A table named by itself has no alias; derived tables are no tables.
+      (let (tables aliases)
+        (pcase-dolist (`(,alias . ,source) (nth 2 scope))
+          (when (stringp source)
+            (let ((table (clutch--completion-source-table source)))
+              (push table tables)
+              (unless (string-equal-ignore-case
+                       alias (clutch-db-sql-table-name source))
+                (push (cons alias table) aliases)))))
+        (cons (delete-dups (nreverse tables)) (nreverse aliases))))
      ((equal range (cons 0 (length text)))
       (cons (plist-get entry :statement-tables)
             (plist-get entry :statement-aliases)))
@@ -856,24 +859,32 @@ For input like `u.name', returns `u' when BEG starts at `name'."
 (defun clutch--qualified-identifier-table (schema beg)
   "Return the table referenced by the qualifier before BEG in SCHEMA, or nil.
 Resolve both statement aliases like `u.name' and direct qualified table names
-like `orders.id' within the current statement."
+like `orders.id' within the current statement.  The query scopes around BEG
+come first, innermost first, so a correlated subquery reaches an outer alias
+and the nearest definition wins.  Outside every SELECT, the aliases of BEG's
+statement branch apply instead, and the statement's table names come last."
   (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
               (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
-    (or (cdr (assoc-string qualifier
-                           (cdr (clutch--query-scope-tables-and-aliases schema))
-                           t))
-        (let* ((tables (clutch--tables-in-current-statement schema))
-               (matches
-                (cl-remove-if-not
-                 (lambda (table)
-                   (string-equal-ignore-case
-                    qualifier (clutch-db-sql-table-name table)))
-                 tables)))
-          (or (cl-find qualifier tables
-                           :test (lambda (a b)
-                                   (string-equal-ignore-case
-                                    a (replace-regexp-in-string "[\"`]" "" b))))
-              (and (= (length matches) 1) (car matches)))))))
+    (if-let* ((found (clutch--completion-scope-source
+                      (clutch--tables-in-query-cache-entry schema) raw)))
+        ;; A derived table has no catalog columns; its caller resolves it.
+        (and (stringp (cdr found))
+             (clutch--completion-source-table (cdr found)))
+      (or (cdr (assoc-string qualifier
+                             (cdr (clutch--query-scope-tables-and-aliases schema))
+                             t))
+          (let* ((tables (clutch--tables-in-current-statement schema))
+                 (matches
+                  (cl-remove-if-not
+                   (lambda (table)
+                     (string-equal-ignore-case
+                      qualifier (clutch-db-sql-table-name table)))
+                   tables)))
+            (or (cl-find qualifier tables
+                         :test (lambda (a b)
+                                 (string-equal-ignore-case
+                                  a (replace-regexp-in-string "[\"`]" "" b))))
+                (and (= (length matches) 1) (car matches))))))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"

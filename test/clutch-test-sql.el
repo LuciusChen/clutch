@@ -1931,6 +1931,40 @@ Structure is not interpreted here; callers confirm depth and literals through
                             (clutch-completion-at-point))
                            '("id" "name")))))))))
 
+(ert-deftest clutch-test-completion-at-point-resolves-outer-aliases-in-subqueries ()
+  "A correlated subquery should resolve an enclosing alias, nearest first, not a sibling's."
+  (dolist (case '(("select u.id from users u where exists (select 1 from orders o where o.user_id = u.|)"
+                   ("id" "name"))
+                  ("select u.id from users u where exists (select 1 from orders u where u.|)"
+                   ("id" "user_id"))
+                  ("select u.id from users u where exists (select 1 from orders o where o.id = x.|) and exists (select 1 from users x)"
+                   nil)
+                  ("select users.id from orders users where exists (select 1 from users u where u.id = users.|)"
+                   ("id" "user_id"))
+                  ("select d.uid from (select id as uid from users) d where exists (select 1 from orders o where o.id = d.|)"
+                   ("uid"))))
+    (pcase-let ((`(,sql ,expected) case))
+      (ert-info ((format "sql: %s" sql))
+        (with-temp-buffer
+          (clutch-mode)
+          (insert sql)
+          (goto-char (point-min))
+          (search-forward "|")
+          (delete-char -1)
+          (let ((schema (make-hash-table :test 'equal))
+                (clutch-connection 'fake))
+            (puthash "users" '("id" "name") schema)
+            (puthash "orders" '("id" "user_id") schema)
+            (cl-letf (((symbol-function 'clutch--schema-for-connection)
+                       (lambda (&optional _conn) schema))
+                      ((symbol-function 'clutch-db-busy-p)
+                       (lambda (_conn) nil))
+                      ((symbol-function 'clutch-db-completion-sync-columns-p)
+                       (lambda (_conn) t)))
+              (let ((capf (clutch-completion-at-point)))
+                (should (equal (and capf (clutch-test--completion-candidates capf))
+                               expected))))))))))
+
 (ert-deftest clutch-test-complete-at-point-keeps-empty-column-completion-active ()
   "Manual empty-column completion should keep its completion region valid."
   (with-temp-buffer
