@@ -164,16 +164,51 @@ Each output plist has :name and :type-category."
                                   (plist-get col :character-set))))
           mysql-columns))
 
+(defconst clutch-db-mysql--max-warning-messages 100
+  "Most warnings read for one statement.
+An INSERT of many rows can raise one per row, up to `max_error_count'.")
+
+(defun clutch-db-mysql--warning-messages (conn count)
+  "Return the COUNT warnings of CONN's last statement as display strings.
+Warnings past `clutch-db-mysql--max-warning-messages', or past the
+server's `max_error_count', are counted in one message.  The statement
+already ran, so a failure to read them becomes a message rather than its
+error, which would also stop an asynchronous callback, after a timeout
+has resynchronized or closed CONN."
+  (when (and count (> count 0))
+    (condition-case err
+        (let ((rows (condition-case timeout
+                        (mysql-result-rows
+                         (mysql-query
+                          conn (format "SHOW WARNINGS LIMIT %d"
+                                       clutch-db-mysql--max-warning-messages)))
+                      (mysql-timeout
+                       (clutch-db-mysql--handle-query-timeout conn timeout)))))
+          (append
+           (mapcar (pcase-lambda (`(,level ,code ,message))
+                     (format "%s (%s): %s" level code message))
+                   rows)
+           (when (> count (length rows))
+             (list (format "%d more warnings not shown"
+                           (- count (length rows)))))))
+      ((clutch-db-error mysql-error)
+       (list (format "Warnings could not be read: %s"
+                     (clutch-db--error-message err)))))))
+
 (defun clutch-db-mysql--wrap-result (mysql-result)
-  "Convert MYSQL-RESULT to a `clutch-db-result'."
-  (let ((cols (mysql-result-columns mysql-result)))
+  "Convert MYSQL-RESULT to a `clutch-db-result'.
+Its warnings are read at once, before another statement replaces them."
+  (let ((cols (mysql-result-columns mysql-result))
+        (conn (mysql-result-connection mysql-result))
+        (warnings (mysql-result-warnings mysql-result)))
     (make-clutch-db-result
-     :connection (mysql-result-connection mysql-result)
+     :connection conn
      :columns (when cols (clutch-db-mysql--convert-columns cols))
      :rows (mysql-result-rows mysql-result)
      :affected-rows (mysql-result-affected-rows mysql-result)
      :last-insert-id (mysql-result-last-insert-id mysql-result)
-     :warnings (mysql-result-warnings mysql-result))))
+     :warnings warnings
+     :messages (clutch-db-mysql--warning-messages conn warnings))))
 
 ;;;; Connect function
 
@@ -419,13 +454,16 @@ Decline when the installed mysql.el cannot execute asynchronously."
       (mysql-query-async
        conn sql
        (lambda (result error)
-         ;; CONN is idle when this runs.
-         (when result
-           (clutch-db-mysql--follow-database conn sql))
-         (funcall callback
-                  (and result (clutch-db-mysql--wrap-result result))
-                  (and error
-                       (cons 'clutch-db-error (clutch-db--error-data error)))))))
+         ;; CONN is idle when this runs.  Wrapping reads the statement's
+         ;; warnings, so it goes before asking for the database.
+         (let ((wrapped (and result (clutch-db-mysql--wrap-result result))))
+           (when result
+             (clutch-db-mysql--follow-database conn sql))
+           (funcall callback
+                    wrapped
+                    (and error
+                         (cons 'clutch-db-error
+                               (clutch-db--error-data error))))))))
     t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
