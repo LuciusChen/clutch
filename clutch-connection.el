@@ -164,6 +164,18 @@ ssh-like TRAMP directories."
                  (const :tag "Ask before using current TRAMP context" ask)
                  (const :tag "Automatically use current TRAMP context" auto))
   :group 'clutch)
+
+(defcustom clutch-ssh-isolate-connections t
+  "Whether each ssh process Clutch starts uses a connection of its own.
+When non-nil, Clutch's ssh ignores ControlMaster settings, so
+disconnecting always closes the local port it forwarded.  When nil, ssh
+follows ControlMaster in ~/.ssh/config and `rpc' TRAMP paths reuse
+tramp-rpc's connection.  That lets a host that needs a password or a
+second factor work through a connection logged in elsewhere, but a port
+forwarded over a shared connection stays open until that connection
+closes."
+  :type 'boolean
+  :group 'clutch)
 (defvar clutch--dml-result)
 
 (defvar clutch--execution-refresh-timer nil
@@ -1753,14 +1765,14 @@ transport."
           (string-match-p "agent refused operation" cleaned)
           (string-match-p "sign_and_send_pubkey" cleaned))
       (format
-       "the SSH key for %s is locked. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to unlock it"
-       ssh-host ssh-host))
+       "the SSH key for %s is locked. Run M-x clutch-prepare-ssh-host once to unlock it"
+       ssh-host))
      ((or (string-match-p "host key verification failed" cleaned)
           (string-match-p "host identification has changed" cleaned)
           (string-match-p "are you sure you want to continue connecting" cleaned))
       (format
-       "SSH host verification for %s needs attention. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to confirm the host key"
-       ssh-host ssh-host))
+       "SSH host verification for %s needs attention. Run M-x clutch-prepare-ssh-host once to confirm the host key"
+       ssh-host))
      ((string-match-p "permission denied" cleaned)
       (format
        "SSH authentication to %s was rejected. Run M-x clutch-prepare-ssh-host once, or check the remote username and ~/.ssh/authorized_keys"
@@ -1780,8 +1792,8 @@ transport."
       (format "the remote side rejected SSH port forwarding via %s" ssh-host))
      ((string-empty-p cleaned)
       (format
-       "OpenSSH could not use host %s in batch mode. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once first"
-       ssh-host ssh-host))
+       "OpenSSH could not use host %s in batch mode. Run M-x clutch-prepare-ssh-host once first"
+       ssh-host))
      (t last-line))))
 
 (defun clutch--ssh-prepare-sentinel (proc _event)
@@ -1807,13 +1819,15 @@ transport."
       (with-current-buffer buffer
         (let ((inhibit-read-only t))
           (erase-buffer)))
-      (setq buffer (make-comint-in-buffer
-                    (format "clutch-ssh-prepare-%s" ssh-host)
-                    buffer
-                    "ssh"
-                    nil
-                    ssh-host
-                    "exit"))
+      ;; Share connections as the tunnel does, or a shared connection
+      ;; could report the host ready while the tunnel's login still fails.
+      (setq buffer (apply #'make-comint-in-buffer
+                          (format "clutch-ssh-prepare-%s" ssh-host)
+                          buffer
+                          "ssh"
+                          nil
+                          (append (clutch--ssh-sharing-options)
+                                  (list ssh-host "exit"))))
       (setq proc (get-buffer-process buffer))
       (process-put proc :clutch-ssh-host ssh-host)
       (set-process-query-on-exit-flag proc nil)
@@ -1910,15 +1924,17 @@ and TIMEOUT is the maximum wait in seconds."
             (setq proc (make-process
                         :name (format "clutch-ssh-%s" ssh-host)
                         :buffer buffer
-                        :command (list "ssh"
-                                       "-N"
-                                       "-o" "BatchMode=yes"
-                                       "-o" "ExitOnForwardFailure=yes"
-                                       "-L" (format "127.0.0.1:%d:%s:%s"
-                                                    local-port
-                                                    (plist-get params :host)
-                                                    (plist-get params :port))
-                                       ssh-host)
+                        :command (append
+                                  '("ssh")
+                                  (clutch--ssh-sharing-options)
+                                  (list "-N"
+                                        "-o" "BatchMode=yes"
+                                        "-o" "ExitOnForwardFailure=yes"
+                                        "-L" (format "127.0.0.1:%d:%s:%s"
+                                                     local-port
+                                                     (plist-get params :host)
+                                                     (plist-get params :port))
+                                        ssh-host))
                         :coding 'utf-8
                         :noquery t))
             (clutch--wait-for-ssh-tunnel
@@ -2013,6 +2029,14 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
        :warning)
       nil))))
 
+(defun clutch--ssh-sharing-options (&optional vec)
+  "Return the ssh options that decide connection sharing for TRAMP VEC.
+See `clutch-ssh-isolate-connections'.  They go before any other option,
+since ssh keeps the first value it reads for each."
+  (if clutch-ssh-isolate-connections
+      '("-o" "ControlMaster=no" "-o" "ControlPath=none")
+    (and vec (clutch--tramp-rpc-controlmaster-options vec))))
+
 (defun clutch--start-tramp-ssh-forward (params)
   "Start an OpenSSH local forward for ssh-like TRAMP PARAMS."
   (unless (executable-find "ssh")
@@ -2042,13 +2066,13 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                         :name (format "clutch-tramp-ssh-%s:%s" host port)
                         :buffer buffer
                         :command (append
-                                  (list "ssh"
-                                        "-N"
+                                  '("ssh")
+                                  (clutch--ssh-sharing-options vec)
+                                  (list "-N"
                                         "-o" "BatchMode=yes"
                                         "-o" "ExitOnForwardFailure=yes"
                                         "-L" (format "127.0.0.1:%d:%s:%s"
                                                      local-port host port))
-                                  (clutch--tramp-rpc-controlmaster-options vec)
                                   (when proxyjump
                                     (list "-J" proxyjump))
                                   (when ssh-port
@@ -2106,8 +2130,9 @@ file handlers, so provide a local method entry when tramp-rpc is not loaded."
                                proxyjump-vecs ",")))
                  (ssh-port (tramp-file-name-port target-vec)))
             (append
-             (list "ssh" "-T" "-o" "BatchMode=yes")
-             (clutch--tramp-rpc-controlmaster-options target-vec)
+             '("ssh")
+             (clutch--ssh-sharing-options target-vec)
+             (list "-T" "-o" "BatchMode=yes")
              (when proxyjump
                (list "-J" proxyjump))
              (when ssh-port
