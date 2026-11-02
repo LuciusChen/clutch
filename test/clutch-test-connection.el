@@ -723,6 +723,26 @@ command quoted for the remote shell."
       (when server
         (clutch--stop-connection-transport (list :process server))))))
 
+(ert-deftest clutch-test-container-forward-forgets-exited-children ()
+  "A container listener keeps only its live children, so serving many
+connections does not pile up the processes of finished ones."
+  (skip-unless (and (executable-find "sleep") (executable-find "true")))
+  (let ((listener (start-process "clutch-test-listener" nil "sleep" "60"))
+        (done (start-process "clutch-test-done" nil "true"))
+        (live (start-process "clutch-test-live" nil "sleep" "60"))
+        (new (start-process "clutch-test-new" nil "sleep" "60")))
+    (unwind-protect
+        (progn
+          (while (process-live-p done)
+            (accept-process-output done 0.05))
+          (clutch--container-forward-register-child listener done)
+          (clutch--container-forward-register-child listener live)
+          (clutch--container-forward-register-child listener new)
+          (should (equal (process-get listener :clutch-container-children)
+                         (list new live))))
+      (dolist (proc (list listener live new))
+        (when (process-live-p proc) (delete-process proc))))))
+
 (ert-deftest clutch-test-ssh-diagnose-output-hints-common-auth-failures ()
   "SSH diagnosis should point users at the right interactive recovery path."
   (dolist (case `((locked-key
@@ -2418,6 +2438,25 @@ arrived before the disconnect, waiting to be shown, keeps its message."
             (should-not (process-live-p proc))
             (should-not (gethash conn clutch--connection-transport-cache)))
         (when (process-live-p proc) (delete-process proc))))))
+
+(ert-deftest clutch-test-close-connection-stops-its-transport ()
+  "Closing a connection from `clutch-open-connection' stops its tunnel,
+also when the connection has already died."
+  (skip-unless (executable-find "sleep"))
+  (dolist (live '(t nil))
+    (ert-info ((format "live %s" live))
+      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
+            (conn (make-clutch-test-conn :live live))
+            (proc (start-process "clutch-test-tunnel" nil "sleep" "60")))
+        (unwind-protect
+            (progn
+              (puthash conn (list :kind 'ssh :process proc)
+                       clutch--connection-transport-cache)
+              (clutch-close-connection conn)
+              (should-not (clutch-db-live-p conn))
+              (should-not (process-live-p proc))
+              (should-not (gethash conn clutch--connection-transport-cache)))
+          (when (process-live-p proc) (delete-process proc)))))))
 
 (ert-deftest clutch-test-teardown-clears-the-connections-schema-metadata-state ()
   "Ending a session should clear schema refresh state for its connection object.

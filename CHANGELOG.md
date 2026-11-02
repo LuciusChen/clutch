@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `clutch-close-connection` closes a connection opened with `clutch-open-connection` and stops its SSH or TRAMP forward, also when the connection has already died. `clutch-db-disconnect`, which that function's documentation used to name, left the forward running.
+
+### Fixed
+
+- A TRAMP container forward no longer keeps the processes of every connection it has served; it drops those that have exited.
+
 ## 0.7.1 - 2026-10-31
 
 ### Added
