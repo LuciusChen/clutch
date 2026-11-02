@@ -4555,6 +4555,33 @@ which has no tree format, has no plan."
                                (:label "Table scan on d" :total 0 :rows nil
                                 :children nil)))))))))
 
+(ert-deftest clutch-db-test-jdbc-plan-follows-the-url ()
+  "A JDBC connection has the plan of the database its URL names: JSON
+text for PostgreSQL, the tree format for MySQL, and none otherwise."
+  (cl-flet ((conn (url) (make-clutch-jdbc-conn :driver 'jdbc
+                                               :params (list :url url)))
+            (result (value) (make-clutch-db-result :rows (list (list value)))))
+    (let ((pg (conn "jdbc:postgresql://db/app"))
+          (mysql (conn "jdbc:mysql://db/app")))
+      (should (equal (clutch-db-plan-sql pg "SELECT 1" t)
+                     "EXPLAIN (FORMAT JSON, ANALYZE) SELECT 1"))
+      (should (equal (clutch-db-plan-sql mysql "SELECT 1" nil)
+                     "EXPLAIN FORMAT=TREE SELECT 1"))
+      (should-not (clutch-db-plan-sql (conn "jdbc:oracle:thin:@db:1521/x")
+                                      "SELECT 1" nil))
+      (should (equal (clutch-db-plan
+                      pg (result "[{\"Plan\": {\"Node Type\": \"Seq Scan\",
+                                    \"Relation Name\": \"t\", \"Alias\": \"t\",
+                                    \"Total Cost\": 1.5, \"Plan Rows\": 3}}]"))
+                     '(:unit cost
+                       :roots ((:label "Seq Scan on t" :total 1.5 :rows 3
+                                :children nil)))))
+      (should (equal (clutch-db-plan
+                      mysql (result "-> Table scan on t  (cost=0.55 rows=3)\n"))
+                     '(:unit cost
+                       :roots ((:label "Table scan on t" :total 0.55 :rows 3
+                                :children nil))))))))
+
 (ert-deftest clutch-db-test-mysql-results-show-their-warnings ()
   "A MySQL result with warnings should show what SHOW WARNINGS lists.
 A statement without warnings asks nothing more, and one whose warnings

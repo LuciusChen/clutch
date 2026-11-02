@@ -1372,39 +1372,12 @@ ORDER BY pk.ord"
 ;;;; Plans
 
 (cl-defmethod clutch-db-plan-sql ((_conn clutch-db-pg--connection) sql analyze)
-  "Return SQL asking PostgreSQL for the plan of SQL as JSON.
-ANALYZE non-nil runs SQL to measure the plan."
-  (format "EXPLAIN (FORMAT JSON%s) %s" (if analyze ", ANALYZE" "") sql))
-
-(defun clutch-db-pg--plan-node (plan)
-  "Return the plan node of PostgreSQL JSON PLAN, with its children.
-A plan measured with ANALYZE reports its time per loop, so the node's
-total is that time times its loops."
-  (let* ((type (gethash "Node Type" plan))
-         (join (gethash "Join Type" plan))
-         (relation (gethash "Relation Name" plan))
-         (alias (gethash "Alias" plan))
-         (index (gethash "Index Name" plan))
-         (time (gethash "Actual Total Time" plan))
-         (loops (gethash "Actual Loops" plan)))
-    (list :label (concat (if (and join (not (equal join "Inner")))
-                             (replace-regexp-in-string
-                              "Join\\'" (concat join " Join") type t t)
-                           type)
-                         (and index (format " using %s" index))
-                         (and relation (format " on %s" relation))
-                         (and alias (not (equal alias relation))
-                              (format " %s" alias)))
-          :total (if time (* time loops) (gethash "Total Cost" plan))
-          :rows (or (gethash "Actual Rows" plan) (gethash "Plan Rows" plan))
-          :children (mapcar #'clutch-db-pg--plan-node
-                            (gethash "Plans" plan)))))
+  "Return SQL asking PostgreSQL for the plan of SQL, measured when ANALYZE."
+  (clutch-db-postgres-plan-sql sql analyze))
 
 (cl-defmethod clutch-db-plan ((_conn clutch-db-pg--connection) result)
   "Return the plan PostgreSQL reported as JSON in RESULT."
-  (let ((plan (gethash "Plan" (aref (caar (clutch-db-result-rows result)) 0))))
-    (list :unit (if (gethash "Actual Total Time" plan) 'ms 'cost)
-          :roots (list (clutch-db-pg--plan-node plan)))))
+  (clutch-db-postgres-plan (caar (clutch-db-result-rows result))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)

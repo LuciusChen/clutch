@@ -2688,6 +2688,26 @@ without a unique index never asks for them."
                               metadata-conn table)))
             (list rowid))))))
 
+(defun clutch-jdbc--plan-dialect (conn)
+  "Return `postgres' or `mysql' when CONN's URL names that database, else nil.
+The plans of other JDBC databases differ in syntax and shape."
+  (cond ((clutch-jdbc--url-prefix-p conn "jdbc:postgresql:") 'postgres)
+        ((clutch-jdbc--url-prefix-p conn "jdbc:mysql:") 'mysql)))
+
+(cl-defmethod clutch-db-plan-sql ((conn clutch-jdbc-conn) sql analyze)
+  "Return SQL asking JDBC CONN for the plan of SQL, measured when ANALYZE.
+Only PostgreSQL and MySQL URLs have plans."
+  (pcase (clutch-jdbc--plan-dialect conn)
+    ('postgres (clutch-db-postgres-plan-sql sql analyze))
+    ('mysql (clutch-db-mysql-plan-sql sql analyze))))
+
+(cl-defmethod clutch-db-plan ((conn clutch-jdbc-conn) result)
+  "Return the plan in RESULT of JDBC CONN's plan SQL."
+  (let ((value (caar (clutch-db-result-rows result))))
+    (pcase (clutch-jdbc--plan-dialect conn)
+      ('postgres (clutch-db-postgres-plan value))
+      ('mysql (clutch-db-mysql-plan value)))))
+
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table
                                       &optional schema catalog)
   "Return foreign key info for TABLE on JDBC CONN."

@@ -202,6 +202,10 @@ CLOB results carry an original length and a preview capped at 256 UTF-16 code un
 - Oracle views and synonyms are classified before primary-key, column, index, or =ROWID= metadata lookup.  Dictionary relations such as =ALL_TABLES= and =USER_TABLES= therefore remain read-only without invoking unsafe identity probes.
 - Oracle =ROWID= is a physical row locator and can change after =UPDATE=; stable result order after refresh still requires an explicit SQL =ORDER BY=.
 
+** Statement Plans
+
+=clutch-explain-plan= (=E= in the console menu) reads plans over JDBC when the connection's =:url= starts with =jdbc:postgresql:= or =jdbc:mysql:=, the same way as the native PostgreSQL and MySQL backends; see the [[file:interactive-client.org][interactive guide]]. A =jdbc:mysql:= URL that reaches a MariaDB server fails with the server's syntax error, since MariaDB has no tree format. Other JDBC databases, including Oracle, SQL Server, DuckDB, ClickHouse and Redshift, report that plans are not available.
+
 ** Transaction Control
 
 - Oracle JDBC connections use manual commit by default, matching DataGrip's safer query-console behavior.

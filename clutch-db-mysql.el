@@ -321,58 +321,6 @@ itself succeeded."
 
 ;;;; Lifecycle methods
 
-;;;; Plans
-
-(defun clutch-db-mysql--plan-node (text measured)
-  "Return the plan node of one MySQL tree plan line TEXT, without children.
-TEXT follows the arrow, as \"Table scan on t  (cost=1.2 rows=10) (actual
-time=0.04..0.06 rows=10 loops=1)\".  When MEASURED, the node's total is
-its last row's time per loop times its loops, and zero for a step that
-never ran, whose rows are unknown; otherwise it is the planner's cost."
-  (let* ((number "\\([0-9]+\\(?:\\.[0-9]+\\)?\\(?:e[+-]?[0-9]+\\)?\\)")
-         (cut (string-match "  (\\(?:cost\\|actual\\|never\\)" text))
-         (label (substring text 0 cut))
-         ;; Newer servers write the cost as a range, STARTUP..TOTAL.
-         (cost (and (string-match (concat "(cost=\\(?:[^ ]*?\\.\\.\\)?"
-                                          number " rows=" number)
-                                  text)
-                    (list (string-to-number (match-string 1 text))
-                          (string-to-number (match-string 2 text)))))
-         (actual (and (string-match
-                       (concat "(actual time=[^ ]+\\.\\." number
-                               " rows=" number " loops=" number ")")
-                       text)
-                      (list (string-to-number (match-string 1 text))
-                            (string-to-number (match-string 2 text))
-                            (string-to-number (match-string 3 text))))))
-    (list :label label
-          :total (cond (actual (* (nth 0 actual) (nth 2 actual)))
-                       (measured 0)
-                       (t (car cost)))
-          :rows (cond (actual (nth 1 actual))
-                      ((not measured) (cadr cost)))
-          :children nil)))
-
-(defun clutch-db-mysql--plan (text)
-  "Return the plan of MySQL's tree format TEXT.
-Each step is a line \"-> STEP\", indented four spaces deeper than its
-parent."
-  (let ((measured (string-match-p "(actual time=" text))
-        roots stack)
-    (dolist (line (split-string text "\n" t))
-      (when (string-match "\\`\\( *\\)-> \\(.*\\)" line)
-        (let ((depth (/ (length (match-string 1 line)) 4))
-              (node (clutch-db-mysql--plan-node (match-string 2 line)
-                                                measured)))
-          (setq stack (last stack depth))
-          (if-let* ((up (car stack)))
-              (plist-put up :children (nconc (plist-get up :children)
-                                             (list node)))
-            (push node roots))
-          (push node stack))))
-    (list :unit (if measured 'ms 'cost)
-          :roots (nreverse roots))))
-
 (when (require 'mysql nil t)
 
 (cl-defmethod clutch-db-disconnect ((conn mysql-conn))
@@ -860,11 +808,11 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
 ANALYZE non-nil runs SQL to measure the plan.  MariaDB has no tree
 format, so it has no plan here."
   (unless (string-match-p "MariaDB" (or (mysql-conn-server-version conn) ""))
-    (concat (if analyze "EXPLAIN ANALYZE " "EXPLAIN FORMAT=TREE ") sql)))
+    (clutch-db-mysql-plan-sql sql analyze)))
 
 (cl-defmethod clutch-db-plan ((_conn mysql-conn) result)
   "Return the plan MySQL reported as tree text in RESULT."
-  (clutch-db-mysql--plan (caar (clutch-db-result-rows result))))
+  (clutch-db-mysql-plan (caar (clutch-db-result-rows result))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
                                       &optional schema _catalog)
