@@ -20,6 +20,7 @@
 (require 'clutch-sql)
 (require 'clutch-ui)
 (require 'clutch-edit)
+(require 'clutch-viz)
 (require 'json)
 (require 'subr-x)
 (require 'text-property-search)
@@ -1003,6 +1004,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map (kbd "M-<") #'clutch-result-first-page)
     (define-key map "#" #'clutch-result-count-total)
     (define-key map "A" #'clutch-result-aggregate)
+    (define-key map "B" #'clutch-result-chart)
     (define-key map "s" #'clutch-result-sort-by-column)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "k" #'clutch-copy-context-for-agent)
@@ -1058,6 +1060,7 @@ Navigate (row):
   \\[clutch-result-last-page]	Last data page
   \\[clutch-result-count-total]	Query total row count
   \\[clutch-result-aggregate]	Aggregate current/selected column values
+  \\[clutch-result-chart]	Chart the column at point as bars
   \\[clutch-result-scroll-right]	Scroll right (snap to next column border)
   \\[clutch-result-scroll-left]	Scroll left (snap to previous column border)
 Copy:
@@ -2296,6 +2299,144 @@ With prefix arg REFINE and an active region, enter visual refine mode."
        (clutch-result--region-rectangle-indices)
        #'clutch-result--do-aggregate)
     (clutch-result--do-aggregate (clutch-result--selection-rect))))
+
+;;;; Chart
+
+(defvar-local clutch-chart--source nil
+  "What the chart draws: (RESULT-BUFFER VALUE-COLUMN LABEL-COLUMN).
+Each column is (INDEX . NAME); LABEL-COLUMN nil labels bars by row number.")
+
+(defvar-keymap clutch-chart-mode-map
+  :doc "Keymap for `clutch-chart-mode'."
+  "RET" #'clutch-chart-goto-row)
+
+(define-derived-mode clutch-chart-mode special-mode "clutch-chart"
+  "Major mode for a bar chart of a result column.
+\\<clutch-chart-mode-map>\\[clutch-chart-goto-row] shows the bar's row in the result, and
+\\[revert-buffer] draws the chart again from the result's current page,
+at the window's width."
+  (setq-local truncate-lines t
+              revert-buffer-function #'clutch-chart--render))
+
+(defun clutch-chart--finite-number (value)
+  "Return VALUE as a finite number, or nil."
+  (when-let* ((number (clutch-result--parse-number value)))
+    (and (or (integerp number)
+             (and (= number number) (/= (abs number) 1.0e+INF)))
+         number)))
+
+(defun clutch-chart--rows (value-cidx label-cidx)
+  "Return chart rows for VALUE-CIDX labelled by LABEL-CIDX, on this page.
+LABEL-CIDX nil labels each row by its number in the result."
+  (let ((offset (or clutch--page-offset
+                    (* clutch--page-current clutch-result-max-rows))))
+    (cl-loop for row in (clutch--result-display-rows)
+             for ridx from 0
+             for value = (nth value-cidx row)
+             collect (list (if label-cidx
+                               (string-replace
+                                "\n" " " (clutch--format-value
+                                          (nth label-cidx row)))
+                             (number-to-string (+ offset ridx 1)))
+                           (clutch-chart--finite-number value)
+                           (clutch--format-value value)))))
+
+(defun clutch-chart--column-current-p (column)
+  "Return non-nil when COLUMN, (INDEX . NAME), still names a result column."
+  (or (null column)
+      (equal (nth (car column) clutch--result-columns) (cdr column))))
+
+(defun clutch-chart--render (&rest _)
+  "Draw the current buffer's chart from its result buffer.
+Arguments, as `revert-buffer' passes them, are ignored."
+  (pcase-let ((`(,source ,value ,label) clutch-chart--source))
+    (unless (buffer-live-p source)
+      (user-error "The result buffer of this chart is gone"))
+    (pcase-let ((`(,heading . ,rows)
+                 (with-current-buffer source
+                   (unless (and (clutch-chart--column-current-p value)
+                                (clutch-chart--column-current-p label))
+                     (user-error "The result's columns changed; chart it again"))
+                   (let ((rows (clutch-chart--rows (car value) (car label))))
+                     (cons (clutch-chart--heading value label rows) rows))))
+                (window (get-buffer-window nil t))
+                (inhibit-read-only t))
+      (erase-buffer)
+      (insert (propertize heading 'face 'shadow) "\n\n"
+              (clutch-viz-bar-chart rows (1- (if window
+                                                 (window-body-width window)
+                                               80)))
+              "\n")
+      (goto-char (point-min))
+      (forward-line 2))))
+
+(defun clutch-chart--heading (value label rows)
+  "Return the heading of a chart of VALUE by LABEL over ROWS."
+  (let* ((offset (or clutch--page-offset
+                     (* clutch--page-current clutch-result-max-rows)))
+         (skipped (cl-count nil rows :key #'cadr)))
+    (concat (format "%s by %s, rows %d-%d"
+                    (cdr value) (if label (cdr label) "row")
+                    (if rows (1+ offset) 0) (+ offset (length rows)))
+            (and clutch--filter-pattern ", filtered")
+            (and (> skipped 0) (format ", %d not numbers" skipped)))))
+
+(defun clutch-chart-goto-row ()
+  "Show the row of the bar at point in its result buffer."
+  (interactive)
+  (pcase-let ((`(,source ,value ,_) clutch-chart--source)
+              (ridx (or (get-text-property (point) 'clutch-viz-index)
+                        (user-error "No bar at point"))))
+    (unless (buffer-live-p source)
+      (user-error "The result buffer of this chart is gone"))
+    (pop-to-buffer source)
+    (clutch--goto-cell ridx (car value))))
+
+(defun clutch-result--chart-label-column (value-cidx)
+  "Return the first visible column other than VALUE-CIDX that is not numeric."
+  (cl-loop for cidx in (clutch--visible-columns)
+           unless (or (= cidx value-cidx)
+                      (clutch--numeric-type-p
+                       (nth cidx clutch--result-column-defs)))
+           return cidx))
+
+(defun clutch-result--read-label-column (value-cidx)
+  "Read the column that labels a chart of VALUE-CIDX, or nil for row numbers."
+  (let* ((columns (cl-loop for cidx in (clutch--visible-columns)
+                           unless (= cidx value-cidx)
+                           collect (cons (nth cidx clutch--result-columns)
+                                         cidx)))
+         (choice (completing-read "Label bars by (empty for row number): "
+                                  columns nil t)))
+    (cdr (assoc choice columns))))
+
+;;;###autoload
+(defun clutch-result-chart (&optional choose-label)
+  "Chart the column at point as one horizontal bar per row of this page.
+Bars are labelled by the first other column that is not numeric, or by
+row number; with prefix argument CHOOSE-LABEL, read the label column.
+Rows follow the client filter and sort.  Values that are not numbers draw
+no bar."
+  (interactive "P")
+  (let* ((value-cidx (or (clutch--col-idx-at-point)
+                         (user-error "No column at point")))
+         (label-cidx (if choose-label
+                         (clutch-result--read-label-column value-cidx)
+                       (clutch-result--chart-label-column value-cidx)))
+         (value (cons value-cidx (nth value-cidx clutch--result-columns)))
+         (label (and label-cidx
+                     (cons label-cidx (nth label-cidx clutch--result-columns))))
+         (source (current-buffer))
+         (buffer (get-buffer-create (format "*clutch-chart: %s*" (cdr value)))))
+    (unless (cl-some (lambda (row) (clutch-chart--finite-number
+                                    (nth value-cidx row)))
+                     (clutch--result-display-rows))
+      (user-error "Column %s has no numbers on this page" (cdr value)))
+    (with-current-buffer buffer
+      (clutch-chart-mode)
+      (setq clutch-chart--source (list source value label)))
+    (pop-to-buffer buffer)
+    (clutch-chart--render)))
 
 ;;;; Value viewers
 
@@ -4315,7 +4456,8 @@ The connection comes from the cached render state, not from the server."
     ("x" "Preview execution" clutch-preview-execution-sql)
     ("#" "Count total"       clutch-result-count-total
      :if clutch-result--server-rewritable-p)
-    ("A" "Aggregate"         clutch-result-aggregate)]
+    ("A" "Aggregate"         clutch-result-aggregate)
+    ("B" "Bar chart column"  clutch-result-chart)]
    ["Filter / Sort"
     ("/" "Client filter" clutch-result-filter
      :description clutch-result--client-filter-transient-description)

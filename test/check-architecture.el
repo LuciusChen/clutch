@@ -35,7 +35,8 @@
                          "clutch-schema" "clutch-ui")
     ("clutch-schema" "clutch-backend" "clutch-diagnostics")
     ("clutch-sql" "clutch-backend" "clutch-schema")
-    ("clutch-ui" "clutch-backend" "clutch-schema"))
+    ("clutch-ui" "clutch-backend" "clutch-schema")
+    ("clutch-viz"))
   "Allowed outbound Clutch dependencies for lower-layer modules.")
 
 (defconst clutch--architecture-largest-scc-baseline 2

@@ -30,6 +30,8 @@ flowchart TB
 
   Diagnostics["clutch-diagnostics.el<br/>leaf diagnostics service:<br/>redacted debug capture, problem records"]
 
+  Viz["clutch-viz.el<br/>leaf text charts:<br/>pure functions over Lisp data"]
+
   Facade["clutch-backend.el<br/>generic database API,<br/>result struct, capability gates,<br/>shared SQL helpers"]
 
   subgraph Adapters["Backend adapters"]
@@ -81,7 +83,7 @@ This diagram shows primary runtime/workflow ownership, not every `require` form;
 
 Staged submission has one backend contract: `clutch-db-call-with-atomic-batch`. `clutch-edit.el` owns statement order, row-count validation, and local staged state. Backends own the database boundary: an Auto-mode transaction or a Manual-mode savepoint. Transaction and savepoint completion are distinct: a failed savepoint release can still be recovered by rolling back to that savepoint, while a failed commit has an unknown outcome and must not be followed by a rollback presented as proof that nothing committed. The same unknown-outcome rule applies to explicit `clutch-commit`. JDBC keeps `java.sql.Savepoint` objects in the agent and exposes only opaque ids; neither SQL savepoint dialects nor partial-statement state leak into the result workflow. Transaction state is tracked as clean, dirty, or uncertain, with uncertain reserved for failed batch recovery or an unknown commit outcome. Rollback or reconnect clears the unsafe session state, but UI messaging preserves the distinction between known discarded work and a historical commit outcome that still requires verification.
 
-`clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug capture, the dedicated debug buffer, and buffer/connection-scoped problem records. Workflow modules call it directly for capture and error context. Problem records retain their source-buffer provenance, and diagnostics derives redacted labels through the generic backend contract, so it has no reverse dependency on connection.
+`clutch-viz.el` draws text charts from plain Lisp data and requires no Clutch module, which the architecture check enforces; `clutch-result.el` owns the chart buffer and decides what a chart shows. `clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug capture, the dedicated debug buffer, and buffer/connection-scoped problem records. Workflow modules call it directly for capture and error context. Problem records retain their source-buffer provenance, and diagnostics derives redacted labels through the generic backend contract, so it has no reverse dependency on connection.
 
 ## Module Dependencies
 
@@ -98,6 +100,7 @@ flowchart LR
   Edit["clutch-edit.el"]
   Object["clutch-object.el"]
   Result["clutch-result.el"]
+  Viz["clutch-viz.el"]
 
   Diagnostics --> Backend
   Schema --> Diagnostics
@@ -112,6 +115,7 @@ flowchart LR
   Result --> Query
   Result --> Edit
   Result --> Object
+  Result --> Viz
 ```
 
 Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. `clutch.el` requires all of them. The backend adapters require only `clutch-backend.el`. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.

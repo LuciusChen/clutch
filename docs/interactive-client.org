@@ -62,6 +62,7 @@ Without an explicit SQL row limit, paged query export and all-row result export 
 | =M->= / =M-<= | Last row window / first page                 |
 | =#=            | Query total row count                         |
 | =A=            | Aggregate numeric values (region/current cell; =C-u= with region enters visual refine mode) |
+| =B=            | Chart the column at point as one bar per row of the page (=C-u B= picks the label column) |
 | =]=            | Scroll right (snap to next column border)     |
 | =[=            | Scroll left (snap to previous column border)  |
 | ===            | Widen current column                          |

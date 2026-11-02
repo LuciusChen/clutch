@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `B` in a result buffer charts the column at point as horizontal text bars, one per row of the current page, in the order and with the filter the grid shows. Bars are labelled by the first other column that is not numeric, or by row number; `C-u B` picks the label column. `RET` on a bar shows its row, and `g` draws the chart again from the result's current page at the window's width. Where a CJK language environment makes block characters two columns wide, the bars use `#`.
+
 ## 0.7.1 - 2026-10-31
 
 ### Added
