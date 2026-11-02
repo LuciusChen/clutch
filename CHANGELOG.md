@@ -4,8 +4,7 @@
 
 ### Added
 
-- `E` in the console menu (`clutch-explain-plan`) shows the plan of the statement at point as a tree of steps. On PostgreSQL each step carries a bar, its rows and its own share of the planner's cost, without its children's; `C-u` measures time instead with `EXPLAIN ANALYZE`, which runs the statement and is allowed only for a SELECT that does not write. SQLite shows its `EXPLAIN QUERY PLAN` steps. Other backends report that plans are not available.
-- `B` in a result buffer charts the column at point as horizontal text bars, one per row of the current page, in the order and with the filter the grid shows. Bars are labelled by the first other column that is not numeric, or by row number; `C-u B` picks the label column. `RET` on a bar shows its row, and `g` draws the chart again from the result's current page at the window's width. Where a CJK language environment makes block characters two columns wide, the bars use `#`.
+- `E` in the console menu (`clutch-explain-plan`) shows the plan of the statement at point as a tree of steps. On PostgreSQL and MySQL each step carries a bar, its rows and its own share of the planner's cost, without its children's; `C-u` measures time instead with `EXPLAIN ANALYZE`, which runs the statement and is allowed only for a SELECT that does not write. MySQL needs 8.0.18 or later for `C-u` and 8.0.16 for the tree format; MariaDB has no tree format. SQLite shows its `EXPLAIN QUERY PLAN` steps. Other backends report that plans are not available.
 
 ## 0.7.1 - 2026-10-31
 

@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; Tests for the pure text charts and the result chart workflow.
+;; Tests for the pure text charts and the statement plan workflow.
 
 ;;; Code:
 
@@ -76,71 +76,6 @@ graphical frames to the same columns."
     (should (= (string-width line) 30))
     (should (string-prefix-p (truncate-string-to-width label 10 nil nil t)
                              line))))
-
-(defmacro clutch-test-viz--with-chart (spec &rest body)
-  "Chart the column at row 0, column 1 of a result made from SPEC, then
-run BODY in the chart buffer with RESULT bound to the result buffer."
-  (declare (indent 1) (debug (sexp body)))
-  `(clutch-test--with-result-state-buffer result (,@spec :render t)
-     (let (chart)
-       (unwind-protect
-           (progn
-             (with-current-buffer result
-               (clutch--goto-cell 0 1)
-               (clutch-result-chart)
-               (setq chart (current-buffer)))
-             (with-current-buffer chart ,@body))
-         (when (buffer-live-p chart) (kill-buffer chart))))))
-
-(ert-deftest clutch-test-result-chart-draws-page-rows ()
-  "The chart labels bars by the first text column and counts non-numbers."
-  (clutch-test-viz--with-chart
-      (:columns '("name" "amount")
-       :column-defs '((:name "name" :type-category text)
-                      (:name "amount" :type-category numeric))
-       :rows '(("alice" 10) ("bob" "2.50") ("carol" nil) ("dave" "1e999")))
-    (should (derived-mode-p 'clutch-chart-mode))
-    (should (eq (lookup-key clutch-result-mode-map "B") #'clutch-result-chart))
-    (let ((lines (split-string (buffer-string) "\n")))
-      (should (equal (car lines)
-                     "amount by name, rows 1-4, 2 not numbers"))
-      (should (string-match-p "\\`alice  █+ +  10\\'" (nth 2 lines)))
-      (should (string-match-p "\\`bob    [█▏▎▍▌▋▊▉]+ +2.50\\'" (nth 3 lines)))
-      (should (string-match-p "\\`carol  +NULL\\'" (nth 4 lines)))
-      (should-not (string-match-p "█" (nth 5 lines))))))
-
-(ert-deftest clutch-test-result-chart-follows-filter-and-goes-to-row ()
-  "The chart draws the filtered rows, and RET shows a bar's row."
-  (clutch-test-viz--with-chart
-      (:columns '("id" "amount")
-       :column-defs '((:name "id" :type-category numeric)
-                      (:name "amount" :type-category numeric))
-       :rows '((1 5) (2 7) (3 9))
-       :filter-pattern "x"
-       :filtered-rows '((2 7) (3 9)))
-    (should (string-prefix-p "amount by row, rows 1-2, filtered"
-                             (buffer-string)))
-    (goto-char (point-min))
-    (forward-line 3)
-    (cl-letf (((symbol-function 'pop-to-buffer) #'set-buffer))
-      (clutch-chart-goto-row)
-      (should (equal (cl-subseq (clutch--cell-at-point) 0 2) '(1 1))))))
-
-(ert-deftest clutch-test-result-chart-refuses-changed-columns ()
-  "Redrawing a chart whose result now has other columns asks to chart again."
-  (clutch-test-viz--with-chart
-      (:columns '("id" "amount") :rows '((1 5)))
-    (with-current-buffer (car clutch-chart--source)
-      (setq-local clutch--result-columns '("id" "total")))
-    (should-error (revert-buffer) :type 'user-error)))
-
-(ert-deftest clutch-test-result-chart-needs-numbers ()
-  "Charting a column without numbers on the page is refused."
-  (clutch-test--with-result-state-buffer result
-      (:columns '("id" "name") :rows '((1 "a") (2 "b")) :render t)
-    (with-current-buffer result
-      (clutch--goto-cell 0 1)
-      (should-error (clutch-result-chart) :type 'user-error))))
 
 (ert-deftest clutch-test-viz-tree-draws-branches ()
   "A tree draws its branches depth first, in box characters or ASCII."
