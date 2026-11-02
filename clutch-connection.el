@@ -796,9 +796,12 @@ ACTION is a short question such as \"Disconnect? \"."
     (signal 'clutch-db-error '("Connection closed during setup")))
   conn)
 
-(defun clutch--discard-unbound-connection (conn)
-  "Disconnect CONN, not yet bound to any buffer, and release its transport.
-The transport is released even when disconnecting signals or is quit."
+(defun clutch-close-connection (conn)
+  "Disconnect CONN, not bound to any buffer, and release its transport.
+Close a connection from `clutch-open-connection' with this rather than
+`clutch-db-disconnect', which would leave its SSH or TRAMP forward open.
+The transport is released even when disconnecting signals or is quit, or
+when CONN has already died."
   (unwind-protect
       (when (clutch--connection-alive-p conn)
         (ignore-errors (clutch-db-disconnect conn)))
@@ -904,7 +907,7 @@ hold them back, unlike the session it replaces."
       (condition-case err
           (clutch-db-set-auto-commit conn (not manual))
         ((error quit)
-         (clutch--discard-unbound-connection conn)
+         (clutch-close-connection conn)
          (signal (car err) (cdr err)))))
     conn))
 
@@ -960,7 +963,7 @@ new connection."
           (clutch--clear-connection-metadata-caches old-conn)
           (clutch--finalize-rebound-connection new-conn))
       (unless bound
-        (clutch--discard-unbound-connection new-conn)))
+        (clutch-close-connection new-conn)))
     new-conn))
 
 (defun clutch--report-replaced-session (verb prior-tx-state)
@@ -2145,12 +2148,16 @@ since ssh keeps the first value it reads for each."
       exec-command)))
 
 (defun clutch--container-forward-register-child (listener child)
-  "Register CHILD so deleting LISTENER can stop active relay processes."
+  "Register CHILD so deleting LISTENER can stop active relay processes.
+Children that have exited are dropped, so the list does not grow with
+every connection the listener has served."
   (process-put listener :clutch-container-children
                (cons child
-                     (delq child
-                           (process-get listener
-                                        :clutch-container-children)))))
+                     (cl-remove-if-not
+                      #'process-live-p
+                      (delq child
+                            (process-get listener
+                                         :clutch-container-children))))))
 
 (defun clutch--container-forward-stop-peer (proc peer-key)
   "Delete PROC's PEER-KEY process when it is still live."
@@ -2414,7 +2421,7 @@ PARAMS must include `:backend' and backend endpoint keys.  It may also include
 Clutch connection keys such as `:ssh-host', `:tramp-default-directory',
 `:profile-entry', `:pass-entry', and
 `:sql-product'.  The caller owns the returned connection and should close it
-with `clutch-db-disconnect'.  Call `clutch-prepare-connection-params' first
+with `clutch-close-connection'.  Call `clutch-prepare-connection-params' first
 when the current command source should be allowed to supply TRAMP context."
   (clutch--build-conn params))
 
@@ -2707,7 +2714,7 @@ as it was, and the session it connects is its own."
             (if (eq clutch-connection conn)
                 (setq-local clutch--session-target target
                             clutch--connected-here t)
-              (clutch--discard-unbound-connection conn))))))))
+              (clutch-close-connection conn))))))))
 
 ;;;###autoload
 (defun clutch-prepare-ssh-host (&optional ssh-host)
