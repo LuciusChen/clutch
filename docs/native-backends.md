@@ -69,7 +69,9 @@ If the first SSH use still needs a passphrase or host-key confirmation, run `M-x
 
 The batch tunnel uses `ssh -o BatchMode=yes`, so it cannot prompt. If interactive `ssh HOST` succeeds but clutch still reports SSH authentication failure, configure OpenSSH to authenticate non-interactively too, usually by loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
 
-TRAMP-aware forwarding follows the same rule.  Configure `:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an interactive password does not make that password available to clutch's separate OpenSSH `-L` process.  Use non-interactive OpenSSH auth or a reusable ControlMaster; `/rpc:` paths can reuse tramp-rpc's active ControlPath when tramp-rpc has one.
+TRAMP-aware forwarding follows the same rule.  Configure `:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an interactive password does not make that password available to clutch's separate OpenSSH `-L` process.  Use non-interactive OpenSSH auth.
+
+Each ssh process clutch starts uses a connection of its own, ignoring ControlMaster settings, so disconnecting always closes the forwarded port.  To reuse a connection that is already logged in, for a host that needs a password or a second factor, set `clutch-ssh-isolate-connections` to nil: ssh then follows ControlMaster in `~/.ssh/config`, and `/rpc:` paths reuse tramp-rpc's active ControlPath when tramp-rpc has one.  A port forwarded over a shared connection stays open until that connection closes, even after clutch disconnects.
 
 ## MySQL (`mysql`)
 

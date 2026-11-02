@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Each ssh process Clutch starts for `:ssh-host` tunnels and TRAMP forwards uses a connection of its own, ignoring ControlMaster settings in `~/.ssh/config` and tramp-rpc's ControlMaster. A tunnel forwarded over a shared connection stayed open on 127.0.0.1 after Clutch disconnected, until that connection closed, so any local process could still reach the database port. Set `clutch-ssh-isolate-connections` to nil to share connections as before, for example for a host that needs a password or a second factor and is already logged in elsewhere.
+
 ## 0.7.1 - 2026-10-31
 
 ### Added

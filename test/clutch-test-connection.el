@@ -497,7 +497,8 @@ and the ssh -N process has no owner yet at that point."
           (should-not process-called))))))
 
 (ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
-  "SSH tunnel startup should rely on the real batch tunnel command."
+  "SSH tunnel startup should rely on the real batch tunnel command.
+The tunnel stays off ControlMaster connections, so it ends with its process."
   (let (make-process-args)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
@@ -522,6 +523,8 @@ and the ssh -N process has no owner yet at that point."
         (should (eq (plist-get tunnel :process) 'fake-proc))
         (should (equal (plist-get make-process-args :command)
                        (list "ssh"
+                             "-o" "ControlMaster=no"
+                             "-o" "ControlPath=none"
                              "-N"
                              "-o" "BatchMode=yes"
                              "-o" "ExitOnForwardFailure=yes"
@@ -531,13 +534,20 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-tramp-forward-starts-ssh-forward ()
   "OpenSSH TRAMP forward startup should run ssh -L for ssh-like directories.
-SSH-like hops become -J, and an rpc directory adds tramp-rpc's
-ControlMaster options before the target."
+SSH-like hops become -J.  Every forward stays off ControlMaster
+connections by default; with `clutch-ssh-isolate-connections' off, an
+rpc directory reuses tramp-rpc's ControlMaster instead."
   (dolist (case
            (list
             (list :label "direct ssh directory"
                   :tramp-default-directory "/ssh:devbox:/workspace/"
                   :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("devbox"))
+            (list :label "isolation also covers rpc directories"
+                  :tramp-default-directory "/rpc:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :controlmaster-options '("-o" "ControlMaster=auto")
                   :forward "127.0.0.1:%d:db:5432"
                   :tail '("devbox"))
             (list :label "ssh-like hops mapped to ProxyJump"
@@ -548,14 +558,14 @@ ControlMaster options before the target."
             (list :label "tramp-rpc ControlMaster reuse"
                   :tramp-default-directory "/rpc:devbox:/workspace/"
                   :host "127.0.0.1" :port 55433
+                  :shared t
                   :controlmaster-options '("-o" "ControlMaster=auto"
                                            "-o" "ControlPath=/tmp/tramp-rpc.sock")
                   :forward "127.0.0.1:%d:127.0.0.1:55433"
-                  :tail '("-o" "ControlMaster=auto"
-                          "-o" "ControlPath=/tmp/tramp-rpc.sock"
-                          "devbox"))))
+                  :tail '("devbox"))))
     (ert-info ((plist-get case :label))
-      (let (make-process-args waited)
+      (let ((clutch-ssh-isolate-connections (not (plist-get case :shared)))
+            make-process-args waited)
         (cl-letf (((symbol-function 'executable-find)
                    (lambda (program)
                      (when (equal program "ssh") "/usr/bin/ssh")))
@@ -589,8 +599,12 @@ ControlMaster options before the target."
                  (local-port (plist-get transport :local-port)))
             (should (integerp local-port))
             (should (equal (plist-get make-process-args :command)
-                           (append (list "ssh"
-                                         "-N"
+                           (append '("ssh")
+                                   (if (plist-get case :shared)
+                                       (plist-get case :controlmaster-options)
+                                     '("-o" "ControlMaster=no"
+                                       "-o" "ControlPath=none"))
+                                   (list "-N"
                                          "-o" "BatchMode=yes"
                                          "-o" "ExitOnForwardFailure=yes"
                                          "-L" (format (plist-get case :forward)
@@ -622,7 +636,8 @@ command quoted for the remote shell."
                   :executable "ssh"
                   :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"
                   :command (append
-                            (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                            (list "ssh" "-o" "ControlMaster=no" "-o" "ControlPath=none"
+                                  "-T" "-o" "BatchMode=yes" "devbox")
                             (mapcar
                              #'shell-quote-argument
                              (list "podman" "exec" "-i" "app" "sh" "-lc"
