@@ -1765,14 +1765,14 @@ transport."
           (string-match-p "agent refused operation" cleaned)
           (string-match-p "sign_and_send_pubkey" cleaned))
       (format
-       "the SSH key for %s is locked. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to unlock it"
-       ssh-host ssh-host))
+       "the SSH key for %s is locked. Run M-x clutch-prepare-ssh-host once to unlock it"
+       ssh-host))
      ((or (string-match-p "host key verification failed" cleaned)
           (string-match-p "host identification has changed" cleaned)
           (string-match-p "are you sure you want to continue connecting" cleaned))
       (format
-       "SSH host verification for %s needs attention. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once to confirm the host key"
-       ssh-host ssh-host))
+       "SSH host verification for %s needs attention. Run M-x clutch-prepare-ssh-host once to confirm the host key"
+       ssh-host))
      ((string-match-p "permission denied" cleaned)
       (format
        "SSH authentication to %s was rejected. Run M-x clutch-prepare-ssh-host once, or check the remote username and ~/.ssh/authorized_keys"
@@ -1792,8 +1792,8 @@ transport."
       (format "the remote side rejected SSH port forwarding via %s" ssh-host))
      ((string-empty-p cleaned)
       (format
-       "OpenSSH could not use host %s in batch mode. Run M-x clutch-prepare-ssh-host or `ssh %s exit` once first"
-       ssh-host ssh-host))
+       "OpenSSH could not use host %s in batch mode. Run M-x clutch-prepare-ssh-host once first"
+       ssh-host))
      (t last-line))))
 
 (defun clutch--ssh-prepare-sentinel (proc _event)
@@ -1819,13 +1819,15 @@ transport."
       (with-current-buffer buffer
         (let ((inhibit-read-only t))
           (erase-buffer)))
-      (setq buffer (make-comint-in-buffer
-                    (format "clutch-ssh-prepare-%s" ssh-host)
-                    buffer
-                    "ssh"
-                    nil
-                    ssh-host
-                    "exit"))
+      ;; Share connections as the tunnel does, or a shared connection
+      ;; could report the host ready while the tunnel's login still fails.
+      (setq buffer (apply #'make-comint-in-buffer
+                          (format "clutch-ssh-prepare-%s" ssh-host)
+                          buffer
+                          "ssh"
+                          nil
+                          (append (clutch--ssh-sharing-options)
+                                  (list ssh-host "exit"))))
       (setq proc (get-buffer-process buffer))
       (process-put proc :clutch-ssh-host ssh-host)
       (set-process-query-on-exit-flag proc nil)

@@ -754,7 +754,9 @@ command quoted for the remote shell."
             (should (string-match-p pattern message))))))))
 
 (ert-deftest clutch-test-prepare-ssh-host-starts-interactive-session ()
-  "Interactive SSH prepare should open a comint session for the alias."
+  "Interactive SSH prepare should open a comint session for the alias.
+It stays off ControlMaster as the tunnel does, so a shared connection
+cannot report the host ready while the tunnel's own login still fails."
   (skip-unless (executable-find "cat"))
   (let ((real-make-comint (symbol-function 'make-comint-in-buffer))
         started message-text)
@@ -779,7 +781,9 @@ command quoted for the remote shell."
                 (should (equal (cddr started)
                                '("ssh"
                                  nil
-                                 ("bastion-prod" "exit"))))
+                                 ("-o" "ControlMaster=no"
+                                  "-o" "ControlPath=none"
+                                  "bastion-prod" "exit"))))
                 (should (process-live-p proc))
                 (should-not (process-query-on-exit-flag proc))
                 (should (equal (process-get proc :clutch-ssh-host) "bastion-prod"))
