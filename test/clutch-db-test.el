@@ -1250,6 +1250,47 @@ tracks, and a disconnect no longer asked first."
       (clutch-db-set-auto-commit conn t)
       (should-not (clutch-db-manual-commit-p conn)))))
 
+(ert-deftest clutch-db-test-pg-plan-reads-json-steps ()
+  "A PostgreSQL JSON plan becomes nodes that name their step, count a
+measured time once per loop, and keep the planner's cost otherwise."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (json "[{\"Plan\": {\"Node Type\": \"Hash Join\", \"Join Type\": \"Left\",
+           \"Total Cost\": 40.5, \"Plan Rows\": 10,
+           \"Actual Total Time\": 2.5, \"Actual Rows\": 7, \"Actual Loops\": 1,
+           \"Plans\": [{\"Node Type\": \"Index Scan\", \"Index Name\": \"a_pkey\",
+                        \"Relation Name\": \"a\", \"Alias\": \"x\",
+                        \"Total Cost\": 8.3, \"Plan Rows\": 1,
+                        \"Actual Total Time\": 0.25, \"Actual Rows\": 1,
+                        \"Actual Loops\": 4}]}}]")
+         (plan (lambda (text)
+                 (clutch-db-plan
+                  conn (make-clutch-db-result
+                        :rows (list (list (json-parse-string
+                                           text :object-type 'hash-table))))))))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" nil)
+                   "EXPLAIN (FORMAT JSON) SELECT 1"))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" t)
+                   "EXPLAIN (FORMAT JSON, ANALYZE) SELECT 1"))
+    (should (equal (funcall plan json)
+                   '(:unit ms
+                     :roots ((:label "Hash Left Join" :total 2.5 :rows 7
+                              :children ((:label "Index Scan using a_pkey on a x"
+                                          :total 1.0 :rows 1
+                                          :children nil)))))))
+    (should (equal (funcall plan
+                            "[{\"Plan\": {\"Node Type\": \"Hash Join\",
+              \"Join Type\": \"Left\", \"Total Cost\": 40.5, \"Plan Rows\": 10,
+              \"Plans\": [{\"Node Type\": \"Index Scan\",
+                           \"Index Name\": \"a_pkey\", \"Relation Name\": \"a\",
+                           \"Alias\": \"x\", \"Total Cost\": 8.3,
+                           \"Plan Rows\": 1}]}}]")
+                   '(:unit cost
+                     :roots ((:label "Hash Left Join" :total 40.5 :rows 10
+                              :children ((:label "Index Scan using a_pkey on a x"
+                                          :total 8.3 :rows 1
+                                          :children nil)))))))))
+
 (ert-deftest clutch-db-test-pg-query-async-wraps-outcomes-or-declines ()
   "PostgreSQL should start SQL without blocking when pgsql.el can."
   (require 'clutch-db-pg)

@@ -742,6 +742,33 @@ reconnect parameters."
           (ignore-errors
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
+(ert-deftest clutch-test-live-pg-explain-plan-shows-steps ()
+  "A PostgreSQL plan shows its steps from the console, estimated, and
+measured by running the statement."
+  :tags '(:clutch-live)
+  (unless (eq clutch-test-backend 'pg)
+    (ert-skip "This covers PostgreSQL JSON plans"))
+  (let ((params (append (list :backend 'pg) (clutch-test--live-connect-params))))
+    (clutch-test--with-live-console params
+      (insert "SELECT c.relname, count(*) FROM pg_class c"
+              " JOIN pg_attribute a ON a.attrelid = c.oid GROUP BY c.relname")
+      (dolist (case '((nil "Planner estimate; each step's own cost"
+                           "[0-9]\\.[0-9]  +[0-9]+%$")
+                      (t "Measured by running the statement; each step's own time"
+                         "[0-9] ms  +[0-9]+%$")))
+        (pcase-let ((`(,analyze ,heading ,measure) case))
+          (clutch-test--with-pop-to-buffer-capture plan
+            (clutch-explain-plan (point) (point) analyze)
+            (clutch-test--await (lambda () plan))
+            (with-current-buffer plan
+              (let ((lines (split-string (buffer-string) "\n")))
+                (should (equal (car lines) heading))
+                (should (string-match-p "Aggregate" (nth 3 lines)))
+                (should (cl-some (lambda (line)
+                                   (string-match-p "── .*Scan.* on pg_" line))
+                                 lines))
+                (should (string-match-p measure (nth 3 lines)))))))))))
+
 (ert-deftest clutch-test-live-pg-reconnect-restores-only-a-kept-search-path ()
   "A PostgreSQL reconnect should restore the search_path the server kept.
 A path set inside a transaction went into the reconnect parameters at

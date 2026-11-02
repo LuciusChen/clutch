@@ -1,0 +1,9 @@
+# Statement plan tree
+
+`clutch-explain-plan`, `E` in the console menu, shows a statement's plan as a tree of steps in `*clutch-plan*`. Two generics carry it: `clutch-db-plan-sql` returns the SQL that asks for a plan, or nil when the connection has none, and `clutch-db-plan` reads that SQL's result into nodes of `:label`, `:total`, `:rows` and `:children`. Splitting them lets the plan SQL run through `clutch-result--run-query` like any other statement, so it does not block Emacs, can be cancelled, and reports a failure where statements do; the alternative, one generic that runs the query itself, would have meant a synchronous call on the connection outside the query activity.
+
+PostgreSQL asks for `EXPLAIN (FORMAT JSON)`, which pgsql.el already decodes into hash tables, and labels a step the way text EXPLAIN does (`Hash Left Join`, `Index Scan using a_pkey on a x`). SQLite's `EXPLAIN QUERY PLAN` rows link each step to its parent by id, which becomes the tree; it has no measure and cannot measure a plan. XTDB, a PostgreSQL connection, has no JSON plan and opts out. MySQL and JDBC are left for later: MySQL's `FORMAT=JSON` has a different shape for every version, and each JDBC database has its own plan syntax.
+
+A step's bar is its own share: its total less its children's totals, since PostgreSQL's cost and time both include the children, and an inclusive bar would always point at the root. A measured time is the per-loop average times the loops. PostgreSQL reports a parallel step's time per worker, so shares under a `Gather` are approximate; Init Plans and Sub Plans are children like any other.
+
+`C-u` measures the plan with `EXPLAIN ANALYZE`, which runs the statement. It is refused unless the statement is one SELECT that does not write, by the same `clutch-db-sql-pageable-query-p` check export uses, so a measured plan never deletes or updates rows. `g` in the plan buffer redraws the plan it holds at the window's width and never runs SQL again.

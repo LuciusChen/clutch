@@ -2197,6 +2197,23 @@ field names for field-scoped actions.")
   "Default: return nil when query explain is unavailable."
   nil)
 
+(cl-defgeneric clutch-db-plan-sql (conn sql analyze)
+  "Return SQL that asks CONN for the plan of SQL, or nil when it has none.
+ANALYZE non-nil asks for a plan measured by running SQL; return nil when
+CONN cannot measure one.  `clutch-db-plan' reads the result.")
+
+(cl-defmethod clutch-db-plan-sql ((_conn t) _sql _analyze)
+  "Default: CONN has no plans."
+  nil)
+
+(cl-defgeneric clutch-db-plan (conn result)
+  "Return the plan in RESULT of the SQL `clutch-db-plan-sql' made for CONN.
+The plan is a plist.  :unit is `ms' for times measured by running the
+statement, `cost' for the planner's estimate, or nil when nodes carry
+neither.  :roots lists nodes, each a plist with :label, one line naming
+the step, :total, its time or cost including its children's, or nil,
+:rows, the rows it produced or is expected to, or nil, and :children.")
+
 (cl-defgeneric clutch-db-table-comment (conn table &optional schema)
   "Return TABLE's comment on CONN, or nil if none.
 SCHEMA, when non-nil, identifies TABLE's namespace.")

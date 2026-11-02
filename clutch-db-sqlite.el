@@ -356,6 +356,29 @@ SCHEMA when SCHEMA is given, since a foreign key stays in its database."
          conn callback errback #'clutch-db-foreign-keys nil table
          (clutch-db--namespace-arguments schema catalog)))
 
+;;;; Plans
+
+(cl-defmethod clutch-db-plan-sql ((_conn clutch-db-sqlite-conn) sql analyze)
+  "Return SQL asking SQLite for the plan of SQL, or nil when ANALYZE.
+SQLite cannot measure a plan."
+  (unless analyze
+    (concat "EXPLAIN QUERY PLAN " sql)))
+
+(cl-defmethod clutch-db-plan ((_conn clutch-db-sqlite-conn) result)
+  "Return the plan in RESULT of SQLite's EXPLAIN QUERY PLAN.
+Its rows are (ID PARENT NOTUSED DETAIL), a parent before its children."
+  (let ((nodes (make-hash-table))
+        roots)
+    (pcase-dolist (`(,id ,parent ,_ ,detail) (clutch-db-result-rows result))
+      (let ((node (list :label detail :children nil))
+            (up (gethash parent nodes)))
+        (puthash id node nodes)
+        (if up
+            (plist-put up :children (nconc (plist-get up :children)
+                                           (list node)))
+          (push node roots))))
+    (list :unit nil :roots (nreverse roots))))
+
 (defun clutch-db-sqlite--column-detail (row fks)
   "Convert a table_info ROW to a clutch-db column plist.
 FKS is an FK alist."
