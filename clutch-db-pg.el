@@ -913,6 +913,10 @@ A quoted identifier keeps its case, and an unquoted one folds to lower case."
       (clutch-db-sql--unquote-identifier raw)
     (downcase raw)))
 
+(cl-defmethod clutch-db-identifier-case ((_conn clutch-db-pg--connection))
+  "Return `lower', since PostgreSQL folds unquoted names to lower case."
+  'lower)
+
 (cl-defmethod clutch-db--source-table-name ((_conn clutch-db-pg--connection) token)
   "Return the name of the table that SQL table TOKEN names."
   (clutch-db-pg--fold-identifier (clutch-db-sql-table-qualifier token)))

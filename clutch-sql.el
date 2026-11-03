@@ -178,12 +178,11 @@ BOUNDS, when non-nil, is the already computed statement range."
           :statement-aliases aliases
           :from-sources from-sources
           :query-scopes
-          (when (string-match-p "(" text)
-            (cl-loop for (start . finish) in (clutch--completion-query-regions text)
-                     collect
-                     (list start finish
-                           (clutch--completion-query-sources
-                            (substring text start finish) output-plans)))))))
+          (cl-loop for (start . finish) in (clutch--completion-query-regions text)
+                   collect
+                   (list start finish
+                         (clutch--completion-query-sources
+                          (substring text start finish) output-plans))))))
 
 (defun clutch--tables-in-query-cache-entry (schema)
   "Return the cache entry for table analysis on SCHEMA, refreshing if needed."
@@ -211,28 +210,6 @@ BOUNDS, when non-nil, is the already computed statement range."
 (defun clutch--tables-in-current-statement (schema)
   "Return known table names mentioned in the current statement for SCHEMA."
   (plist-get (clutch--tables-in-query-cache-entry schema) :statement-tables))
-
-(defun clutch--innermost-paren-range (text point-offset)
-  "Return the innermost parenthesized range in TEXT.
-The result is (BEG . END) containing POINT-OFFSET, or (0 . LEN) when
-POINT-OFFSET is at the top level."
-  (let* ((len (length text))
-         (stack nil)
-         (result (cons 0 len)))
-    (clutch-db-sql-scan-code
-     text 0 nil
-     (lambda (pos ch _depth)
-       (pcase ch
-         (?\( (push pos stack))
-         (?\) (when stack
-                (let ((open (pop stack)))
-                  (when (and (<= open point-offset)
-                             (>= pos point-offset)
-                             (< (- pos open) (- (cdr result) (car result))))
-                    (setq result (cons (1+ open) pos)))))))
-       nil)
-     nil "()")
-    result))
 
 (defun clutch--sql-set-operators-regexp ()
   "Return set operators for completion on the current connection.
@@ -285,14 +262,6 @@ inside string literals, comments, or nested parentheses are ignored."
            ((<= boundary effective-offset) (setq beg boundary))
            (t (setq end boundary boundaries nil)))))
       (cons (+ scope-beg beg) (+ scope-beg end)))))
-
-(defun clutch--union-branch-range (text point-offset)
-  "Return (BEG . END) of the set-operation branch in TEXT containing POINT-OFFSET.
-First narrows to the innermost parenthesized scope, then splits by
-set operators at depth 0 within that scope."
-  (clutch--union-branch-range-in-scope
-   text point-offset
-   (clutch--innermost-paren-range text point-offset)))
 
 (defun clutch--sql-from-source-positions (sql)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
@@ -371,7 +340,7 @@ Expression parentheses do not create query scopes."
   "Return the query scopes around point in statement cache ENTRY, innermost first.
 Each is (START END SOURCES) in statement offsets, SOURCES being the scope's
 own FROM list as `clutch--completion-query-sources' returns it.  There are
-none when the statement has no parentheses or point is outside every SELECT."
+none when point is outside every SELECT."
   (let ((offset (- (point) (plist-get entry :beg))))
     ;; Scopes around one point nest, so the innermost starts last.
     (seq-sort-by #'car #'>
@@ -379,13 +348,64 @@ none when the statement has no parentheses or point is outside every SELECT."
                                (<= (nth 0 scope) offset (nth 1 scope)))
                              (plist-get entry :query-scopes)))))
 
+(defun clutch--sql-alias-name (token)
+  "Return the source alias written as identifier TOKEN.
+It is TOKEN unquoted, carrying TOKEN itself for `clutch--sql-names-alias-p'
+and for insertion."
+  (propertize (clutch-db-sql--unquote-identifier token)
+              'clutch--sql-identifier (cons 'sql token)))
+
+(defun clutch--sql-alias-token (name)
+  "Return NAME as the statement wrote it.
+NAME comes from `clutch--sql-alias-name' or is a token already."
+  (or (cdr (get-text-property 0 'clutch--sql-identifier name)) name))
+
+(defun clutch--sql-names-alias-p (written alias)
+  "Return non-nil when WRITTEN and ALIAS name the same query source.
+Each is a name from `clutch--sql-alias-name' or a token.  Where only case
+decides, as for \"U\" and u, `clutch-db-identifier-case' does: a database
+that folds unquoted names compares the folded names by case, so they
+match on Oracle but not on PostgreSQL, and any other compares them
+regardless of case, as SQLite does.  Match data is preserved, since
+callers run this inside their own searches."
+  (save-match-data
+    (let ((a (clutch--sql-alias-token written))
+          (b (clutch--sql-alias-token alias)))
+      (pcase (clutch-db-sql--same-identifier-p a b)
+        ('ambiguous
+         (if-let* ((case (clutch-db-identifier-case clutch-connection)))
+             (let ((fold (lambda (token)
+                           (let ((name (clutch-db-sql--unquote-identifier
+                                        token)))
+                             (cond ((not (equal name token)) name)
+                                   ((eq case 'upper) (upcase name))
+                                   (t (downcase name)))))))
+               (string= (funcall fold a) (funcall fold b)))
+           t))
+        (same same)))))
+
+(defun clutch--query-source-named (written sources)
+  "Return the (ALIAS . SOURCE) of query SOURCES that WRITTEN names, or nil.
+WRITTEN is a name from `clutch--sql-alias-name' or a token.  An alias
+written the same way wins over one that matches it only by case, as \"U\"
+does over u in FROM users u JOIN orders \"U\" on a backend that ignores it."
+  (let ((token (clutch--sql-alias-token written)))
+    (or (cl-find-if (lambda (source)
+                      (eq t (clutch-db-sql--same-identifier-p
+                             token (clutch--sql-alias-token (car source)))))
+                    sources)
+        (cl-find-if (lambda (source)
+                      (clutch--sql-names-alias-p written (car source)))
+                    sources))))
+
 (defun clutch--completion-scope-source (entry qualifier)
-  "Return the (ALIAS . SOURCE) that QUALIFIER names at point, or nil.
+  "Return the (ALIAS . SOURCE) that QUALIFIER, as written, names at point.
 ENTRY is the statement cache.  Scopes are searched innermost first, so a
-correlated subquery reaches an outer source and the nearest definition wins."
-  (let ((name (replace-regexp-in-string "[\"`]" "" (or qualifier ""))))
-    (cl-loop for scope in (clutch--completion-query-scopes entry)
-             thereis (assoc-string name (nth 2 scope) t))))
+correlated subquery reaches an outer source and the nearest definition
+wins.  Return nil when no scope around point has the source."
+  (cl-loop for scope in (clutch--completion-query-scopes entry)
+           thereis (clutch--query-source-named (or qualifier "")
+                                               (nth 2 scope))))
 
 (defun clutch--completion-derived-source (entry qualifier)
   "Resolve derived table QUALIFIER in cached statement ENTRY at point."
@@ -420,18 +440,26 @@ OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
                                   (substring sql (1+ start) close) output-plans))
                     end (1+ close))))
            ((and (string-match "[[:alnum:]_$#.`\"]+" masked start)
-                 (= (match-beginning 0) start))
+                 (= (match-beginning 0) start)
+                 ;; A name still being typed, as side. is, names nothing yet.
+                 (not (string-suffix-p "." (match-string 0 masked))))
             (setq source (match-string 0 sql) end (match-end 0)
-                  alias (clutch-db-sql-table-name source))))
+                  alias (clutch--sql-alias-name
+                         (clutch-db-sql-table-qualifier source)))))
           (when (and end
                      (string-match
-                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
+                      (concat "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?"
+                              "\\(\"\\(?:[^\"]\\|\"\"\\)+\"\\|`\\(?:[^`]\\|``\\)+`\\|[[:alnum:]_$#]+\\)")
                       masked end)
                      (= (match-beginning 0) end))
-            (let ((alias-end (match-end 0))
-                  (name (clutch--normalize-statement-table-token
-                         (match-string 1 sql))))
-              (unless (clutch--sql-keyword-p name)
+            (let* ((alias-end (match-end 0))
+                   (alias-beg (match-beginning 1))
+                   (token (match-string 1 sql))
+                   (name (clutch--sql-alias-name token)))
+              (unless (and (equal name token) (clutch--sql-keyword-p name))
+                ;; Where the alias is written, for `M-.'.
+                (put-text-property 0 (length name) 'clutch--sql-position
+                                   alias-beg name)
                 (setq alias name end alias-end))))
           ;; A column-name list overrides this projection.  Do not offer the
           ;; original names until that separate SQL form is supported.
@@ -452,6 +480,8 @@ OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
       (gethash sql output-plans)
     (let* ((original-sql sql)
            (case-fold-search t)
+           ;; An output name, quoted with its delimiter doubled inside.
+           (name "\\(\"\\(?:[^\"]\\|\"\"\\)+\"\\|`\\(?:[^`]\\|``\\)+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)")
            (sql (clutch-db-sql-strip-leading-comments sql))
            (branch-end (clutch-db-sql-find-top-level-clause
                         sql (clutch--sql-set-operators-regexp)))
@@ -481,17 +511,20 @@ OUTPUT-PLANS avoids reparsing nested outputs in each enclosing query region."
           (cond
            ((string= item "*") (push (cons 'star (mapcar #'cdr sources)) plan))
            ((string-match "\\`\\([[:alnum:]_$#.`\"]+\\)\\.\\*\\'" item)
-            (when-let* ((source (cdr (assoc-string
-                                      (clutch--normalize-statement-table-token
-                                       (match-string 1 item)) sources t))))
+            (when-let* ((source (cdr (clutch--query-source-named
+                                      (clutch-db-sql-table-qualifier
+                                       (match-string 1 item))
+                                      sources))))
               (push (list 'star source) plan)))
            ((or (string-match
-                 "\\(?:\\`\\|[ \t\n\r]+\\)AS[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item)
+                 (concat "\\(?:\\`\\|[ \t\n\r]+\\)AS[ \t\n\r]+" name "\\'") item)
                 (string-match
-                 "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*[ \t\n\r]+\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alpha:]_$#][[:alnum:]_$#]*\\)\\'" item))
+                 (concat "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*[ \t\n\r]+" name "\\'")
+                 item))
             (let ((token (match-string 1 item)))
-              ;; SQL output names retain their original quoting/folding semantics.
-              (push (propertize (clutch--normalize-statement-table-token token)
+              ;; SQL output names retain their original quoting/folding
+              ;; semantics.  A quoted name is one name, dots and all.
+              (push (propertize (clutch-db-sql--unquote-identifier token)
                                 'clutch--sql-identifier (cons 'sql token)) plan)))
            ((string-match-p "\\`[[:alpha:]_$#`\"][[:alnum:]_$#.`\"]*\\'" item)
             (when-let* ((token (clutch-db-sql-table-qualifier item)))
@@ -616,8 +649,8 @@ point's top-level set-operation branch."
 
 (defun clutch--toplevel-union-branch-range (text point-offset)
   "Return the depth-0 set-operation branch in TEXT containing POINT-OFFSET.
-Unlike `clutch--union-branch-range', does not narrow into parenthesized
-scopes first, so FROM/JOIN clauses remain visible from inside expressions."
+It does not narrow into parenthesized scopes, so FROM/JOIN clauses remain
+visible from inside expressions."
   (clutch--union-branch-range-in-scope
    text point-offset
    (cons 0 (length text))))
@@ -665,27 +698,36 @@ Returns the buffer position (offset by STMT-BEG), or nil."
                    (normalized (clutch--normalize-statement-table-token
                                 (match-string 1 text)))
                    ((not (clutch--sql-keyword-p normalized)))
-                   ((string= (downcase normalized) (downcase alias))))
+                   ((clutch--sql-names-alias-p (match-string 1 text) alias)))
          (+ stmt-beg (match-beginning 1))))
      (sort (delete-dups starts) #'<))))
 
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.
-First searches the innermost paren scope (subquery), then falls back to
-the top-level set-operation branch so expression parens like SUM(...) don't hide
-outer FROM/JOIN clauses."
-  (let* ((bounds (clutch--statement-bounds))
-         (stmt-beg (car bounds))
-         (text (buffer-substring-no-properties stmt-beg (cdr bounds)))
-         (point-offset (- (point) stmt-beg))
-         (masked (clutch-db-sql-mask-literal-or-comment
-                  text (clutch-db-connection-sql-dialect clutch-connection)))
-         (inner (clutch--union-branch-range text point-offset))
-         (outer (clutch--toplevel-union-branch-range text point-offset)))
-    (or (clutch--find-alias-in-range text masked alias stmt-beg
-                                     (car inner) (cdr inner))
+ALIAS is a name from `clutch--sql-alias-name' or a token.  It is looked up
+in the query scopes around point, innermost first, as completion looks it
+up; a source with no alias of its own has no definition.  Only when no
+scope has it, as for the target of an UPDATE, is the statement branch
+around point searched."
+  (let* ((entry (clutch--tables-in-query-cache-entry
+                 (clutch--schema-for-connection)))
+         (found (cl-loop for (start _end sources)
+                         in (clutch--completion-query-scopes entry)
+                         for source = (clutch--query-source-named alias sources)
+                         when source return (cons start (car source)))))
+    (if found
+        (when-let* ((pos (get-text-property 0 'clutch--sql-position
+                                            (cdr found))))
+          (+ (plist-get entry :beg) (car found) pos))
+      (let* ((bounds (clutch--statement-bounds))
+             (stmt-beg (car bounds))
+             (text (buffer-substring-no-properties stmt-beg (cdr bounds)))
+             (masked (clutch-db-sql-mask-literal-or-comment
+                      text (clutch-db-connection-sql-dialect clutch-connection)))
+             (outer (clutch--toplevel-union-branch-range
+                     text (- (point) stmt-beg))))
         (clutch--find-alias-in-range text masked alias stmt-beg
-                                     (car outer) (cdr outer)))))
+                                     (car outer) (cdr outer))))))
 
 ;;; xref backend — alias jump-to-definition
 
@@ -760,11 +802,13 @@ not treat schema qualifiers in `schema.table' as aliases."
   (when-let* ((hit (clutch--xref-symbol-at-point))
               (beg (car hit))
               (sym (cdr hit)))
-    (let* ((sym-alias (clutch--normalize-statement-table-token sym))
+    (let* ((sym-alias (clutch--sql-alias-name
+                       (clutch-db-sql-table-qualifier sym)))
            (qualifier-alias
             (when-let* ((qualifier (clutch--xref-qualified-identifier-qualifier
                                     beg)))
-              (clutch--normalize-statement-table-token qualifier))))
+              (clutch--sql-alias-name
+               (clutch-db-sql-table-qualifier qualifier)))))
       (cond
        ((and qualifier-alias
              (clutch--find-alias-definition-position qualifier-alias))
@@ -865,14 +909,16 @@ and the nearest definition wins.  Outside every SELECT, the aliases of BEG's
 statement branch apply instead, and the statement's table names come last."
   (when-let* ((raw (clutch--qualified-identifier-qualifier beg))
               (qualifier (replace-regexp-in-string "[\"`]" "" raw)))
-    (if-let* ((found (clutch--completion-scope-source
-                      (clutch--tables-in-query-cache-entry schema) raw)))
-        ;; A derived table has no catalog columns; its caller resolves it.
-        (and (stringp (cdr found))
-             (clutch--completion-source-table (cdr found)))
-      (or (cdr (assoc-string qualifier
-                             (cdr (clutch--query-scope-tables-and-aliases schema))
-                             t))
+    (let ((entry (clutch--tables-in-query-cache-entry schema)))
+      (if-let* ((found (clutch--completion-scope-source entry raw)))
+          ;; A derived table has no catalog columns; its caller resolves it.
+          (and (stringp (cdr found))
+               (clutch--completion-source-table (cdr found)))
+        (or (and (null (clutch--completion-query-scopes entry))
+                 (cdr (assoc-string
+                       qualifier
+                       (cdr (clutch--query-scope-tables-and-aliases schema))
+                       t)))
           (let* ((tables (clutch--tables-in-current-statement schema))
                  (matches
                   (cl-remove-if-not
@@ -884,7 +930,7 @@ statement branch apply instead, and the statement's table names come last."
                          :test (lambda (a b)
                                  (string-equal-ignore-case
                                   a (replace-regexp-in-string "[\"`]" "" b))))
-                (and (= (length matches) 1) (car matches))))))))
+                (and (= (length matches) 1) (car matches)))))))))
 
 (defconst clutch--sql-keywords
   '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT" "IN" "IS" "NULL" "LIKE"

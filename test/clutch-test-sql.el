@@ -133,6 +133,10 @@ controls liveness and defaults to t."
                   ("SELECT b.| FROM (SELECT id + name FROM side.people) b")
                   ("SELECT b.| FROM (SELECT 1 FROM side.people) b")
                   ("SELECT \"b\".| FROM (SELECT id FROM side.people) b" "id")
+                  ("SELECT b.| FROM (SELECT \"U\".* FROM side.people u JOIN side.archive \"U\" ON 1 = 1) b" "other_id" "other_name")
+                  ("SELECT b.| FROM (SELECT id AS \"a.b\" FROM side.people) b" "a.b")
+                  ("SELECT b.| FROM (SELECT id AS \"odd\"\"name\" FROM side.people) b" "odd\"name")
+                  ("SELECT b.| FROM (SELECT id AS `odd``name` FROM side.people) b" "odd`name")
                   ("SELECT b.| FROM (SELECT id AS first FROM side.people UNION ALL SELECT name AS second FROM side.people) b" "first")
                   ("SELECT * FROM (SELECT id AS first FROM side.people) b UNION ALL SELECT b.| FROM (SELECT name AS second FROM side.people) b" "second")
                   ("SELECT * FROM (SELECT b.| FROM (SELECT id AS nested FROM side.people) b) b" "nested")
@@ -172,6 +176,8 @@ controls liveness and defaults to t."
                              ("SELECT p. FROM other.people p" "other_name")
                              ("SELECT d. FROM (SELECT minus FROM metrics) d" "minus")
                              ("SELECT minus. FROM metrics minus" "id" "minus")
+                             ;; SQLite ignores case, quoted or not.
+                             ("SELECT \"P\". FROM main.people p" "name")
                              ("SELECT id FROM metrics p WHERE minus = 1 AND p. " "id" "minus")))
                (ert-info ((format "completion: %s" (car case)))
                  (erase-buffer)
@@ -1572,6 +1578,10 @@ Structure is not interpreted here; callers confirm depth and literals through
                       "SELECT d.Label FROM (SELECT id AS Label FROM users) d")
                      ("SELECT d.La| FROM (SELECT id AS \"Label\" FROM users) d" "Label"
                       "SELECT d.\"Label\" FROM (SELECT id AS \"Label\" FROM users) d")
+                     ("SELECT d.a| FROM (SELECT id AS \"a.b\" FROM users) d" "a.b"
+                      "SELECT d.\"a.b\" FROM (SELECT id AS \"a.b\" FROM users) d")
+                     ("SELECT d.od| FROM (SELECT id AS \"odd\"\"name\" FROM users) d" "odd\"name"
+                      "SELECT d.\"odd\"\"name\" FROM (SELECT id AS \"odd\"\"name\" FROM users) d")
                      ("SELECT d.I| FROM (SELECT ID FROM users) d" "ID"
                       "SELECT d.ID FROM (SELECT ID FROM users) d")
                      ("sele| FROM users" "SELECT" "SELECT FROM users")))
@@ -1933,6 +1943,9 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 (ert-deftest clutch-test-completion-at-point-resolves-outer-aliases-in-subqueries ()
   "A correlated subquery should resolve an enclosing alias, nearest first, not a sibling's."
+  (require 'pgsql)
+  (require 'clutch-db-pg)
+  (require 'clutch-db-jdbc)
   (dolist (case '(("select u.id from users u where exists (select 1 from orders o where o.user_id = u.|)"
                    ("id" "name"))
                   ("select u.id from users u where exists (select 1 from orders u where u.|)"
@@ -1942,8 +1955,25 @@ Structure is not interpreted here; callers confirm depth and literals through
                   ("select users.id from orders users where exists (select 1 from users u where u.id = users.|)"
                    ("id" "user_id"))
                   ("select d.uid from (select id as uid from users) d where exists (select 1 from orders o where o.id = d.|)"
-                   ("uid"))))
-    (pcase-let ((`(,sql ,expected) case))
+                   ("uid"))
+                  ;; The alias written the same way wins.
+                  ("select \"U\".| from users u join orders \"U\" on true"
+                   ("id" "user_id"))
+                  ("select u.| from users u join orders \"U\" on true"
+                   ("id" "name"))
+                  ;; A backend that keeps the case of unquoted names, the
+                  ;; default, compares names regardless of case.
+                  ("select \"U\".| from users u" ("id" "name"))
+                  ;; PostgreSQL folds u to lower case, so "U" is not u,
+                  ;; over JDBC too; Oracle folds it to upper case.
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "name") pg)
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "name") jdbc-pg)
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "user_id") oracle)
+                  ("select \"U\".| from users u" nil pg)))
+    (pcase-let ((`(,sql ,expected ,backend) case))
       (ert-info ((format "sql: %s" sql))
         (with-temp-buffer
           (clutch-mode)
@@ -1952,7 +1982,13 @@ Structure is not interpreted here; callers confirm depth and literals through
           (search-forward "|")
           (delete-char -1)
           (let ((schema (make-hash-table :test 'equal))
-                (clutch-connection 'fake))
+                (clutch-connection
+                 (pcase backend
+                   ('pg (clutch-db-pg--make-connection))
+                   ('jdbc-pg (make-clutch-jdbc-conn
+                              :params '(:url "jdbc:postgresql://db/app")))
+                   ('oracle (make-clutch-jdbc-conn :driver 'oracle))
+                   (_ 'fake))))
             (puthash "users" '("id" "name") schema)
             (puthash "orders" '("id" "user_id") schema)
             (cl-letf (((symbol-function 'clutch--schema-for-connection)
@@ -2529,6 +2565,35 @@ then failed with \"Connection busy\"."
                   :id "a"
                   :before "orders "
                   :char ?a)
+            (list :label "alias of a middle query, not the outer one"
+                  :sql (concat "SELECT 1 FROM users u WHERE EXISTS "
+                               "(SELECT 1 FROM orders u WHERE EXISTS "
+                               "(SELECT 1 FROM items i WHERE i.oid = u.id))")
+                  :needle "u.id"
+                  :id "u"
+                  :before "orders "
+                  :char ?u)
+            (list :label "alias of the query itself, not a sibling subquery's"
+                  :sql (concat "SELECT (SELECT x.id), "
+                               "(SELECT x.id FROM orders x LIMIT 1) FROM users x")
+                  :needle "x.id"
+                  :id "x"
+                  :before "users "
+                  :char ?x)
+            (list :label "quoted alias that differs from another only in case"
+                  :sql "SELECT \"U\".id FROM users u JOIN orders \"U\" ON true"
+                  :needle "\"U\".id"
+                  :offset 1
+                  :id "U"
+                  :before "orders "
+                  :char ?\")
+            (list :label "quoted alias of an UPDATE"
+                  :sql "UPDATE users \"u\" SET name = 'x' WHERE \"u\".id = 1"
+                  :needle "\"u\".id"
+                  :offset 1
+                  :id "u"
+                  :before "users "
+                  :char ?\")
             (list :label "quoted alias"
                   :sql "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1"
                   :needle "\"u\".id"
