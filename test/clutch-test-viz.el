@@ -77,6 +77,28 @@ graphical frames to the same columns."
     (should (string-prefix-p (truncate-string-to-width label 10 nil nil t)
                              line))))
 
+(ert-deftest clutch-test-viz-bar-chart-header-and-rules ()
+  "A header lines up with the columns below it, between rules as wide as
+the chart, and leaves the rows' indexes alone."
+  (let* ((chart (clutch-viz-bar-chart '(("a" 1 "10") ("bb" 2 "200")) 30 'unicode
+                                      nil '("Step" "Bar" "Rows")))
+         (lines (clutch-test-viz--lines chart)))
+    (should (= (length lines) 5))
+    (should (string-match-p "\\`Step  Bar +  Rows\\'" (nth 0 lines)))
+    (should (equal (nth 1 lines) (make-string 30 ?─)))
+    (should (equal (nth 4 lines) (nth 1 lines)))
+    (should (string-match-p "\\`bb    █+ +200\\'" (nth 3 lines)))
+    (dolist (line lines)
+      (should (= (string-width line) 30)))
+    (should (eq (get-text-property (string-search "bb" chart)
+                                   'clutch-viz-index chart)
+                1))
+    (should (string-prefix-p
+             "----"
+             (nth 1 (clutch-test-viz--lines
+                     (clutch-viz-bar-chart '(("a" 1 "1")) 10 'ascii
+                                           nil '("Step" "" ""))))))))
+
 (ert-deftest clutch-test-viz-tree-draws-branches ()
   "A tree draws its branches depth first, in box characters or ASCII."
   (let ((roots '(("Hash Join" ("Seq Scan on a") ("Hash" ("Seq Scan on b")))
@@ -105,11 +127,14 @@ graphical frames to the same columns."
       (should (equal (nth 0 lines)
                      "Measured by running the statement; each step's own time"))
       (should (equal (nth 1 lines) "SELECT * FROM a"))
-      (should (string-match-p "\\`Hash Join  .*  5 rows  4.00 ms   40%\\'"
-                              (nth 3 lines)))
       (should (string-match-p
-               "\\`└── Seq Scan on a  █+  100 rows  6.00 ms   60%\\'"
-               (nth 4 lines))))))
+               "\\`Step  +Own time +Rows     Time  Share\\'" (nth 3 lines)))
+      (should (string-match-p "\\`Hash Join  .* +5  4.00 ms    40%\\'"
+                              (nth 5 lines)))
+      (should (string-match-p
+               "\\`└── Seq Scan on a  █+ +100  6.00 ms    60%\\'"
+               (nth 6 lines)))
+      (should (equal (nth 4 lines) (nth 7 lines))))))
 
 (ert-deftest clutch-test-explain-plan-sqlite-tree ()
   "The plan of a SQLite statement shows its steps from the console, and a
@@ -129,13 +154,16 @@ measured plan, which SQLite has not, is refused before anything runs."
         (clutch-test--await (lambda () plan))
         (with-current-buffer plan
           (should (derived-mode-p 'clutch-plan-mode))
-          (should (equal (nthcdr 3 (split-string (buffer-string) "\n"))
+          (should (equal (butlast
+                          (nthcdr 5 (split-string (buffer-string) "\n"))
+                          2)
                          '("SCAN a"
                            "LIST SUBQUERY 1"
                            "├── SCAN b"
                            "└── CREATE BLOOM FILTER"
-                           "USE TEMP B-TREE FOR ORDER BY"
-                           ""))))))))
+                           "USE TEMP B-TREE FOR ORDER BY")))
+          (should (equal (nth 3 (split-string (buffer-string) "\n"))
+                         "Step")))))))
 
 (ert-deftest clutch-test-explain-plan-measures-only-selects ()
   "Measuring a plan runs the statement, so it is refused for a write."

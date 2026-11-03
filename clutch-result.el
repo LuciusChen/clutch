@@ -2317,17 +2317,30 @@ A step's bar and share are its own time or cost, without its children's.
                                          (or (plist-get child :total) 0))
                                        (plist-get node :children)))))))
 
-(defun clutch-plan--step-text (unit self sum rows)
-  "Return the text after a step's bar.
+(defun clutch-plan--step-cells (unit self sum rows)
+  "Return a step's rows, own measure and share, as strings.
 UNIT and SELF are the step's own measure, SUM all steps' together, and
-ROWS the rows it produced or is expected to."
-  (string-join
-   (delq nil (list (and rows (format "%s rows" rows))
-                   (and self (format (if (eq unit 'ms) "%.2f ms" "%.1f") self))
-                   (and self (format "%3d%%" (if (> sum 0)
-                                                 (round (* 100 self) sum)
-                                               0)))))
-   "  "))
+ROWS the rows it produced or is expected to.  A missing one is empty."
+  (list (if rows (format "%s" rows) "")
+        (if self (format (if (eq unit 'ms) "%.2f ms" "%.1f") self) "")
+        (if self (format "%d%%" (if (> sum 0) (round (* 100 self) sum) 0))
+          "")))
+
+(defun clutch-plan--columns (cells)
+  "Return CELLS, lists of strings, as lines with each column right-aligned."
+  (let ((widths (apply #'cl-mapcar
+                       (lambda (&rest column)
+                         (apply #'max (mapcar #'string-width column)))
+                       cells)))
+    (mapcar (lambda (row)
+              (string-join (cl-mapcar (lambda (cell width)
+                                        (concat (make-string
+                                                 (- width (string-width cell))
+                                                 ?\s)
+                                                cell))
+                                      row widths)
+                           "  "))
+            cells)))
 
 (defun clutch-plan--render (&rest _)
   "Draw the current buffer's plan at its window's width.
@@ -2356,13 +2369,25 @@ Arguments, as `revert-buffer' passes them, are ignored."
                          width nil nil t)
                         'face 'shadow)
             "\n\n"
-            (clutch-viz-bar-chart
-             (cl-mapcar (lambda (line self)
-                          (list (car line) self
-                                (clutch-plan--step-text
-                                 unit self sum (plist-get (cdr line) :rows))))
-                        lines selfs)
-             width nil 0.6)
+            (pcase-let ((`(,heading . ,texts)
+                         (clutch-plan--columns
+                          (cons (if unit
+                                    (list "Rows" (if (eq unit 'ms) "Time" "Cost")
+                                          "Share")
+                                  (list "" "" ""))
+                                (cl-mapcar (lambda (line self)
+                                             (clutch-plan--step-cells
+                                              unit self sum
+                                              (plist-get (cdr line) :rows)))
+                                           lines selfs)))))
+              (clutch-viz-bar-chart
+               (cl-mapcar (lambda (line self text)
+                            (list (car line) self (string-trim-left text)))
+                          lines selfs texts)
+               width nil 0.6
+               (list "Step"
+                     (pcase unit ('ms "Own time") ('cost "Own cost") (_ ""))
+                     (string-trim-left heading))))
             "\n")
     (goto-char (point-min))))
 
