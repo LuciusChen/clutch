@@ -742,6 +742,44 @@ reconnect parameters."
           (ignore-errors
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
+(ert-deftest clutch-test-live-explain-plan-shows-steps ()
+  "A PostgreSQL or MySQL plan shows its steps from the console, estimated,
+and measured by running the statement."
+  :tags '(:clutch-live)
+  (unless (memq clutch-test-backend '(mysql pg))
+    (ert-skip "Plans with measures cover PostgreSQL and MySQL"))
+  (clutch-test--with-conn admin
+    (let ((table (format "clutch_plan_%d" (emacs-pid)))
+          (params (append (list :backend clutch-test-backend)
+                          (clutch-test--live-connect-params))))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE TABLE %s (id INT PRIMARY KEY, k INT)"
+                                           table))
+            (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 1), (2, 1), (3, 2)"
+                                           table))
+            (clutch-test--with-live-console params
+              (insert (format "SELECT t.k, count(*) FROM %s t WHERE t.id > 0 GROUP BY t.k"
+                              table))
+              (dolist (case '((nil "Planner estimate; each step's own cost"
+                                   "[0-9]\\.[0-9]  +[0-9]+%$")
+                              (t "Measured by running the statement; each step's own time"
+                                 "[0-9] ms  +[0-9]+%$")))
+                (pcase-let ((`(,analyze ,heading ,measure) case))
+                  (clutch-test--with-pop-to-buffer-capture plan
+                    (clutch-explain-plan (point) (point) analyze)
+                    (clutch-test--await (lambda () plan))
+                    (with-current-buffer plan
+                      (let ((lines (split-string (buffer-string) "\n")))
+                        (should (equal (car lines) heading))
+                        (should (cl-some (lambda (line)
+                                           (string-match-p "── .*[Ss]can on " line))
+                                         lines))
+                        (should (cl-some (lambda (line)
+                                           (string-match-p measure line))
+                                         lines)))))))))
+        (ignore-errors (clutch-db-query admin (format "DROP TABLE %s" table)))))))
+
 (ert-deftest clutch-test-live-pg-reconnect-restores-only-a-kept-search-path ()
   "A PostgreSQL reconnect should restore the search_path the server kept.
 A path set inside a transaction went into the reconnect parameters at

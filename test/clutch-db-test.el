@@ -1250,6 +1250,47 @@ tracks, and a disconnect no longer asked first."
       (clutch-db-set-auto-commit conn t)
       (should-not (clutch-db-manual-commit-p conn)))))
 
+(ert-deftest clutch-db-test-pg-plan-reads-json-steps ()
+  "A PostgreSQL JSON plan becomes nodes that name their step, count a
+measured time once per loop, and keep the planner's cost otherwise."
+  (require 'clutch-db-pg)
+  (let* ((conn (clutch-db-test--make-pg-connection :database "test"))
+         (json "[{\"Plan\": {\"Node Type\": \"Hash Join\", \"Join Type\": \"Left\",
+           \"Total Cost\": 40.5, \"Plan Rows\": 10,
+           \"Actual Total Time\": 2.5, \"Actual Rows\": 7, \"Actual Loops\": 1,
+           \"Plans\": [{\"Node Type\": \"Index Scan\", \"Index Name\": \"a_pkey\",
+                        \"Relation Name\": \"a\", \"Alias\": \"x\",
+                        \"Total Cost\": 8.3, \"Plan Rows\": 1,
+                        \"Actual Total Time\": 0.25, \"Actual Rows\": 1,
+                        \"Actual Loops\": 4}]}}]")
+         (plan (lambda (text)
+                 (clutch-db-plan
+                  conn (make-clutch-db-result
+                        :rows (list (list (json-parse-string
+                                           text :object-type 'hash-table))))))))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" nil)
+                   "EXPLAIN (FORMAT JSON) SELECT 1"))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" t)
+                   "EXPLAIN (FORMAT JSON, ANALYZE) SELECT 1"))
+    (should (equal (funcall plan json)
+                   '(:unit ms
+                     :roots ((:label "Hash Left Join" :total 2.5 :rows 7
+                              :children ((:label "Index Scan using a_pkey on a x"
+                                          :total 1.0 :rows 1
+                                          :children nil)))))))
+    (should (equal (funcall plan
+                            "[{\"Plan\": {\"Node Type\": \"Hash Join\",
+              \"Join Type\": \"Left\", \"Total Cost\": 40.5, \"Plan Rows\": 10,
+              \"Plans\": [{\"Node Type\": \"Index Scan\",
+                           \"Index Name\": \"a_pkey\", \"Relation Name\": \"a\",
+                           \"Alias\": \"x\", \"Total Cost\": 8.3,
+                           \"Plan Rows\": 1}]}}]")
+                   '(:unit cost
+                     :roots ((:label "Hash Left Join" :total 40.5 :rows 10
+                              :children ((:label "Index Scan using a_pkey on a x"
+                                          :total 8.3 :rows 1
+                                          :children nil)))))))))
+
 (ert-deftest clutch-db-test-pg-query-async-wraps-outcomes-or-declines ()
   "PostgreSQL should start SQL without blocking when pgsql.el can."
   (require 'clutch-db-pg)
@@ -4468,6 +4509,109 @@ arrives, so it must already be the new one."
                                              calls)))
             (quit nil)))
         (should (equal calls '((t nil))))))))
+
+(ert-deftest clutch-db-test-mysql-plan-legacy-server ()
+  "Older MySQL plans use table steps without invented costs or hierarchy."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :server-version "5.7.44")))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" nil)
+                   "EXPLAIN SELECT 1"))
+    (should-error (clutch-db-plan-sql conn "SELECT 1" t) :type 'user-error)
+    (should
+     (equal (clutch-db-plan
+             conn (make-clutch-db-result
+                   :columns '((:name "id") (:name "select_type") (:name "table")
+                              (:name "type") (:name "key") (:name "rows")
+                              (:name "Extra"))
+                   :rows '((1 "SIMPLE" "people" "ALL" nil 12 "Using where"))))
+            '(:unit nil :roots
+              ((:label "SIMPLE: people; access ALL; Using where" :rows 12))))))
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "8.0.15") "SELECT 1" nil)
+                 "EXPLAIN SELECT 1"))
+  (should-error (clutch-db-plan-sql
+                 (make-mysql-conn :server-version "8.0.17") "SELECT 1" t)
+                :type 'user-error)
+  ;; The handshake reports the server's own string, suffix included.
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "5.7.44-log") "SELECT 1" nil)
+                 "EXPLAIN SELECT 1"))
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "8.0.36-0ubuntu0.22.04.1")
+                  "SELECT 1" t)
+                 "EXPLAIN ANALYZE SELECT 1")))
+
+(ert-deftest clutch-db-test-mysql-plan-reads-tree-text ()
+  "A MySQL tree plan becomes nested nodes with the planner's total cost,
+or, when measured, each step's time per loop times its loops; MariaDB,
+which has no tree format, has no plan."
+  (require 'clutch-db-mysql)
+  (let* ((conn (make-mysql-conn :server-version "8.0.40"))
+         (plan (lambda (text)
+                 (clutch-db-plan conn (make-clutch-db-result
+                                       :rows (list (list text)))))))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" nil)
+                   "EXPLAIN FORMAT=TREE SELECT 1"))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" t)
+                   "EXPLAIN ANALYZE SELECT 1"))
+    (should-not (clutch-db-plan-sql
+                 (make-mysql-conn :server-version "10.11.6-MariaDB") "SELECT 1"
+                 nil))
+    (should (equal (funcall plan "-> Nested loop inner join  (cost=2.5..4.95 rows=11)
+    -> Filter: (c.a_id is not null)  (cost=1.35 rows=11)
+        -> Table scan on c  (cost=1.35 rows=11)
+    -> Single-row index lookup on a using PRIMARY (id=c.a_id)  (cost=0.26 rows=1)
+")
+                   '(:unit cost
+                     :roots ((:label "Nested loop inner join" :total 4.95 :rows 11
+                              :children
+                              ((:label "Filter: (c.a_id is not null)" :total 1.35
+                                :rows 11
+                                :children ((:label "Table scan on c" :total 1.35
+                                            :rows 11 :children nil)))
+                               (:label "Single-row index lookup on a using PRIMARY (id=c.a_id)"
+                                :total 0.26 :rows 1 :children nil)))))))
+    (should (equal (funcall plan "-> Nested loop inner join  (cost=4.95 rows=11) (actual time=0.081..0.146 rows=11 loops=1)
+    -> Table scan on c  (cost=1.35 rows=11) (actual time=0.044..0.065 rows=11 loops=1)
+    -> Index lookup on a using k (k=c.k)  (cost=0.26 rows=1) (actual time=0.25..0.5 rows=1 loops=4)
+    -> Table scan on d  (cost=1.1e+3 rows=5) (never executed)
+")
+                   '(:unit ms
+                     :roots ((:label "Nested loop inner join" :total 0.146 :rows 11
+                              :children
+                              ((:label "Table scan on c" :total 0.065 :rows 11
+                                :children nil)
+                               (:label "Index lookup on a using k (k=c.k)"
+                                :total 2.0 :rows 1 :children nil)
+                               (:label "Table scan on d" :total 0 :rows nil
+                                :children nil)))))))))
+
+(ert-deftest clutch-db-test-jdbc-plan-follows-the-url ()
+  "A JDBC connection has the plan of the database its URL names: JSON
+text for PostgreSQL, the tree format for MySQL, and none otherwise."
+  (cl-flet ((conn (url) (make-clutch-jdbc-conn :driver 'jdbc
+                                               :params (list :url url)))
+            (result (value) (make-clutch-db-result :rows (list (list value)))))
+    (let ((pg (conn "jdbc:postgresql://db/app"))
+          (mysql (conn "jdbc:mysql://db/app")))
+      (should (equal (clutch-db-plan-sql pg "SELECT 1" t)
+                     "EXPLAIN (FORMAT JSON, ANALYZE) SELECT 1"))
+      (should (equal (clutch-db-plan-sql mysql "SELECT 1" nil)
+                     "EXPLAIN FORMAT=TREE SELECT 1"))
+      (should-not (clutch-db-plan-sql (conn "jdbc:oracle:thin:@db:1521/x")
+                                      "SELECT 1" nil))
+      (should (equal (clutch-db-plan
+                      pg (result "[{\"Plan\": {\"Node Type\": \"Seq Scan\",
+                                    \"Relation Name\": \"t\", \"Alias\": \"t\",
+                                    \"Total Cost\": 1.5, \"Plan Rows\": 3}}]"))
+                     '(:unit cost
+                       :roots ((:label "Seq Scan on t" :total 1.5 :rows 3
+                                :children nil)))))
+      (should (equal (clutch-db-plan
+                      mysql (result "-> Table scan on t  (cost=0.55 rows=3)\n"))
+                     '(:unit cost
+                       :roots ((:label "Table scan on t" :total 0.55 :rows 3
+                                :children nil))))))))
 
 (ert-deftest clutch-db-test-mysql-results-show-their-warnings ()
   "A MySQL result with warnings should show what SHOW WARNINGS lists.

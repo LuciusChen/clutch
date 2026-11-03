@@ -1369,6 +1369,16 @@ ORDER BY pk.ord"
       (when-let* ((ctid (clutch-db-pg--ctid-identity conn table schema)))
         (list ctid))))
 
+;;;; Plans
+
+(cl-defmethod clutch-db-plan-sql ((_conn clutch-db-pg--connection) sql analyze)
+  "Return SQL asking PostgreSQL for the plan of SQL, measured when ANALYZE."
+  (clutch-db-postgres-plan-sql sql analyze))
+
+(cl-defmethod clutch-db-plan ((_conn clutch-db-pg--connection) result)
+  "Return the plan PostgreSQL reported as JSON in RESULT."
+  (clutch-db-postgres-plan (caar (clutch-db-result-rows result))))
+
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN.
@@ -1685,6 +1695,11 @@ XTDB has no table comments."
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-db-pg--xtdb-connection) _table
                                       &optional _schema _catalog)
   "Return nil, since XTDB has no foreign keys."
+  nil)
+
+(cl-defmethod clutch-db-plan-sql ((_conn clutch-db-pg--xtdb-connection) _sql
+                                  _analyze)
+  "Return nil, since XTDB reports no PostgreSQL JSON plan."
   nil)
 
 (cl-defmethod clutch-db-list-objects ((_conn clutch-db-pg--xtdb-connection) _category)

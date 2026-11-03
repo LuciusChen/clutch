@@ -2197,6 +2197,119 @@ field names for field-scoped actions.")
   "Default: return nil when query explain is unavailable."
   nil)
 
+(cl-defgeneric clutch-db-plan-sql (conn sql analyze)
+  "Return SQL that asks CONN for the plan of SQL, or nil when it has none.
+ANALYZE non-nil asks for a plan measured by running SQL; return nil when
+CONN cannot measure one.  `clutch-db-plan' reads the result.")
+
+(cl-defmethod clutch-db-plan-sql ((_conn t) _sql _analyze)
+  "Default: CONN has no plans."
+  nil)
+
+(cl-defgeneric clutch-db-plan (conn result)
+  "Return the plan in RESULT of the SQL `clutch-db-plan-sql' made for CONN.
+The plan is a plist.  :unit is `ms' for times measured by running the
+statement, `cost' for the planner's estimate, or nil when nodes carry
+neither.  :roots lists nodes, each a plist with :label, one line naming
+the step, :total, its time or cost including its children's, or nil,
+:rows, the rows it produced or is expected to, or nil, and :children.")
+
+;;;; Plan formats shared by adapters
+
+(defun clutch-db-postgres-plan-sql (sql analyze)
+  "Return SQL asking PostgreSQL for the plan of SQL as JSON.
+ANALYZE non-nil runs SQL to measure the plan."
+  (format "EXPLAIN (FORMAT JSON%s) %s" (if analyze ", ANALYZE" "") sql))
+
+(defun clutch-db--postgres-plan-node (plan)
+  "Return the plan node of PostgreSQL JSON PLAN, with its children.
+A plan measured with ANALYZE reports its time per loop, so the node's
+total is that time times its loops."
+  (let* ((type (gethash "Node Type" plan))
+         (join (gethash "Join Type" plan))
+         (relation (gethash "Relation Name" plan))
+         (alias (gethash "Alias" plan))
+         (index (gethash "Index Name" plan))
+         (time (gethash "Actual Total Time" plan))
+         (loops (gethash "Actual Loops" plan)))
+    (list :label (concat (if (and join (not (equal join "Inner")))
+                             (replace-regexp-in-string
+                              "Join\\'" (concat join " Join") type t t)
+                           type)
+                         (and index (format " using %s" index))
+                         (and relation (format " on %s" relation))
+                         (and alias (not (equal alias relation))
+                              (format " %s" alias)))
+          :total (if time (* time loops) (gethash "Total Cost" plan))
+          :rows (or (gethash "Actual Rows" plan) (gethash "Plan Rows" plan))
+          :children (mapcar #'clutch-db--postgres-plan-node
+                            (gethash "Plans" plan)))))
+
+(defun clutch-db-postgres-plan (value)
+  "Return the plan in VALUE, PostgreSQL's JSON plan as text or decoded.
+See `clutch-db-plan' for the plan's shape."
+  (let* ((plans (if (stringp value)
+                    (json-parse-string value :object-type 'hash-table)
+                  value))
+         (plan (gethash "Plan" (aref plans 0))))
+    (list :unit (if (gethash "Actual Total Time" plan) 'ms 'cost)
+          :roots (list (clutch-db--postgres-plan-node plan)))))
+
+(defun clutch-db-mysql-plan-sql (sql analyze)
+  "Return SQL asking MySQL for the plan of SQL in its tree format.
+ANALYZE non-nil runs SQL to measure the plan."
+  (concat (if analyze "EXPLAIN ANALYZE " "EXPLAIN FORMAT=TREE ") sql))
+
+(defun clutch-db--mysql-plan-node (text measured)
+  "Return the plan node of one MySQL tree plan line TEXT, without children.
+TEXT follows the arrow, as \"Table scan on t  (cost=1.2 rows=10) (actual
+time=0.04..0.06 rows=10 loops=1)\".  When MEASURED, the node's total is
+its last row's time per loop times its loops, and zero for a step that
+never ran, whose rows are unknown; otherwise it is the planner's cost."
+  (let* ((number "\\([0-9]+\\(?:\\.[0-9]+\\)?\\(?:e[+-]?[0-9]+\\)?\\)")
+         (cut (string-match "  (\\(?:cost\\|actual\\|never\\)" text))
+         (label (substring text 0 cut))
+         ;; Newer servers write the cost as a range, STARTUP..TOTAL.
+         (cost (and (string-match (concat "(cost=\\(?:[^ ]*?\\.\\.\\)?"
+                                          number " rows=" number)
+                                  text)
+                    (list (string-to-number (match-string 1 text))
+                          (string-to-number (match-string 2 text)))))
+         (actual (and (string-match
+                       (concat "(actual time=[^ ]+\\.\\." number
+                               " rows=" number " loops=" number ")")
+                       text)
+                      (list (string-to-number (match-string 1 text))
+                            (string-to-number (match-string 2 text))
+                            (string-to-number (match-string 3 text))))))
+    (list :label label
+          :total (cond (actual (* (nth 0 actual) (nth 2 actual)))
+                       (measured 0)
+                       (t (car cost)))
+          :rows (cond (actual (nth 1 actual))
+                      ((not measured) (cadr cost)))
+          :children nil)))
+
+(defun clutch-db-mysql-plan (text)
+  "Return the plan of MySQL's tree format TEXT.
+Each step is a line \"-> STEP\", indented four spaces deeper than its
+parent."
+  (let ((measured (string-match-p "(actual time=" text))
+        roots stack)
+    (dolist (line (split-string text "\n" t))
+      (when (string-match "\\`\\( *\\)-> \\(.*\\)" line)
+        (let ((depth (/ (length (match-string 1 line)) 4))
+              (node (clutch-db--mysql-plan-node (match-string 2 line)
+                                                measured)))
+          (setq stack (last stack depth))
+          (if-let* ((up (car stack)))
+              (plist-put up :children (nconc (plist-get up :children)
+                                             (list node)))
+            (push node roots))
+          (push node stack))))
+    (list :unit (if measured 'ms 'cost)
+          :roots (nreverse roots))))
+
 (cl-defgeneric clutch-db-table-comment (conn table &optional schema)
   "Return TABLE's comment on CONN, or nil if none.
 SCHEMA, when non-nil, identifies TABLE's namespace.")

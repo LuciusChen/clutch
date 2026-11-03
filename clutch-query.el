@@ -2512,6 +2512,7 @@ server nothing."
     ("r" "Region" clutch-execute-region)
     ("b" "Buffer" clutch-execute-buffer)
     ("p" "Preview execution" clutch-preview-execution-sql)
+    ("E" "Explain plan" clutch-explain-plan)
     ("e" "Export query to file" clutch-export-query)]]
   [:pad-keys t
    ["Objects"

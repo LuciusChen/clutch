@@ -57,6 +57,7 @@
 (declare-function mysql-result-last-insert-id "mysql" (object))
 (declare-function mysql-result-rows "mysql" (object))
 (declare-function mysql-result-warnings "mysql" (object))
+(declare-function mysql-conn-server-version "mysql" (conn))
 (declare-function mysql-rollback "mysql" (conn))
 (declare-function mysql-select-database "mysql" (conn database))
 (declare-function mysql-set-autocommit "mysql" (conn autocommit))
@@ -801,6 +802,51 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
   "Return row identity candidates for TABLE on MySQL CONN."
   (or (cl-call-next-method)
       (clutch-db-mysql--unique-not-null-identities conn table)))
+
+(cl-defmethod clutch-db-plan-sql ((conn mysql-conn) sql analyze)
+  "Return SQL asking MySQL CONN for the plan of SQL.
+Before MySQL 8.0.16, use traditional EXPLAIN.  ANALYZE needs 8.0.18.
+MariaDB plans are not supported here."
+  (let* ((version (or (mysql-conn-server-version conn) ""))
+         ;; Servers append suffixes such as "-log", which `version<' rejects.
+         (number (and (string-match "\\`[0-9]+\\(?:\\.[0-9]+\\)*" version)
+                      (match-string 0 version))))
+    (unless (string-match-p "MariaDB" version)
+      (when (and analyze number (version< number "8.0.18"))
+        (user-error "Measuring a MySQL plan requires MySQL 8.0.18 or later"))
+      (if (and (not analyze) number (version< number "8.0.16"))
+          (concat "EXPLAIN " sql)
+        (clutch-db-mysql-plan-sql sql analyze)))))
+
+(cl-defmethod clutch-db-plan ((_conn mysql-conn) result)
+  "Return the tree or traditional plan MySQL reported in RESULT.
+Traditional rows are independent steps: they do not specify a plan tree
+or costs, so neither hierarchy nor costs are inferred."
+  (if (seq-find (lambda (column)
+                  (equal (plist-get column :name) "select_type"))
+                (clutch-db-result-columns result))
+      (let ((columns (mapcar (lambda (column) (plist-get column :name))
+                             (clutch-db-result-columns result))))
+        (list :unit nil
+              :roots
+              (mapcar
+               (lambda (row)
+                 (let ((fields (cl-mapcar #'cons columns row)))
+                   (list :label
+                         (concat (format "%s: %s; access %s"
+                                         (cdr (assoc "select_type" fields))
+                                         (or (cdr (assoc "table" fields)) "(no table)")
+                                         (or (cdr (assoc "type" fields)) "none"))
+                                 (when-let* ((key (cdr (assoc "key" fields)))
+                                             ((stringp key)))
+                                   (concat "; index " key))
+                                 (when-let* ((extra (cdr (assoc "Extra" fields)))
+                                             ((stringp extra))
+                                             ((not (string-empty-p extra))))
+                                   (concat "; " extra)))
+                         :rows (cdr (assoc "rows" fields)))))
+               (clutch-db-result-rows result))))
+    (clutch-db-mysql-plan (caar (clutch-db-result-rows result)))))
 
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
                                       &optional schema _catalog)

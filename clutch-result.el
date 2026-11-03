@@ -20,6 +20,7 @@
 (require 'clutch-sql)
 (require 'clutch-ui)
 (require 'clutch-edit)
+(require 'clutch-viz)
 (require 'json)
 (require 'subr-x)
 (require 'text-property-search)
@@ -2296,6 +2297,147 @@ With prefix arg REFINE and an active region, enter visual refine mode."
        (clutch-result--region-rectangle-indices)
        #'clutch-result--do-aggregate)
     (clutch-result--do-aggregate (clutch-result--selection-rect))))
+
+;;;; Plans
+
+(defvar-local clutch-plan--plan nil
+  "What the plan buffer draws: (SQL . PLAN), PLAN from `clutch-db-plan'.")
+
+(define-derived-mode clutch-plan-mode special-mode "clutch-plan"
+  "Major mode for the plan of a statement, one step per line.
+A step's bar and share are its own time or cost, without its children's.
+\\<clutch-plan-mode-map>\\[revert-buffer] draws the plan again at the window's width."
+  (setq-local truncate-lines t
+              revert-buffer-function #'clutch-plan--render))
+
+(defun clutch-plan--self (node)
+  "Return NODE's total less its children's, or nil when it has none."
+  (when-let* ((total (plist-get node :total)))
+    (max 0 (- total (apply #'+ (mapcar (lambda (child)
+                                         (or (plist-get child :total) 0))
+                                       (plist-get node :children)))))))
+
+(defun clutch-plan--step-cells (unit self sum rows)
+  "Return a step's rows, own measure and share, as strings.
+UNIT and SELF are the step's own measure, SUM all steps' together, and
+ROWS the rows it produced or is expected to.  A missing one is empty."
+  (list (if rows (format "%s" rows) "")
+        (if self (format (if (eq unit 'ms) "%.2f ms" "%.1f") self) "")
+        (if self (format "%d%%" (if (> sum 0) (round (* 100 self) sum) 0))
+          "")))
+
+(defun clutch-plan--columns (cells)
+  "Return CELLS, lists of strings, as lines with each column right-aligned.
+A column whose cells are all empty is left out."
+  (let ((widths (apply #'cl-mapcar
+                       (lambda (&rest column)
+                         (apply #'max (mapcar #'string-width column)))
+                       cells)))
+    (mapcar (lambda (row)
+              (string-join (delq nil
+                                 (cl-mapcar (lambda (cell width)
+                                              (when (> width 0)
+                                                (concat
+                                                 (make-string
+                                                  (- width (string-width cell))
+                                                  ?\s)
+                                                 cell)))
+                                            row widths))
+                           "  "))
+            cells)))
+
+(defun clutch-plan--render (&rest _)
+  "Draw the current buffer's plan at its window's width.
+Arguments, as `revert-buffer' passes them, are ignored."
+  (pcase-let* ((`(,sql . ,plan) clutch-plan--plan)
+               (unit (plist-get plan :unit))
+               (lines (clutch-viz-tree (plist-get plan :roots)
+                                       (lambda (node) (plist-get node :children))
+                                       (lambda (node) (plist-get node :label))))
+               (selfs (mapcar (lambda (line) (clutch-plan--self (cdr line)))
+                              lines))
+               (sum (apply #'+ (remq nil selfs)))
+               (window (get-buffer-window nil t))
+               (width (1- (if window (window-body-width window) 80)))
+               (inhibit-read-only t))
+    (erase-buffer)
+    (insert (propertize
+             (pcase unit
+               ('ms "Measured by running the statement; each step's own time")
+               ('cost "Planner estimate; each step's own cost")
+               (_ "Plan"))
+             'face 'shadow)
+            "\n"
+            (propertize (truncate-string-to-width
+                         (replace-regexp-in-string "[ \t\n]+" " " sql)
+                         width nil nil t)
+                        'face 'shadow)
+            "\n\n"
+            (pcase-let ((`(,heading . ,texts)
+                         (clutch-plan--columns
+                          (cons (list (if (seq-some (lambda (line)
+                                                      (plist-get (cdr line)
+                                                                 :rows))
+                                                    lines)
+                                          "Rows" "")
+                                      (pcase unit
+                                        ('ms "Time") ('cost "Cost") (_ ""))
+                                      (if unit "Share" ""))
+                                (cl-mapcar (lambda (line self)
+                                             (clutch-plan--step-cells
+                                              unit self sum
+                                              (plist-get (cdr line) :rows)))
+                                           lines selfs)))))
+              (clutch-viz-bar-chart
+               (cl-mapcar (lambda (line self text)
+                            (list (car line) self (string-trim-left text)))
+                          lines selfs texts)
+               ;; Without a measure there are no bars to make room for.
+               width nil (if unit 0.6 0.8)
+               (list "Step"
+                     (pcase unit ('ms "Own time") ('cost "Own cost") (_ ""))
+                     (string-trim-left heading))))
+            "\n")
+    (goto-char (point-min))))
+
+;;;###autoload (autoload 'clutch-explain-plan "clutch" nil t)
+(defun clutch-explain-plan (beg end &optional analyze)
+  "Show the plan of the statement from BEG to END as a tree.
+When BEG equals END, use the statement at point, as `clutch-execute-dwim'
+does.  Each step's bar is its own share of the planner's cost or, with
+prefix argument ANALYZE, of the time measured by running the statement,
+which needs a SELECT that does not write."
+  (interactive
+   (append (if (use-region-p)
+               (list (region-beginning) (region-end))
+             (list (point) (point)))
+           (list current-prefix-arg)))
+  (pcase-let* ((`(,qb . ,qe) (if (= beg end)
+                                 (clutch--dwim-bounds-at-point)
+                               (cons beg end)))
+               (statements (clutch--split-statement-specs
+                            (buffer-substring-no-properties qb qe) qb))
+               (sql (caar statements)))
+    (unless (and sql (null (cdr statements)))
+      (user-error "A plan needs one statement"))
+    (when (and analyze (not (clutch-db-sql-pageable-query-p sql)))
+      (user-error "Measuring a plan runs the statement, so it needs a SELECT that does not write"))
+    (clutch--ensure-connection)
+    (let* ((conn clutch-connection)
+           (plan-sql (or (clutch-db-plan-sql conn sql analyze)
+                         (user-error (if analyze
+                                         "This connection cannot measure a plan; explain it without a prefix argument"
+                                       "Plans are not available for this connection")))))
+      (clutch-result--run-query
+       plan-sql plan-sql
+       (lambda (result _elapsed)
+         (let ((buffer (get-buffer-create "*clutch-plan*")))
+           (with-current-buffer buffer
+             (clutch-plan-mode)
+             (setq clutch-plan--plan (cons sql (clutch-db-plan conn result))))
+           (pop-to-buffer buffer)
+           (with-current-buffer buffer
+             (clutch-plan--render))))))))
 
 ;;;; Value viewers
 
