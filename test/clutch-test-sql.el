@@ -133,6 +133,9 @@ controls liveness and defaults to t."
                   ("SELECT b.| FROM (SELECT id + name FROM side.people) b")
                   ("SELECT b.| FROM (SELECT 1 FROM side.people) b")
                   ("SELECT \"b\".| FROM (SELECT id FROM side.people) b" "id")
+                  ("SELECT b.| FROM (SELECT id AS \"a.b\" FROM side.people) b" "a.b")
+                  ("SELECT b.| FROM (SELECT id AS \"odd\"\"name\" FROM side.people) b" "odd\"name")
+                  ("SELECT b.| FROM (SELECT id AS `odd``name` FROM side.people) b" "odd`name")
                   ("SELECT b.| FROM (SELECT id AS first FROM side.people UNION ALL SELECT name AS second FROM side.people) b" "first")
                   ("SELECT * FROM (SELECT id AS first FROM side.people) b UNION ALL SELECT b.| FROM (SELECT name AS second FROM side.people) b" "second")
                   ("SELECT * FROM (SELECT b.| FROM (SELECT id AS nested FROM side.people) b) b" "nested")
@@ -1572,6 +1575,10 @@ Structure is not interpreted here; callers confirm depth and literals through
                       "SELECT d.Label FROM (SELECT id AS Label FROM users) d")
                      ("SELECT d.La| FROM (SELECT id AS \"Label\" FROM users) d" "Label"
                       "SELECT d.\"Label\" FROM (SELECT id AS \"Label\" FROM users) d")
+                     ("SELECT d.a| FROM (SELECT id AS \"a.b\" FROM users) d" "a.b"
+                      "SELECT d.\"a.b\" FROM (SELECT id AS \"a.b\" FROM users) d")
+                     ("SELECT d.od| FROM (SELECT id AS \"odd\"\"name\" FROM users) d" "odd\"name"
+                      "SELECT d.\"odd\"\"name\" FROM (SELECT id AS \"odd\"\"name\" FROM users) d")
                      ("SELECT d.I| FROM (SELECT ID FROM users) d" "ID"
                       "SELECT d.ID FROM (SELECT ID FROM users) d")
                      ("sele| FROM users" "SELECT" "SELECT FROM users")))
@@ -1942,7 +1949,13 @@ Structure is not interpreted here; callers confirm depth and literals through
                   ("select users.id from orders users where exists (select 1 from users u where u.id = users.|)"
                    ("id" "user_id"))
                   ("select d.uid from (select id as uid from users) d where exists (select 1 from orders o where o.id = d.|)"
-                   ("uid"))))
+                   ("uid"))
+                  ;; A quoted alias keeps its case; an unquoted one may fold.
+                  ("select \"U\".| from users u join orders \"U\" on true"
+                   ("id" "user_id"))
+                  ("select u.| from users u join orders \"U\" on true"
+                   ("id" "name"))
+                  ("select \"U\".| from users u" ("id" "name"))))
     (pcase-let ((`(,sql ,expected) case))
       (ert-info ((format "sql: %s" sql))
         (with-temp-buffer
@@ -2529,6 +2542,14 @@ then failed with \"Connection busy\"."
                   :id "a"
                   :before "orders "
                   :char ?a)
+            (list :label "alias of a middle query, not the outer one"
+                  :sql (concat "SELECT 1 FROM users u WHERE EXISTS "
+                               "(SELECT 1 FROM orders u WHERE EXISTS "
+                               "(SELECT 1 FROM items i WHERE i.oid = u.id))")
+                  :needle "u.id"
+                  :id "u"
+                  :before "orders "
+                  :char ?u)
             (list :label "quoted alias"
                   :sql "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1"
                   :needle "\"u\".id"

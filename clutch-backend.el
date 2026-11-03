@@ -1217,14 +1217,15 @@ ends comments instead of counting as whitespace.")
   (car (last (clutch-db-sql--table-raw-parts table))))
 
 (defun clutch-db-sql--unquote-identifier (identifier)
-  "Return IDENTIFIER without SQL identifier delimiters."
+  "Return IDENTIFIER without SQL identifier delimiters.
+A doubled closing delimiter inside, as in \"a\"\"b\", stands for one."
   (cond
-   ((string-match "\\`\"\\([^\"]+\\)\"\\'" identifier)
-    (match-string 1 identifier))
-   ((string-match "\\``\\([^`]+\\)`\\'" identifier)
-    (match-string 1 identifier))
-   ((string-match "\\`\\[\\([^]]+\\)\\]\\'" identifier)
-    (match-string 1 identifier))
+   ((string-match "\\`\"\\(\\(?:[^\"]\\|\"\"\\)+\\)\"\\'" identifier)
+    (string-replace "\"\"" "\"" (match-string 1 identifier)))
+   ((string-match "\\``\\(\\(?:[^`]\\|``\\)+\\)`\\'" identifier)
+    (string-replace "``" "`" (match-string 1 identifier)))
+   ((string-match "\\`\\[\\(\\(?:[^]]\\|]]\\)+\\)]\\'" identifier)
+    (string-replace "]]" "]" (match-string 1 identifier)))
    (t identifier)))
 
 (defun clutch-db-sql-table-name (table)

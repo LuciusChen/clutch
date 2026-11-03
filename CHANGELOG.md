@@ -6,6 +6,12 @@
 
 - `E` in the console menu (`clutch-explain-plan`) shows the plan of the statement at point as a tree of steps. On PostgreSQL and MySQL each step carries a bar, its rows and its own share of the planner's cost, without its children's; `C-u` measures time instead with `EXPLAIN ANALYZE`, which runs the statement and is allowed only for a SELECT that does not write. MySQL needs 8.0.18 or later for `C-u`, and native MySQL before 8.0.16 shows its traditional `EXPLAIN` rows as steps without bars; MariaDB has no tree format. JDBC connections whose `:url` starts with `jdbc:postgresql:` or `jdbc:mysql:` show the same plans. SQLite shows its `EXPLAIN QUERY PLAN` steps. Other backends report that plans are not available.
 
+### Fixed
+
+- Completion tells a quoted alias from an unquoted one that differs only in case: in `FROM users u JOIN orders "U"`, `"U".` completes the columns of `orders`. An alias that matches only where the database folds case still resolves when nothing in its scope is written the same way.
+- A derived table's quoted output name is one name, dots and doubled quotes included: `AS "a.b"` completes as `a.b` and inserts `"a.b"`, and `AS "odd""name"` is no longer dropped.
+- `M-.` on an alias in a nested subquery jumps to the nearest enclosing definition, as completion resolves it, instead of skipping a middle query for the outermost one.
+
 ## 0.7.2 - 2026-11-02
 
 ### Added
