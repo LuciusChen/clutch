@@ -807,11 +807,14 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
   "Return SQL asking MySQL CONN for the plan of SQL.
 Before MySQL 8.0.16, use traditional EXPLAIN.  ANALYZE needs 8.0.18.
 MariaDB plans are not supported here."
-  (let ((version (or (mysql-conn-server-version conn) "")))
+  (let* ((version (or (mysql-conn-server-version conn) ""))
+         ;; Servers append suffixes such as "-log", which `version<' rejects.
+         (number (and (string-match "\\`[0-9]+\\(?:\\.[0-9]+\\)*" version)
+                      (match-string 0 version))))
     (unless (string-match-p "MariaDB" version)
-      (when (and analyze (version< version "8.0.18"))
+      (when (and analyze number (version< number "8.0.18"))
         (user-error "Measuring a MySQL plan requires MySQL 8.0.18 or later"))
-      (if (and (not analyze) (version< version "8.0.16"))
+      (if (and (not analyze) number (version< number "8.0.16"))
           (concat "EXPLAIN " sql)
         (clutch-db-mysql-plan-sql sql analyze)))))
 

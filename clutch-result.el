@@ -2327,18 +2327,22 @@ ROWS the rows it produced or is expected to.  A missing one is empty."
           "")))
 
 (defun clutch-plan--columns (cells)
-  "Return CELLS, lists of strings, as lines with each column right-aligned."
+  "Return CELLS, lists of strings, as lines with each column right-aligned.
+A column whose cells are all empty is left out."
   (let ((widths (apply #'cl-mapcar
                        (lambda (&rest column)
                          (apply #'max (mapcar #'string-width column)))
                        cells)))
     (mapcar (lambda (row)
-              (string-join (cl-mapcar (lambda (cell width)
-                                        (concat (make-string
-                                                 (- width (string-width cell))
-                                                 ?\s)
-                                                cell))
-                                      row widths)
+              (string-join (delq nil
+                                 (cl-mapcar (lambda (cell width)
+                                              (when (> width 0)
+                                                (concat
+                                                 (make-string
+                                                  (- width (string-width cell))
+                                                  ?\s)
+                                                 cell)))
+                                            row widths))
                            "  "))
             cells)))
 
@@ -2371,10 +2375,14 @@ Arguments, as `revert-buffer' passes them, are ignored."
             "\n\n"
             (pcase-let ((`(,heading . ,texts)
                          (clutch-plan--columns
-                          (cons (if unit
-                                    (list "Rows" (if (eq unit 'ms) "Time" "Cost")
-                                          "Share")
-                                  (list "" "" ""))
+                          (cons (list (if (seq-some (lambda (line)
+                                                      (plist-get (cdr line)
+                                                                 :rows))
+                                                    lines)
+                                          "Rows" "")
+                                      (pcase unit
+                                        ('ms "Time") ('cost "Cost") (_ ""))
+                                      (if unit "Share" ""))
                                 (cl-mapcar (lambda (line self)
                                              (clutch-plan--step-cells
                                               unit self sum
@@ -2384,7 +2392,8 @@ Arguments, as `revert-buffer' passes them, are ignored."
                (cl-mapcar (lambda (line self text)
                             (list (car line) self (string-trim-left text)))
                           lines selfs texts)
-               width nil 0.6
+               ;; Without a measure there are no bars to make room for.
+               width nil (if unit 0.6 0.8)
                (list "Step"
                      (pcase unit ('ms "Own time") ('cost "Own cost") (_ ""))
                      (string-trim-left heading))))

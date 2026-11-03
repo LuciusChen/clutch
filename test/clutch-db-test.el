@@ -4531,7 +4531,15 @@ arrives, so it must already be the new one."
                  "EXPLAIN SELECT 1"))
   (should-error (clutch-db-plan-sql
                  (make-mysql-conn :server-version "8.0.17") "SELECT 1" t)
-                :type 'user-error))
+                :type 'user-error)
+  ;; The handshake reports the server's own string, suffix included.
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "5.7.44-log") "SELECT 1" nil)
+                 "EXPLAIN SELECT 1"))
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "8.0.36-0ubuntu0.22.04.1")
+                  "SELECT 1" t)
+                 "EXPLAIN ANALYZE SELECT 1")))
 
 (ert-deftest clutch-db-test-mysql-plan-reads-tree-text ()
   "A MySQL tree plan becomes nested nodes with the planner's total cost,
