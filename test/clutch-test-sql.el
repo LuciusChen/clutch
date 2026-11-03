@@ -133,6 +133,7 @@ controls liveness and defaults to t."
                   ("SELECT b.| FROM (SELECT id + name FROM side.people) b")
                   ("SELECT b.| FROM (SELECT 1 FROM side.people) b")
                   ("SELECT \"b\".| FROM (SELECT id FROM side.people) b" "id")
+                  ("SELECT b.| FROM (SELECT \"U\".* FROM side.people u JOIN side.archive \"U\" ON 1 = 1) b" "other_id" "other_name")
                   ("SELECT b.| FROM (SELECT id AS \"a.b\" FROM side.people) b" "a.b")
                   ("SELECT b.| FROM (SELECT id AS \"odd\"\"name\" FROM side.people) b" "odd\"name")
                   ("SELECT b.| FROM (SELECT id AS `odd``name` FROM side.people) b" "odd`name")
@@ -1955,7 +1956,11 @@ Structure is not interpreted here; callers confirm depth and literals through
                    ("id" "user_id"))
                   ("select u.| from users u join orders \"U\" on true"
                    ("id" "name"))
-                  ("select \"U\".| from users u" ("id" "name"))))
+                  ;; Each backend says how an unquoted name folds; by default
+                  ;; it keeps its case, so "U" names no u.
+                  ("select \"U\".| from users u" nil)
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "name"))))
     (pcase-let ((`(,sql ,expected) case))
       (ert-info ((format "sql: %s" sql))
         (with-temp-buffer
@@ -2550,6 +2555,20 @@ then failed with \"Connection busy\"."
                   :id "u"
                   :before "orders "
                   :char ?u)
+            (list :label "alias of the query itself, not a sibling subquery's"
+                  :sql (concat "SELECT (SELECT x.id), "
+                               "(SELECT x.id FROM orders x LIMIT 1) FROM users x")
+                  :needle "x.id"
+                  :id "x"
+                  :before "users "
+                  :char ?x)
+            (list :label "quoted alias that differs from another only in case"
+                  :sql "SELECT \"U\".id FROM users u JOIN orders \"U\" ON true"
+                  :needle "\"U\".id"
+                  :offset 1
+                  :id "U"
+                  :before "orders "
+                  :char ?\")
             (list :label "quoted alias"
                   :sql "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1"
                   :needle "\"u\".id"

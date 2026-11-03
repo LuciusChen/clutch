@@ -8,9 +8,9 @@
 
 ### Fixed
 
-- Completion tells a quoted alias from an unquoted one that differs only in case: in `FROM users u JOIN orders "U"`, `"U".` completes the columns of `orders`. An alias that matches only where the database folds case still resolves when nothing in its scope is written the same way.
+- Completion, `p.*` in a derived table and `M-.` tell a quoted alias from an unquoted one that differs only in case, as the backend folds names: on PostgreSQL, `"U".` in `FROM users u JOIN orders "U"` names `orders`, and in a subquery of `FROM users "U"` it reaches past an inner `u` to `users`; on Oracle `"U"` and `u` are one name.
 - A derived table's quoted output name is one name, dots and doubled quotes included: `AS "a.b"` completes as `a.b` and inserts `"a.b"`, and `AS "odd""name"` is no longer dropped.
-- `M-.` on an alias in a nested subquery jumps to the nearest enclosing definition, as completion resolves it, instead of skipping a middle query for the outermost one.
+- `M-.` on an alias resolves it as completion does, in the query scopes around point: in a nested subquery it reaches the nearest enclosing definition instead of skipping a middle query, and it no longer jumps into a sibling subquery that defines the same alias.
 
 ## 0.7.2 - 2026-11-02
 
