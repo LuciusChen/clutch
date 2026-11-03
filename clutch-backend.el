@@ -1220,6 +1220,10 @@ ends comments instead of counting as whitespace.")
   "Return IDENTIFIER without SQL identifier delimiters.
 A doubled closing delimiter inside, as in \"a\"\"b\", stands for one."
   (cond
+   ;; A bare name, by far the most common, has no delimiters to remove.
+   ((not (and (> (length identifier) 1)
+              (memq (aref identifier 0) '(?\" ?` ?\[))))
+    identifier)
    ((string-match "\\`\"\\(\\(?:[^\"]\\|\"\"\\)+\\)\"\\'" identifier)
     (string-replace "\"\"" "\"" (match-string 1 identifier)))
    ((string-match "\\``\\(\\(?:[^`]\\|``\\)+\\)`\\'" identifier)
@@ -1816,19 +1820,34 @@ when non-nil."
 (cl-defgeneric clutch-db-identifier-case (conn)
   "Return the case CONN's database folds an unquoted identifier to, or nil.
 The value is `lower' or `upper' for a database that folds such a name and
-then compares names by case, as PostgreSQL and Oracle do, and nil for
-one that compares names regardless of case.")
+then compares names by case, as PostgreSQL and Oracle do.  It is nil for
+one that compares names regardless of case, which Clutch also assumes of
+a database whose rule no backend states.")
 
 (cl-defmethod clutch-db-identifier-case ((_conn t))
   "Return nil: a database is taken to compare names regardless of case."
   nil)
 
+(defun clutch-db-sql-fold-identifier (conn token)
+  "Return identifier TOKEN as named in the catalog of CONN's database.
+A quoted TOKEN keeps its case, and an unquoted one folds as
+`clutch-db-identifier-case' states."
+  (let ((name (clutch-db-sql--unquote-identifier token)))
+    (if (not (equal name token))
+        name
+      (pcase (clutch-db-identifier-case conn)
+        ('upper (upcase name))
+        ('lower (downcase name))
+        (_ name)))))
+
 (cl-defgeneric clutch-db--source-table-name (conn token)
   "Return source table name for CONN and SQL table TOKEN.")
 
-(cl-defmethod clutch-db--source-table-name ((_conn t) token)
-  "Return the default backend-canonical source table name for TOKEN."
-  (clutch-db-sql-table-name token))
+(cl-defmethod clutch-db--source-table-name ((conn t) token)
+  "Return the name of the table that SQL table TOKEN names on CONN.
+It is folded as `clutch-db-sql-fold-identifier' folds it."
+  (when-let* ((name (clutch-db-sql-table-qualifier token)))
+    (clutch-db-sql-fold-identifier conn name)))
 
 (cl-defgeneric clutch-db--source-table-schema (conn token)
   "Return source schema for CONN and SQL table TOKEN, or nil.")

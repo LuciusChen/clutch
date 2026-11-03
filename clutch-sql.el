@@ -348,6 +348,19 @@ none when point is outside every SELECT."
                                (<= (nth 0 scope) offset (nth 1 scope)))
                              (plist-get entry :query-scopes)))))
 
+(defconst clutch--sql-source-alias-regexp
+  (concat "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?"
+          "\\(\"\\(?:[^\"]\\|\"\"\\)+\"\\|`\\(?:[^`]\\|``\\)+`\\|[[:alnum:]_$#]+\\)")
+  "Regexp for what may be the alias after a FROM source, as group 1.
+See `clutch--sql-source-alias-p' for whether it is one.")
+
+(defun clutch--sql-source-alias-p (token)
+  "Return non-nil when TOKEN after a FROM source is its alias.
+A quoted name always is; a bare one is unless it is a keyword, as in
+FROM users WHERE."
+  (or (memq (aref token 0) '(?\" ?`))
+      (not (clutch--sql-keyword-p token))))
+
 (defun clutch--sql-alias-name (token)
   "Return the source alias written as identifier TOKEN.
 It is TOKEN unquoted, carrying TOKEN itself for `clutch--sql-names-alias-p'
@@ -373,15 +386,9 @@ callers run this inside their own searches."
           (b (clutch--sql-alias-token alias)))
       (pcase (clutch-db-sql--same-identifier-p a b)
         ('ambiguous
-         (if-let* ((case (clutch-db-identifier-case clutch-connection)))
-             (let ((fold (lambda (token)
-                           (let ((name (clutch-db-sql--unquote-identifier
-                                        token)))
-                             (cond ((not (equal name token)) name)
-                                   ((eq case 'upper) (upcase name))
-                                   (t (downcase name)))))))
-               (string= (funcall fold a) (funcall fold b)))
-           t))
+         (or (null (clutch-db-identifier-case clutch-connection))
+             (string= (clutch-db-sql-fold-identifier clutch-connection a)
+                      (clutch-db-sql-fold-identifier clutch-connection b))))
         (same same)))))
 
 (defun clutch--query-source-named (written sources)
@@ -447,16 +454,13 @@ OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
                   alias (clutch--sql-alias-name
                          (clutch-db-sql-table-qualifier source)))))
           (when (and end
-                     (string-match
-                      (concat "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?"
-                              "\\(\"\\(?:[^\"]\\|\"\"\\)+\"\\|`\\(?:[^`]\\|``\\)+`\\|[[:alnum:]_$#]+\\)")
-                      masked end)
+                     (string-match clutch--sql-source-alias-regexp masked end)
                      (= (match-beginning 0) end))
             (let* ((alias-end (match-end 0))
                    (alias-beg (match-beginning 1))
                    (token (match-string 1 sql))
                    (name (clutch--sql-alias-name token)))
-              (unless (and (equal name token) (clutch--sql-keyword-p name))
+              (when (clutch--sql-source-alias-p token)
                 ;; Where the alias is written, for `M-.'.
                 (put-text-property 0 (length name) 'clutch--sql-position
                                    alias-beg name)
@@ -603,17 +607,16 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
                (alias-consumed-end table-end))
           (setq pos table-end)
           (when (and dml-match
-                     (string-match
-                      "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\([[:alnum:]_$#`\"]+\\)"
-                      masked table-end)
+                     (string-match clutch--sql-source-alias-regexp
+                                   masked table-end)
                      (= (match-beginning 0) table-end)
                      (< (match-beginning 0) end))
-            (let ((alias-consumed-match-end (match-end 0)))
-              (when-let* ((alias-token (match-string 1 text))
-                          (alias (clutch--normalize-statement-table-token alias-token))
-                          ((not (clutch--sql-keyword-p alias))))
+            (let ((alias-consumed-match-end (match-end 0))
+                  (alias-token (match-string 1 text)))
+              (when (clutch--sql-source-alias-p alias-token)
                 (setq alias-consumed-end alias-consumed-match-end)
-                (push (cons alias table) aliases))))
+                (push (cons (clutch--sql-alias-name alias-token) table)
+                      aliases))))
           (setq pos alias-consumed-end)
           (when table (push table tables)))))
     (cons (nreverse tables) (nreverse aliases))))
@@ -690,15 +693,13 @@ Returns the buffer position (offset by STMT-BEG), or nil."
     (cl-some
      (lambda (start)
        (when-let* ((source-end (clutch--source-end masked start))
-                   ((string-match
-                     "[ \t\n\r]+\\(?:as[ \t\n\r]+\\)?\\(\"[^\"]+\"\\|`[^`]+`\\|[[:alnum:]_$#`\"]+\\)"
-                     masked source-end))
+                   ((string-match clutch--sql-source-alias-regexp
+                                  masked source-end))
                    ((= (match-beginning 0) source-end))
                    ((< (match-beginning 0) search-end))
-                   (normalized (clutch--normalize-statement-table-token
-                                (match-string 1 text)))
-                   ((not (clutch--sql-keyword-p normalized)))
-                   ((clutch--sql-names-alias-p (match-string 1 text) alias)))
+                   (token (match-string 1 text))
+                   ((clutch--sql-source-alias-p token))
+                   ((clutch--sql-names-alias-p token alias)))
          (+ stmt-beg (match-beginning 1))))
      (sort (delete-dups starts) #'<))))
 
