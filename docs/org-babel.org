@@ -83,3 +83,5 @@ Compatibility entry files live in the [[https://github.com/LuciusChen/ob-clutch]
 ** Connection Caching
 
 Connections are cached by parameter hash and source TRAMP origin, then reused across source block evaluations in the same Emacs session.  All cached connections are cleanly disconnected when Emacs exits (via =kill-emacs-hook=).
+
+Local SQLite filenames are resolved against the command's source directory during connection preparation. With the matching =ob-clutch= cache fix, relative =:database app.db= headers in different directories open different databases; =:memory:= remains an in-memory connection.
