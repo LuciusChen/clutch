@@ -6,6 +6,20 @@
 
 - `E` in the console menu (`clutch-explain-plan`) shows the plan of the statement at point as a tree of steps. On PostgreSQL and MySQL each step carries a bar, its rows and its own share of the planner's cost, without its children's; `C-u` measures time instead with `EXPLAIN ANALYZE`, which runs the statement and is allowed only for a SELECT that does not write. MySQL needs 8.0.18 or later for `C-u` and 8.0.16 for the tree format; MariaDB has no tree format. JDBC connections whose `:url` starts with `jdbc:postgresql:` or `jdbc:mysql:` show the same plans. SQLite shows its `EXPLAIN QUERY PLAN` steps. Other backends report that plans are not available.
 
+## 0.7.2 - 2026-11-02
+
+### Added
+
+- `clutch-close-connection` closes a connection opened with `clutch-open-connection` and stops its SSH or TRAMP forward, also when the connection has already died. `clutch-db-disconnect`, which that function's documentation used to name, left the forward running.
+
+### Changed
+
+- Each ssh process Clutch starts for `:ssh-host` tunnels and TRAMP forwards uses a connection of its own, ignoring ControlMaster settings in `~/.ssh/config` and tramp-rpc's ControlMaster. A tunnel forwarded over a shared connection stayed open on 127.0.0.1 after Clutch disconnected, until that connection closed, so any local process could still reach the database port. Set `clutch-ssh-isolate-connections` to nil to share connections as before, for example for a host that needs a password or a second factor and is already logged in elsewhere.
+
+### Fixed
+
+- A TRAMP container forward no longer keeps the processes of every connection it has served; it drops those that have exited.
+
 ## 0.7.1 - 2026-10-31
 
 ### Added

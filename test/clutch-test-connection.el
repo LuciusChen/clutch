@@ -497,7 +497,8 @@ and the ssh -N process has no owner yet at that point."
           (should-not process-called))))))
 
 (ert-deftest clutch-test-start-ssh-tunnel-starts-batch-tunnel-directly ()
-  "SSH tunnel startup should rely on the real batch tunnel command."
+  "SSH tunnel startup should rely on the real batch tunnel command.
+The tunnel stays off ControlMaster connections, so it ends with its process."
   (let (make-process-args)
     (cl-letf (((symbol-function 'executable-find)
                (lambda (_name) "/usr/bin/ssh"))
@@ -522,6 +523,8 @@ and the ssh -N process has no owner yet at that point."
         (should (eq (plist-get tunnel :process) 'fake-proc))
         (should (equal (plist-get make-process-args :command)
                        (list "ssh"
+                             "-o" "ControlMaster=no"
+                             "-o" "ControlPath=none"
                              "-N"
                              "-o" "BatchMode=yes"
                              "-o" "ExitOnForwardFailure=yes"
@@ -531,13 +534,20 @@ and the ssh -N process has no owner yet at that point."
 
 (ert-deftest clutch-test-start-tramp-forward-starts-ssh-forward ()
   "OpenSSH TRAMP forward startup should run ssh -L for ssh-like directories.
-SSH-like hops become -J, and an rpc directory adds tramp-rpc's
-ControlMaster options before the target."
+SSH-like hops become -J.  Every forward stays off ControlMaster
+connections by default; with `clutch-ssh-isolate-connections' off, an
+rpc directory reuses tramp-rpc's ControlMaster instead."
   (dolist (case
            (list
             (list :label "direct ssh directory"
                   :tramp-default-directory "/ssh:devbox:/workspace/"
                   :host "db" :port 5432
+                  :forward "127.0.0.1:%d:db:5432"
+                  :tail '("devbox"))
+            (list :label "isolation also covers rpc directories"
+                  :tramp-default-directory "/rpc:devbox:/workspace/"
+                  :host "db" :port 5432
+                  :controlmaster-options '("-o" "ControlMaster=auto")
                   :forward "127.0.0.1:%d:db:5432"
                   :tail '("devbox"))
             (list :label "ssh-like hops mapped to ProxyJump"
@@ -548,14 +558,14 @@ ControlMaster options before the target."
             (list :label "tramp-rpc ControlMaster reuse"
                   :tramp-default-directory "/rpc:devbox:/workspace/"
                   :host "127.0.0.1" :port 55433
+                  :shared t
                   :controlmaster-options '("-o" "ControlMaster=auto"
                                            "-o" "ControlPath=/tmp/tramp-rpc.sock")
                   :forward "127.0.0.1:%d:127.0.0.1:55433"
-                  :tail '("-o" "ControlMaster=auto"
-                          "-o" "ControlPath=/tmp/tramp-rpc.sock"
-                          "devbox"))))
+                  :tail '("devbox"))))
     (ert-info ((plist-get case :label))
-      (let (make-process-args waited)
+      (let ((clutch-ssh-isolate-connections (not (plist-get case :shared)))
+            make-process-args waited)
         (cl-letf (((symbol-function 'executable-find)
                    (lambda (program)
                      (when (equal program "ssh") "/usr/bin/ssh")))
@@ -589,8 +599,12 @@ ControlMaster options before the target."
                  (local-port (plist-get transport :local-port)))
             (should (integerp local-port))
             (should (equal (plist-get make-process-args :command)
-                           (append (list "ssh"
-                                         "-N"
+                           (append '("ssh")
+                                   (if (plist-get case :shared)
+                                       (plist-get case :controlmaster-options)
+                                     '("-o" "ControlMaster=no"
+                                       "-o" "ControlPath=none"))
+                                   (list "-N"
                                          "-o" "BatchMode=yes"
                                          "-o" "ExitOnForwardFailure=yes"
                                          "-L" (format (plist-get case :forward)
@@ -622,7 +636,8 @@ command quoted for the remote shell."
                   :executable "ssh"
                   :tramp-default-directory "/ssh:devbox|podman:app:/workspace/"
                   :command (append
-                            (list "ssh" "-T" "-o" "BatchMode=yes" "devbox")
+                            (list "ssh" "-o" "ControlMaster=no" "-o" "ControlPath=none"
+                                  "-T" "-o" "BatchMode=yes" "devbox")
                             (mapcar
                              #'shell-quote-argument
                              (list "podman" "exec" "-i" "app" "sh" "-lc"
@@ -723,6 +738,26 @@ command quoted for the remote shell."
       (when server
         (clutch--stop-connection-transport (list :process server))))))
 
+(ert-deftest clutch-test-container-forward-forgets-exited-children ()
+  "A container listener keeps only its live children, so serving many
+connections does not pile up the processes of finished ones."
+  (skip-unless (and (executable-find "sleep") (executable-find "true")))
+  (let ((listener (start-process "clutch-test-listener" nil "sleep" "60"))
+        (done (start-process "clutch-test-done" nil "true"))
+        (live (start-process "clutch-test-live" nil "sleep" "60"))
+        (new (start-process "clutch-test-new" nil "sleep" "60")))
+    (unwind-protect
+        (progn
+          (while (process-live-p done)
+            (accept-process-output done 0.05))
+          (clutch--container-forward-register-child listener done)
+          (clutch--container-forward-register-child listener live)
+          (clutch--container-forward-register-child listener new)
+          (should (equal (process-get listener :clutch-container-children)
+                         (list new live))))
+      (dolist (proc (list listener live new))
+        (when (process-live-p proc) (delete-process proc))))))
+
 (ert-deftest clutch-test-ssh-diagnose-output-hints-common-auth-failures ()
   "SSH diagnosis should point users at the right interactive recovery path."
   (dolist (case `((locked-key
@@ -739,7 +774,9 @@ command quoted for the remote shell."
             (should (string-match-p pattern message))))))))
 
 (ert-deftest clutch-test-prepare-ssh-host-starts-interactive-session ()
-  "Interactive SSH prepare should open a comint session for the alias."
+  "Interactive SSH prepare should open a comint session for the alias.
+It stays off ControlMaster as the tunnel does, so a shared connection
+cannot report the host ready while the tunnel's own login still fails."
   (skip-unless (executable-find "cat"))
   (let ((real-make-comint (symbol-function 'make-comint-in-buffer))
         started message-text)
@@ -764,7 +801,9 @@ command quoted for the remote shell."
                 (should (equal (cddr started)
                                '("ssh"
                                  nil
-                                 ("bastion-prod" "exit"))))
+                                 ("-o" "ControlMaster=no"
+                                  "-o" "ControlPath=none"
+                                  "bastion-prod" "exit"))))
                 (should (process-live-p proc))
                 (should-not (process-query-on-exit-flag proc))
                 (should (equal (process-get proc :clutch-ssh-host) "bastion-prod"))
@@ -2418,6 +2457,25 @@ arrived before the disconnect, waiting to be shown, keeps its message."
             (should-not (process-live-p proc))
             (should-not (gethash conn clutch--connection-transport-cache)))
         (when (process-live-p proc) (delete-process proc))))))
+
+(ert-deftest clutch-test-close-connection-stops-its-transport ()
+  "Closing a connection from `clutch-open-connection' stops its tunnel,
+also when the connection has already died."
+  (skip-unless (executable-find "sleep"))
+  (dolist (live '(t nil))
+    (ert-info ((format "live %s" live))
+      (let ((clutch--connection-transport-cache (make-hash-table :test 'eq))
+            (conn (make-clutch-test-conn :live live))
+            (proc (start-process "clutch-test-tunnel" nil "sleep" "60")))
+        (unwind-protect
+            (progn
+              (puthash conn (list :kind 'ssh :process proc)
+                       clutch--connection-transport-cache)
+              (clutch-close-connection conn)
+              (should-not (clutch-db-live-p conn))
+              (should-not (process-live-p proc))
+              (should-not (gethash conn clutch--connection-transport-cache)))
+          (when (process-live-p proc) (delete-process proc)))))))
 
 (ert-deftest clutch-test-teardown-clears-the-connections-schema-metadata-state ()
   "Ending a session should clear schema refresh state for its connection object.
