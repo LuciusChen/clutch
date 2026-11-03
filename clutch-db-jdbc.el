@@ -1829,6 +1829,13 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
       (clutch-jdbc--clickhouse-escape-identifier name)
     (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name))))
 
+(cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
+  "Return how JDBC CONN's database folds unquoted names, or nil.
+Oracle, Snowflake and DB2 fold them to upper case, and a PostgreSQL URL
+to lower case.  Redshift ignores case even in quoted names by default."
+  (cond ((memq (clutch-jdbc--conn-driver conn) '(oracle snowflake db2)) 'upper)
+        ((clutch-jdbc--url-prefix-p conn "jdbc:postgresql:") 'lower)))
+
 (cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
   "Return source table name for JDBC CONN and SQL table TOKEN."
   (let ((name (cl-call-next-method)))

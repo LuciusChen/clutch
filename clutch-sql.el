@@ -363,21 +363,25 @@ NAME comes from `clutch--sql-alias-name' or is a token already."
 (defun clutch--sql-names-alias-p (written alias)
   "Return non-nil when WRITTEN and ALIAS name the same query source.
 Each is a name from `clutch--sql-alias-name' or a token.  Where only case
-folding decides, as for \"U\" and u, the connection's backend reads both
-as its catalog would.  A backend that folds unquoted names compares them
-by case, so they match on Oracle but not on PostgreSQL; one that keeps
-their case, as SQLite does, compares them regardless.  Match data is
-preserved, since callers run this inside their own searches."
+decides, as for \"U\" and u, `clutch-db-identifier-case' does: a database
+that folds unquoted names compares the folded names by case, so they
+match on Oracle but not on PostgreSQL, and any other compares them
+regardless of case, as SQLite does.  Match data is preserved, since
+callers run this inside their own searches."
   (save-match-data
     (let ((a (clutch--sql-alias-token written))
-          (b (clutch--sql-alias-token alias))
-          (name (lambda (token)
-                  (clutch-db--source-table-name clutch-connection token))))
+          (b (clutch--sql-alias-token alias)))
       (pcase (clutch-db-sql--same-identifier-p a b)
         ('ambiguous
-         (or (string= (funcall name a) (funcall name b))
-             (and (string= (funcall name "a") "a")
-                  (string= (funcall name "A") "A"))))
+         (if-let* ((case (clutch-db-identifier-case clutch-connection)))
+             (let ((fold (lambda (token)
+                           (let ((name (clutch-db-sql--unquote-identifier
+                                        token)))
+                             (cond ((not (equal name token)) name)
+                                   ((eq case 'upper) (upcase name))
+                                   (t (downcase name)))))))
+               (string= (funcall fold a) (funcall fold b)))
+           t))
         (same same)))))
 
 (defun clutch--query-source-named (written sources)

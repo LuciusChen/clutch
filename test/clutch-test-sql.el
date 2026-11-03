@@ -1945,6 +1945,7 @@ Structure is not interpreted here; callers confirm depth and literals through
   "A correlated subquery should resolve an enclosing alias, nearest first, not a sibling's."
   (require 'pgsql)
   (require 'clutch-db-pg)
+  (require 'clutch-db-jdbc)
   (dolist (case '(("select u.id from users u where exists (select 1 from orders o where o.user_id = u.|)"
                    ("id" "name"))
                   ("select u.id from users u where exists (select 1 from orders u where u.|)"
@@ -1963,9 +1964,14 @@ Structure is not interpreted here; callers confirm depth and literals through
                   ;; A backend that keeps the case of unquoted names, the
                   ;; default, compares names regardless of case.
                   ("select \"U\".| from users u" ("id" "name"))
-                  ;; PostgreSQL folds u to lower case, so "U" is not u.
+                  ;; PostgreSQL folds u to lower case, so "U" is not u,
+                  ;; over JDBC too; Oracle folds it to upper case.
                   ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
                    ("id" "name") pg)
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "name") jdbc-pg)
+                  ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
+                   ("id" "user_id") oracle)
                   ("select \"U\".| from users u" nil pg)))
     (pcase-let ((`(,sql ,expected ,backend) case))
       (ert-info ((format "sql: %s" sql))
@@ -1976,9 +1982,13 @@ Structure is not interpreted here; callers confirm depth and literals through
           (search-forward "|")
           (delete-char -1)
           (let ((schema (make-hash-table :test 'equal))
-                (clutch-connection (if (eq backend 'pg)
-                                       (clutch-db-pg--make-connection)
-                                     'fake)))
+                (clutch-connection
+                 (pcase backend
+                   ('pg (clutch-db-pg--make-connection))
+                   ('jdbc-pg (make-clutch-jdbc-conn
+                              :params '(:url "jdbc:postgresql://db/app")))
+                   ('oracle (make-clutch-jdbc-conn :driver 'oracle))
+                   (_ 'fake))))
             (puthash "users" '("id" "name") schema)
             (puthash "orders" '("id" "user_id") schema)
             (cl-letf (((symbol-function 'clutch--schema-for-connection)

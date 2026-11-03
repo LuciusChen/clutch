@@ -1813,6 +1813,16 @@ when non-nil."
 (cl-defgeneric clutch-db-escape-identifier (conn name)
   "Escape NAME as a SQL identifier for CONN's dialect.")
 
+(cl-defgeneric clutch-db-identifier-case (conn)
+  "Return the case CONN's database folds an unquoted identifier to, or nil.
+The value is `lower' or `upper' for a database that folds such a name and
+then compares names by case, as PostgreSQL and Oracle do, and nil for
+one that compares names regardless of case.")
+
+(cl-defmethod clutch-db-identifier-case ((_conn t))
+  "Return nil: a database is taken to compare names regardless of case."
+  nil)
+
 (cl-defgeneric clutch-db--source-table-name (conn token)
   "Return source table name for CONN and SQL table TOKEN.")
 

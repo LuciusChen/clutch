@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Completion, `p.*` in a derived table and `M-.` tell a quoted alias from an unquoted one that differs only in case, as the backend folds names: on PostgreSQL, `"U".` in `FROM users u JOIN orders "U"` names `orders`, and in a subquery of `FROM users "U"` it reaches past an inner `u` to `users`; on Oracle, and on SQLite, which ignores case, `"U"` and `u` are one name, though one written as `"U"` still wins.
+- Completion, `p.*` in a derived table and `M-.` tell a quoted alias from an unquoted one that differs only in case, as the database folds unquoted names (`clutch-db-identifier-case`): on PostgreSQL, natively or through a `jdbc:postgresql:` URL, `"U".` in `FROM users u JOIN orders "U"` names `orders`, and in a subquery of `FROM users "U"` it reaches past an inner `u` to `users`; on Oracle, Snowflake and DB2 `u` folds to `U`, and on SQLite and the other databases, which are taken to ignore case, `"U"` and `u` are one name, though one written as `"U"` still wins.
 - A derived table's quoted output name is one name, dots and doubled quotes included: `AS "a.b"` completes as `a.b` and inserts `"a.b"`, and `AS "odd""name"` is no longer dropped.
 - `M-.` on an alias resolves it as completion does, in the query scopes around point: in a nested subquery it reaches the nearest enclosing definition instead of skipping a middle query, and it no longer jumps into a sibling subquery that defines the same alias.
 
