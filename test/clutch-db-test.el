@@ -4510,6 +4510,29 @@ arrives, so it must already be the new one."
             (quit nil)))
         (should (equal calls '((t nil))))))))
 
+(ert-deftest clutch-db-test-mysql-plan-legacy-server ()
+  "Older MySQL plans use table steps without invented costs or hierarchy."
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :server-version "5.7.44")))
+    (should (equal (clutch-db-plan-sql conn "SELECT 1" nil)
+                   "EXPLAIN SELECT 1"))
+    (should-error (clutch-db-plan-sql conn "SELECT 1" t) :type 'user-error)
+    (should
+     (equal (clutch-db-plan
+             conn (make-clutch-db-result
+                   :columns '((:name "id") (:name "select_type") (:name "table")
+                              (:name "type") (:name "key") (:name "rows")
+                              (:name "Extra"))
+                   :rows '((1 "SIMPLE" "people" "ALL" nil 12 "Using where"))))
+            '(:unit nil :roots
+              ((:label "SIMPLE: people; access ALL; Using where" :rows 12))))))
+  (should (equal (clutch-db-plan-sql
+                  (make-mysql-conn :server-version "8.0.15") "SELECT 1" nil)
+                 "EXPLAIN SELECT 1"))
+  (should-error (clutch-db-plan-sql
+                 (make-mysql-conn :server-version "8.0.17") "SELECT 1" t)
+                :type 'user-error))
+
 (ert-deftest clutch-db-test-mysql-plan-reads-tree-text ()
   "A MySQL tree plan becomes nested nodes with the planner's total cost,
 or, when measured, each step's time per loop times its loops; MariaDB,
