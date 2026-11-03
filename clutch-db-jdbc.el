@@ -1831,28 +1831,15 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
 
 (cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
   "Return how JDBC CONN's database folds unquoted names, or nil.
-Oracle, Snowflake and DB2 fold them to upper case, and a PostgreSQL URL
-to lower case.  Redshift ignores case even in quoted names by default."
-  (cond ((memq (clutch-jdbc--conn-driver conn) '(oracle snowflake db2)) 'upper)
+Oracle folds them to upper case, and a PostgreSQL URL to lower case."
+  (cond ((clutch-jdbc--oracle-conn-p conn) 'upper)
         ((clutch-jdbc--url-prefix-p conn "jdbc:postgresql:") 'lower)))
 
-(cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
-  "Return source table name for JDBC CONN and SQL table TOKEN."
-  (let ((name (cl-call-next-method)))
-    (if (and (clutch-jdbc--oracle-conn-p conn)
-             (not (string-match-p "\\`\\s-*\""
-                                  (clutch-db-sql-table-qualifier token))))
-        (upcase name)
-      name)))
-
 (cl-defmethod clutch-db--source-table-schema ((conn clutch-jdbc-conn) token)
-  "Return source schema for JDBC CONN and SQL table TOKEN."
-  (let ((schema (clutch-db-sql-table-schema token)))
-    (if (and schema
-             (clutch-jdbc--oracle-conn-p conn)
-             (not (string-prefix-p "\"" token)))
-        (upcase schema)
-      schema)))
+  "Return the schema that SQL table TOKEN names on JDBC CONN, or nil."
+  (let ((parts (clutch-db-sql--table-raw-parts token)))
+    (when (cdr parts)
+      (clutch-db-sql-fold-identifier conn (car (last parts 2))))))
 
 (cl-defmethod clutch-db--source-table-catalog ((_conn clutch-jdbc-conn) token)
   "Return source catalog for JDBC SQL table TOKEN."

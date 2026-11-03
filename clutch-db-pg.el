@@ -906,26 +906,16 @@ COPY."
   "Escape VALUE as a PostgreSQL string literal."
   (pgsql-escape-literal value))
 
-(defun clutch-db-pg--fold-identifier (raw)
-  "Return identifier RAW in its PostgreSQL catalog form.
-A quoted identifier keeps its case, and an unquoted one folds to lower case."
-  (if (string-prefix-p "\"" raw)
-      (clutch-db-sql--unquote-identifier raw)
-    (downcase raw)))
-
 (cl-defmethod clutch-db-identifier-case ((_conn clutch-db-pg--connection))
   "Return `lower', since PostgreSQL folds unquoted names to lower case."
   'lower)
 
-(cl-defmethod clutch-db--source-table-name ((_conn clutch-db-pg--connection) token)
-  "Return the name of the table that SQL table TOKEN names."
-  (clutch-db-pg--fold-identifier (clutch-db-sql-table-qualifier token)))
-
-(cl-defmethod clutch-db--source-table-schema ((_conn clutch-db-pg--connection) token)
-  "Return the schema that SQL table TOKEN names, or nil."
+(cl-defmethod clutch-db--source-table-schema
+    ((conn clutch-db-pg--connection) token)
+  "Return the schema that SQL table TOKEN names on CONN, or nil."
   (let ((parts (clutch-db-sql--table-raw-parts token)))
     (when (cdr parts)
-      (clutch-db-pg--fold-identifier (car (last parts 2))))))
+      (clutch-db-sql-fold-identifier conn (car (last parts 2))))))
 
 (defun clutch-db-pg--relation (table schema)
   "Return SQL that resolves TABLE in SCHEMA to its oid.
