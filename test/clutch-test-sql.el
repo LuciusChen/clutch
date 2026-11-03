@@ -176,6 +176,8 @@ controls liveness and defaults to t."
                              ("SELECT p. FROM other.people p" "other_name")
                              ("SELECT d. FROM (SELECT minus FROM metrics) d" "minus")
                              ("SELECT minus. FROM metrics minus" "id" "minus")
+                             ;; SQLite ignores case, quoted or not.
+                             ("SELECT \"P\". FROM main.people p" "name")
                              ("SELECT id FROM metrics p WHERE minus = 1 AND p. " "id" "minus")))
                (ert-info ((format "completion: %s" (car case)))
                  (erase-buffer)
@@ -1941,6 +1943,8 @@ Structure is not interpreted here; callers confirm depth and literals through
 
 (ert-deftest clutch-test-completion-at-point-resolves-outer-aliases-in-subqueries ()
   "A correlated subquery should resolve an enclosing alias, nearest first, not a sibling's."
+  (require 'pgsql)
+  (require 'clutch-db-pg)
   (dolist (case '(("select u.id from users u where exists (select 1 from orders o where o.user_id = u.|)"
                    ("id" "name"))
                   ("select u.id from users u where exists (select 1 from orders u where u.|)"
@@ -1951,17 +1955,19 @@ Structure is not interpreted here; callers confirm depth and literals through
                    ("id" "user_id"))
                   ("select d.uid from (select id as uid from users) d where exists (select 1 from orders o where o.id = d.|)"
                    ("uid"))
-                  ;; A quoted alias keeps its case; an unquoted one may fold.
+                  ;; The alias written the same way wins.
                   ("select \"U\".| from users u join orders \"U\" on true"
                    ("id" "user_id"))
                   ("select u.| from users u join orders \"U\" on true"
                    ("id" "name"))
-                  ;; Each backend says how an unquoted name folds; by default
-                  ;; it keeps its case, so "U" names no u.
-                  ("select \"U\".| from users u" nil)
+                  ;; A backend that keeps the case of unquoted names, the
+                  ;; default, compares names regardless of case.
+                  ("select \"U\".| from users u" ("id" "name"))
+                  ;; PostgreSQL folds u to lower case, so "U" is not u.
                   ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
-                   ("id" "name"))))
-    (pcase-let ((`(,sql ,expected) case))
+                   ("id" "name") pg)
+                  ("select \"U\".| from users u" nil pg)))
+    (pcase-let ((`(,sql ,expected ,backend) case))
       (ert-info ((format "sql: %s" sql))
         (with-temp-buffer
           (clutch-mode)
@@ -1970,7 +1976,9 @@ Structure is not interpreted here; callers confirm depth and literals through
           (search-forward "|")
           (delete-char -1)
           (let ((schema (make-hash-table :test 'equal))
-                (clutch-connection 'fake))
+                (clutch-connection (if (eq backend 'pg)
+                                       (clutch-db-pg--make-connection)
+                                     'fake)))
             (puthash "users" '("id" "name") schema)
             (puthash "orders" '("id" "user_id") schema)
             (cl-letf (((symbol-function 'clutch--schema-for-connection)
@@ -2568,6 +2576,13 @@ then failed with \"Connection busy\"."
                   :offset 1
                   :id "U"
                   :before "orders "
+                  :char ?\")
+            (list :label "quoted alias of an UPDATE"
+                  :sql "UPDATE users \"u\" SET name = 'x' WHERE \"u\".id = 1"
+                  :needle "\"u\".id"
+                  :offset 1
+                  :id "u"
+                  :before "users "
                   :char ?\")
             (list :label "quoted alias"
                   :sql "SELECT \"u\".name FROM users \"u\" WHERE \"u\".id = 1"

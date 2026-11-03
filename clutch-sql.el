@@ -364,21 +364,35 @@ NAME comes from `clutch--sql-alias-name' or is a token already."
   "Return non-nil when WRITTEN and ALIAS name the same query source.
 Each is a name from `clutch--sql-alias-name' or a token.  Where only case
 folding decides, as for \"U\" and u, the connection's backend reads both
-as its catalog would, so they match on Oracle but not on PostgreSQL."
-  (let ((a (clutch--sql-alias-token written))
-        (b (clutch--sql-alias-token alias)))
-    (pcase (clutch-db-sql--same-identifier-p a b)
-      ('ambiguous
-       (string= (clutch-db--source-table-name clutch-connection a)
-                (clutch-db--source-table-name clutch-connection b)))
-      (same same))))
+as its catalog would.  A backend that folds unquoted names compares them
+by case, so they match on Oracle but not on PostgreSQL; one that keeps
+their case, as SQLite does, compares them regardless.  Match data is
+preserved, since callers run this inside their own searches."
+  (save-match-data
+    (let ((a (clutch--sql-alias-token written))
+          (b (clutch--sql-alias-token alias))
+          (name (lambda (token)
+                  (clutch-db--source-table-name clutch-connection token))))
+      (pcase (clutch-db-sql--same-identifier-p a b)
+        ('ambiguous
+         (or (string= (funcall name a) (funcall name b))
+             (and (string= (funcall name "a") "a")
+                  (string= (funcall name "A") "A"))))
+        (same same)))))
 
 (defun clutch--query-source-named (written sources)
   "Return the (ALIAS . SOURCE) of query SOURCES that WRITTEN names, or nil.
-WRITTEN is a name from `clutch--sql-alias-name' or a token."
-  (cl-find-if (lambda (source)
-                (clutch--sql-names-alias-p written (car source)))
-              sources))
+WRITTEN is a name from `clutch--sql-alias-name' or a token.  An alias
+written the same way wins over one that matches it only by case, as \"U\"
+does over u in FROM users u JOIN orders \"U\" on a backend that ignores it."
+  (let ((token (clutch--sql-alias-token written)))
+    (or (cl-find-if (lambda (source)
+                      (eq t (clutch-db-sql--same-identifier-p
+                             token (clutch--sql-alias-token (car source)))))
+                    sources)
+        (cl-find-if (lambda (source)
+                      (clutch--sql-names-alias-p written (car source)))
+                    sources))))
 
 (defun clutch--completion-scope-source (entry qualifier)
   "Return the (ALIAS . SOURCE) that QUALIFIER, as written, names at point.
