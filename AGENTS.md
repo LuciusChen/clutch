@@ -47,6 +47,7 @@ Build a maintainable Emacs database client. Functional correctness and passing t
 - Changing ownership, dependencies or backend surfaces: [architecture](docs/architecture.md).
 - Changing JDBC transport, lifecycle or release integration: [protocol contract](docs/jdbc-agent-protocol.md) and [backend setup](docs/jdbc-backend.org).
 - Changing commands, defaults or result workflows: [interactive guide](docs/interactive-client.org).
+- Changing connection configuration, credentials, transactions or SSH/TRAMP transports: [user guide](docs/user-guide.md).
 - Editing package headers, autoloads, Elisp tooling or preparing a code commit/release: [development checks](CONTRIBUTING.md).
 - Working on a non-obvious design or previously failed approach: search [postmortem/](postmortem/) for the relevant decision, not the entire history.
 

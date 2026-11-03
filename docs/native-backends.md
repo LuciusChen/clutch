@@ -11,30 +11,7 @@
 
 Use this document for backend-specific connection, protocol, TLS, timeout, and usage notes for the native backends.  The JDBC sidecar has its own document in [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are defined in [`docs/backend-support.org`](./backend-support.org).
 
-## Live Testing
-
-Live tests use ordinary host/port connection variables, so any local database or Docker-compatible runtime works.  The examples below use Docker only as a portable way to start test servers.
-
-```sh
-docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8.0
-docker run --name clutch-pg-16 -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
-```
-
-Run the standalone MySQL protocol live suite from the [`mysql.el`](https://github.com/LuciusChen/mysql.el) checkout:
-
-```sh
-emacs -Q --batch -L . -l ert -l test/mysql-test.el \
-  --eval '(setq mysql-test-password "test" mysql-test-port 55306)' \
-  --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
-```
-
-Run clutch native adapter live tests from the `clutch` checkout:
-
-```sh
-./test/run-native-live-tests.sh
-```
-
-The runner starts or reuses local Podman containers on Linux or Docker/OrbStack containers on macOS, then executes both UI-level `:clutch-live` tests and backend-level native tests such as `:mysql-live`, `:pg-live`, `:mongodb-live`, and `:redis-live`. Default ERT runs skip those live tags unless credentials are provided. Setting `CLUTCH_TEST_JDBC_AGENT_JAR` to an exact published or locally built jar extends the run with container-backed Oracle, SQL Server, and ClickHouse coverage plus a local DuckDB database; `CLUTCH_TEST_JDBC_AGENT_DIR` optionally selects its isolated runtime directory. The costly JDBC extension remains explicitly opt-in even though Clutch pins a supported release, so the runner never substitutes an unintended artifact.
+## MongoDB and Redis
 
 MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 
@@ -42,36 +19,9 @@ MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires 
 
 Redis uses the external `redis.el` native RESP client.  Clutch owns the line-oriented Redis command buffers, key browsing, type-aware read commands, TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value backend, not a document backend and not a SQL surface.
 
-Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake, capability, or password-plugin code.
+## SSH Tunnels and TRAMP
 
-## SSH Tunnels
-
-For saved clutch connections, `:ssh-host` always starts a local SSH forward through the named host in `~/.ssh/config` before the native backend connects. The database `:host` / `:port` remain the remote endpoint as seen from the bastion host; clutch rewrites the live socket to `127.0.0.1:LOCAL-PORT` internally. This transport layer only rewrites structured `:host` / `:port` connection params. Opaque `:url` profiles, including JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs, must use a manual tunnel or backend-level transport support.
-
-When one database is reachable both directly and through SSH, define two named connections that share one profile:
-
-```elisp
-(setq clutch-connection-alist
-      '(("prod" . (:backend mysql :profile-entry "mysql/prod"))
-        ("prod-ssh" . (:backend mysql :profile-entry "mysql/prod"
-                        :ssh-host "bastion-prod"))))
-```
-
-From a local buffer, select `prod` for the direct route and `prod-ssh` for the tunnel. Clutch does not probe the endpoint or fall back between routes, so database connection timeouts retain their normal single-route meaning. Existing explicit and inferred TRAMP forwarding rules remain unchanged.
-
-This SSH path is intentionally OpenSSH-first:
-
-- use your normal `~/.ssh/config` host aliases
-- let `ssh-agent` or the OpenSSH client handle SSH credentials
-- keep database passwords in `auth-source`
-
-If the first SSH use still needs a passphrase or host-key confirmation, run `M-x clutch-prepare-ssh-host` for that alias once, or press `S` from `clutch-dispatch`. After that, `clutch-connect` goes back to the normal batch tunnel path.
-
-The batch tunnel uses `ssh -o BatchMode=yes`, so it cannot prompt. If interactive `ssh HOST` succeeds but clutch still reports SSH authentication failure, configure OpenSSH to authenticate non-interactively too, usually by loading the key into `ssh-agent` or enabling `AddKeysToAgent`.
-
-TRAMP-aware forwarding follows the same rule.  Configure `:tramp-default-directory "/ssh:HOST:/path/"` when the database endpoint is reachable from that TRAMP host.  Opening `/ssh:HOST:/path/` via TRAMP with an interactive password does not make that password available to clutch's separate OpenSSH `-L` process.  Use non-interactive OpenSSH auth.
-
-Each ssh process clutch starts uses a connection of its own, ignoring ControlMaster settings, so disconnecting always closes the forwarded port.  To reuse a connection that is already logged in, for a host that needs a password or a second factor, set `clutch-ssh-isolate-connections` to nil: ssh then follows ControlMaster in `~/.ssh/config`, and `/rpc:` paths reuse tramp-rpc's active ControlPath when tramp-rpc has one.  A port forwarded over a shared connection stays open until that connection closes, even after clutch disconnects.
+SSH tunnels through `:ssh-host` and TRAMP origins through `:tramp-default-directory` work the same for every native backend that connects to a structured `:host` / `:port`; see [SSH tunnels](user-guide.md#ssh-tunnels-via-sshconfig) and [TRAMP-aware connection origin](user-guide.md#tramp-aware-connection-origin) in the user guide.
 
 ## MySQL (`mysql`)
 

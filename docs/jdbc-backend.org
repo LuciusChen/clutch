@@ -67,6 +67,8 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
 - =clutch-jdbc-agent-java-executable= is the Java executable that starts the agent (default =java=).
 - =clutch-jdbc-agent-jvm-args= lists extra JVM arguments, such as ="-Xmx256m"= to cap the heap; the default is =("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")=.
 
+The agent keeps stdout exclusively for its JSON protocol and redirects third-party Java console output to captured stderr before loading drivers. Driver messages such as Snowflake external-browser login status therefore remain available to Clutch diagnostics without breaking the connection.
+
 ** Connection Examples
 
 #+begin_src emacs-lisp
@@ -140,7 +142,7 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
                         :rpc-timeout 15))))
 #+end_src
 
-JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:../README.md#password-management][Password Management]] for details.
+JDBC connections use the same =:pass-entry= auth-source integration as other backends.  See [[file:user-guide.md#password-management][Password Management]] for details.
 
 ** Snowflake-specific Notes
 

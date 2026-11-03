@@ -1,6 +1,6 @@
 # Development checks
 
-Use this reference when changing package declarations or preparing the corresponding code commit/release. [AGENTS.md](AGENTS.md) defines scope and verification policy; [README testing](README.md#testing) lists routine local test targets.
+Use this reference when changing package declarations or preparing the corresponding code commit/release. [AGENTS.md](AGENTS.md) defines scope and verification policy; [focused runs](#focused-runs) lists routine local test targets.
 
 ## Elisp package conventions
 
@@ -26,9 +26,23 @@ Run from the repository root:
 
 This runs the main and backend ERT suites, byte compilation, package-lint, checkdoc and architecture checks. Byte compilation and lint/doc checks must have zero warnings. `clutch` is one package: package-lint uses `clutch.el` as its metadata source, not each extracted module as a separate package. The runner initializes package.el for dependency metadata; do not move package headers to appease a misconfigured lint invocation.
 
-During iteration, use the affected target or selector from [README](README.md#testing). The full gate is for code/test commits; documentation-only work uses diff and reference checks instead.
+During iteration, use the affected target or selector from [focused runs](#focused-runs). The full gate is for code/test commits; documentation-only work uses diff and reference checks instead.
 
 Query workflow tests can use `clutch-test-conn` from `test/clutch-test-common.el`: its `:queries` queue holds `(SQL . RESPONSE)` pairs in execution order, where a response is a result or a function of the connection for execution faults. Unexpected SQL fails; assert that expected queues are consumed so a missing query fails too. Its optional `:on-disconnect` callback injects a fault before closing the connection. Keep connection liveness and commit mode in the fixture, and use focused stubs for construction, timing, faults and UI input rather than replacing the query runner or session cleanup. See the reconnect and REPL tests for examples.
+
+## Focused runs
+
+Focused local runs can start with tagged smoke coverage, or pass any ERT selector to `main` or `db`. `main` defaults to the historical `clutch-test` gate; it can also load a colon-separated module list for focused runs:
+
+```bash
+./test/run-ci.sh smoke
+CLUTCH_TEST_MODULES=clutch-test-sql ./test/run-ci.sh main
+CLUTCH_TEST_SELECTOR='"^clutch-test-completion-"' ./test/run-ci.sh main
+```
+
+Backend targets such as `db-jdbc`, `db-mysql`, `db-pg`, `db-mongodb`, `db-redis`, and `db-sqlite` remain available.
+
+Default ERT runs intentionally skip live tests when database credentials are not set. Treat those runs as unit/regression coverage, not proof that real database workflows still work. External protocol packages and the Org-Babel bridge live in separate repositories and carry their own focused test suites.
 
 ## Dependency and surface checks
 
@@ -71,7 +85,24 @@ CLUTCH_TEST_JDBC_AGENT_DIR=/absolute/path/to/isolated-runtime \
 ./test/run-ci.sh native-live
 ```
 
-This adds Oracle, SQL Server and ClickHouse containers plus local DuckDB and their supported UI/backend checks. MongoDB SQL Interface and other service-specific endpoints require separate configuration; a community mongod container does not provide SQL Interface. Report passes and capability skips separately, and identify the tested jar. Do not replace the user's installed runtime to run tests. See [native backend testing](docs/native-backends.md) and [JDBC setup](docs/jdbc-backend.org) for environment details.
+This adds Oracle, SQL Server and ClickHouse containers plus local DuckDB and their supported UI/backend checks. MongoDB SQL Interface and other service-specific endpoints require separate configuration; a community mongod container does not provide SQL Interface. Report passes and capability skips separately, and identify the tested jar. Do not replace the user's installed runtime to run tests. See [JDBC setup](docs/jdbc-backend.org) for the runtime and drivers.
+
+Live tests read ordinary host/port connection variables, so a server you start yourself works too; Docker here is only a portable example:
+
+```sh
+docker run --name clutch-mysql-80 -e MYSQL_ROOT_PASSWORD=test -p 127.0.0.1:55306:3306 mysql:8.0
+docker run --name clutch-pg-16 -e POSTGRES_INITDB_ARGS=--auth-host=md5 -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16 -c password_encryption=md5
+```
+
+Run the standalone MySQL protocol live suite from the [`mysql.el`](https://github.com/LuciusChen/mysql.el) checkout:
+
+```sh
+emacs -Q --batch -L . -l ert -l test/mysql-test.el \
+  --eval '(setq mysql-test-password "test" mysql-test-port 55306)' \
+  --eval "(ert-run-tests-batch-and-exit '(tag :mysql-live))"
+```
+
+Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB 10.11.  Re-run MySQL 8.0/8.4 TLS auth tests after touching handshake, capability, or password-plugin code.
 
 ## Release and documentation details
 
