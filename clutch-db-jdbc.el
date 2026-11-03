@@ -1831,15 +1831,32 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
 
 (cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
   "Return how JDBC CONN's database folds unquoted names, or nil.
-Oracle folds them to upper case, and a PostgreSQL URL to lower case."
-  (cond ((clutch-jdbc--oracle-conn-p conn) 'upper)
+Oracle, Snowflake and DB2 fold them to upper case, and a PostgreSQL URL
+to lower case."
+  (cond ((memq (clutch-jdbc--conn-driver conn) '(oracle snowflake db2)) 'upper)
         ((clutch-jdbc--url-prefix-p conn "jdbc:postgresql:") 'lower)))
 
+(defun clutch-jdbc--catalog-folds-p (conn)
+  "Return non-nil when CONN's catalog is asked for folded names.
+Snowflake and DB2 are asked for names as written, though they fold them:
+whether their catalogs need the folded name is not yet verified."
+  (not (memq (clutch-jdbc--conn-driver conn) '(snowflake db2))))
+
+(cl-defmethod clutch-db--source-table-name ((conn clutch-jdbc-conn) token)
+  "Return the name of the table that SQL table TOKEN names on JDBC CONN.
+See `clutch-jdbc--catalog-folds-p'."
+  (if (clutch-jdbc--catalog-folds-p conn)
+      (cl-call-next-method)
+    (clutch-db-sql-table-name token)))
+
 (cl-defmethod clutch-db--source-table-schema ((conn clutch-jdbc-conn) token)
-  "Return the schema that SQL table TOKEN names on JDBC CONN, or nil."
-  (let ((parts (clutch-db-sql--table-raw-parts token)))
-    (when (cdr parts)
-      (clutch-db-sql-fold-identifier conn (car (last parts 2))))))
+  "Return the schema that SQL table TOKEN names on JDBC CONN, or nil.
+See `clutch-jdbc--catalog-folds-p'."
+  (if (clutch-jdbc--catalog-folds-p conn)
+      (let ((parts (clutch-db-sql--table-raw-parts token)))
+        (when (cdr parts)
+          (clutch-db-sql-fold-identifier conn (car (last parts 2)))))
+    (clutch-db-sql-table-schema token)))
 
 (cl-defmethod clutch-db--source-table-catalog ((_conn clutch-jdbc-conn) token)
   "Return source catalog for JDBC SQL table TOKEN."

@@ -1972,6 +1972,9 @@ Structure is not interpreted here; callers confirm depth and literals through
                    ("id" "name") jdbc-pg)
                   ("select 1 from users \"U\" where exists (select 1 from orders u where \"U\".|)"
                    ("id" "user_id") oracle)
+                  ;; Snowflake keeps the case of quoted names.
+                  ("select \"u\".id from users \"u\" where exists (select 1 from orders \"U\" where \"u\".|)"
+                   ("id" "name") snowflake)
                   ("select \"U\".| from users u" nil pg)))
     (pcase-let ((`(,sql ,expected ,backend) case))
       (ert-info ((format "sql: %s" sql))
@@ -1988,6 +1991,7 @@ Structure is not interpreted here; callers confirm depth and literals through
                    ('jdbc-pg (make-clutch-jdbc-conn
                               :params '(:url "jdbc:postgresql://db/app")))
                    ('oracle (make-clutch-jdbc-conn :driver 'oracle))
+                   ('snowflake (make-clutch-jdbc-conn :driver 'snowflake))
                    (_ 'fake))))
             (puthash "users" '("id" "name") schema)
             (puthash "orders" '("id" "user_id") schema)

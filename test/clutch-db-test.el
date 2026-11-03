@@ -5695,6 +5695,13 @@ out, which broke the Oracle statement and left SQL Server unpaged."
     (should (equal (clutch-db--source-table-schema
                     conn "\"App\".\"MixedCase\"")
                    "App")))
+  ;; Snowflake and DB2 fold unquoted names too, but their catalogs are
+  ;; asked for names as written until that is verified against them.
+  (dolist (driver '(snowflake db2))
+    (let ((conn (make-clutch-jdbc-conn :params (list :driver driver))))
+      (should (eq (clutch-db-identifier-case conn) 'upper))
+      (should (equal (clutch-db--source-table-name conn "app.users") "users"))
+      (should (equal (clutch-db--source-table-schema conn "app.users") "app"))))
   (let ((conn (make-clutch-jdbc-conn :params '(:driver sqlserver))))
     (should (equal (clutch-db--source-table-name
                     conn "analytics.dbo.orders")
