@@ -79,8 +79,8 @@ The SQLite Quick Start has no optional dependency. For other backends, install o
 | Backend | Extra Emacs package |
 |---|---|
 | `:backend mysql` | [mysql.el](https://github.com/LuciusChen/mysql.el) |
-| `:backend pg` | [`pgsql`](https://melpa.org/#/pgsql) |
-| `:backend xtdb` | [`pgsql`](https://melpa.org/#/pgsql) |
+| `:backend pg` | [pgsql.el](https://github.com/LuciusChen/pgsql.el) |
+| `:backend xtdb` | [pgsql.el](https://github.com/LuciusChen/pgsql.el) |
 | `:backend mongodb` | [mongodb.el](https://github.com/LuciusChen/mongodb.el) |
 | `:backend redis` | [redis.el](https://github.com/LuciusChen/redis.el) |
 | `:backend sqlite` | None; Emacs 29.1+ provides SQLite |
