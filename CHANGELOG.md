@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A query console no longer shows `[schema...]` for good when another buffer of the same connection cannot refresh itself. A Record buffer whose row is gone, for example, signalled while the schema status changed, and the refresh behind that change was never queued. Such a buffer is now reported in the echo area and skipped.
+
 ## 0.7.3 - 2026-11-03
 
 ### Added

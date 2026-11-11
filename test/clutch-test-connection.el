@@ -2572,6 +2572,39 @@ distinct connection keeps its state."
         (when (buffer-live-p attached)
           (kill-buffer attached))))))
 
+(ert-deftest clutch-test-schema-status-ui-failure-does-not-stop-the-refresh ()
+  "A buffer that cannot refresh itself should not stop a schema refresh.
+A stale Record buffer signals when it is reverted.  That error used to leave
+the status hook, and the refresh was never queued, with the state still
+`refreshing'."
+  (clutch-test--with-sqlite-connection conn
+    (let ((stale (generate-new-buffer " *clutch-stale-record*"))
+          (healthy (generate-new-buffer " *clutch-healthy-attached*"))
+          (clutch--schema-status-cache (make-hash-table :test 'eq))
+          (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
+          healthy-reverted
+          queued)
+      (unwind-protect
+          (progn
+            (with-current-buffer stale
+              (setq-local clutch-connection conn
+                          revert-buffer-function
+                          (lambda (&rest _args)
+                            (user-error "Row 58 no longer exists"))))
+            (with-current-buffer healthy
+              (setq-local clutch-connection conn
+                          revert-buffer-function
+                          (lambda (&rest _args)
+                            (setq healthy-reverted t))))
+            (cl-letf (((symbol-function 'message) #'ignore)
+                      ((symbol-function 'clutch-db-refresh-schema-async)
+                       (lambda (&rest _args) (setq queued t))))
+              (should (clutch--refresh-schema-cache-async conn)))
+            (should queued)
+            (should healthy-reverted))
+        (kill-buffer stale)
+        (kill-buffer healthy)))))
+
 (ert-deftest clutch-test-kill-buffer-ends-the-session-only-from-its-owner ()
   "Killing a buffer should end its session only when the buffer owns it.
 Killing a plain SQL buffer or a REPL disconnects and invalidates derived

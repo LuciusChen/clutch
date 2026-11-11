@@ -998,28 +998,36 @@ while a query is running on the connection."
 ;;;; Schema and metadata status UI
 
 (defun clutch--refresh-schema-status-ui (conn)
-  "Refresh mode-line or status line in buffers attached to CONN."
+  "Refresh mode-line or status line in buffers attached to CONN.
+A buffer that fails to refresh is reported and skipped: this runs inside the
+schema status change itself, and an error here would end the refresh that
+caused it."
   (when conn
     (dolist (buf (buffer-list))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (eq clutch-connection conn)
-            (clutch--refresh-connection-render-state)
-            (cond
-             ((derived-mode-p 'clutch-result-mode)
-              (clutch--refresh-result-status-line))
-             ((clutch--query-buffer-p)
-              (clutch--update-console-buffer-name)
-              (clutch--update-mode-line))
-             ((derived-mode-p 'clutch-repl-mode)
-              (clutch--update-mode-line))
-             ;; Newer Emacs versions give every buffer the inherited default
-             ;; `revert-buffer--default', including non-file buffers.  Only a
-             ;; buffer-local function represents an intentional derived-view
-             ;; refresh contract here.
-             ((and (local-variable-p 'revert-buffer-function)
-                   revert-buffer-function)
-              (revert-buffer t t)))))))))
+            (condition-case err
+                (progn
+                  (clutch--refresh-connection-render-state)
+                  (cond
+                   ((derived-mode-p 'clutch-result-mode)
+                    (clutch--refresh-result-status-line))
+                   ((clutch--query-buffer-p)
+                    (clutch--update-console-buffer-name)
+                    (clutch--update-mode-line))
+                   ((derived-mode-p 'clutch-repl-mode)
+                    (clutch--update-mode-line))
+                   ;; Newer Emacs versions give every buffer the inherited
+                   ;; default `revert-buffer--default', including non-file
+                   ;; buffers.  Only a buffer-local function represents an
+                   ;; intentional derived-view refresh contract here.
+                   ((and (local-variable-p 'revert-buffer-function)
+                         revert-buffer-function)
+                    (revert-buffer t t))))
+              (error
+               (message "Could not update %s after a schema change: %s"
+                        (buffer-name) (error-message-string err))))))))))
 
 (add-hook 'clutch--metadata-state-changed-hook
           #'clutch--refresh-schema-status-ui)
