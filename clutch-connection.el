@@ -1033,12 +1033,10 @@ Returns non-nil on success, nil on failure."
   (let* ((conn clutch-connection)
          (entry (clutch--schema-status-entry conn)))
     (cond
-     ;; A synchronous refresh runs to the end before Emacs reads another
-     ;; command, so a `refreshing' state seen here belongs to a refresh that
-     ;; was lost, and only a new one can clear it.
-     ((and (eq (plist-get entry :state) 'refreshing) (not force-sync))
-      (unless quiet
-        (message "Schema refresh already in progress"))
+     ;; An automatic refresh leaves one that may be running alone.  A
+     ;; refresh the user asks for replaces it: the older result is then
+     ;; ignored as stale, and it also clears a refresh that was lost.
+     ((and quiet (eq (plist-get entry :state) 'refreshing))
       nil)
      ((and (not force-sync)
            (not (clutch-db-eager-schema-refresh-p conn))
@@ -1065,7 +1063,12 @@ Returns non-nil on success, nil on failure."
 Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
-  (clutch--refresh-current-schema nil t))
+  ;; Refresh in the background when one is already marked as running, so
+  ;; that a slow database does not block Emacs a second time.
+  (clutch--refresh-current-schema
+   nil (not (eq (plist-get (clutch--schema-status-entry clutch-connection)
+                           :state)
+                'refreshing))))
 
 ;;;; Backend detection
 

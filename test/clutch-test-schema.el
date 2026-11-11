@@ -213,33 +213,28 @@ synchronously."
                                       seen-message)))))))))
 
 (ert-deftest clutch-test-refresh-schema-command-replaces-a-lost-refresh ()
-  "The command should refresh a connection stuck in the `refreshing' state.
-An automatic refresh still leaves a refresh that may be running alone."
+  "The command should replace a refresh marked as running, in the background.
+An automatic refresh leaves a refresh that may be running alone."
   (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
-        (refreshes 0))
+        (async-started 0)
+        (sync-refreshes 0))
     (cl-letf (((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch-db-eager-schema-refresh-p)
                (lambda (_conn) nil))
               ((symbol-function 'clutch--refresh-schema-cache-async)
-               (lambda (_conn) (ert-fail "Started a second background refresh")))
+               (lambda (_conn) (cl-incf async-started)))
               ((symbol-function 'clutch--refresh-schema-cache)
-               (lambda (conn)
-                 (cl-incf refreshes)
-                 (puthash conn '(:state ready :tables 2)
-                          clutch--schema-status-cache)
-                 t))
+               (lambda (_conn) (cl-incf sync-refreshes)))
               ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (setq-local clutch-connection 'fake-conn)
         (puthash 'fake-conn '(:state refreshing) clutch--schema-status-cache)
         (should-not (clutch--refresh-current-schema t))
-        (should (= refreshes 0))
+        (should (= async-started 0))
         (should (clutch-refresh-schema))
-        (should (= refreshes 1))
-        (should (eq (plist-get (gethash 'fake-conn clutch--schema-status-cache)
-                               :state)
-                    'ready))))))
+        (should (= async-started 1))
+        (should (= sync-refreshes 0))))))
 
 (ert-deftest clutch-test-refresh-schema-failure-message-shows-error-as-is ()
   "A failed schema refresh should show the error text as it is.

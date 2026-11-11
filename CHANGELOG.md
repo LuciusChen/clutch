@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `clutch-refresh-schema` (`C-c C-s`) refreshes a connection whose header shows `[schema...]` for good. It used to answer "Schema refresh already in progress" and do nothing, so a refresh that was lost could not be retried.
+- `clutch-refresh-schema` (`C-c C-s`) refreshes a connection whose header shows `[schema...]` for good. It used to answer "Schema refresh already in progress" and do nothing, so a refresh that was lost could not be retried. The new refresh runs in the background and replaces the one marked as running.
 
 ## 0.7.3 - 2026-11-03
 
