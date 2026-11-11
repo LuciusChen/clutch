@@ -2476,7 +2476,11 @@ Timers run with `inhibit-quit' bound to t; the call itself must not."
               ((symbol-function 'clutch-db-live-p)
                (lambda (_conn) t))
               ((symbol-function 'clutch-db-busy-p)
-               (lambda (_conn) nil)))
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (_conn) (ert-fail "Disconnected a recovered connection"))))
       (clutch-db--schedule-idle-metadata-call
        conn #'ignore (lambda (message) (push message errors))
        (lambda (_conn)
@@ -2487,6 +2491,32 @@ Timers run with `inhibit-quit' bound to t; the call itself must not."
       (should-not quit-inhibited)
       (should (equal errors '("Interrupted")))
       (should-not (gethash conn clutch-db--idle-metadata-connections)))))
+
+(ert-deftest clutch-db-test-idle-metadata-quit-closes-an-unrecovered-connection ()
+  "A quit that the backend cannot recover from should close the connection."
+  (let ((conn 'fake-conn)
+        (clutch-db--idle-metadata-connections (make-hash-table :test 'eq))
+        timer-fn
+        disconnected
+        errors)
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn &rest _args)
+                 (setq timer-fn fn)
+                 'fake-timer))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-interrupt-query)
+               (lambda (_conn) nil))
+              ((symbol-function 'clutch-db-disconnect)
+               (lambda (c) (push c disconnected))))
+      (clutch-db--schedule-idle-metadata-call
+       conn #'ignore (lambda (message) (push message errors))
+       (lambda (_conn) (signal 'quit nil)))
+      (funcall timer-fn)
+      (should (equal disconnected '(fake-conn)))
+      (should (equal errors '("Interrupted; the connection was closed"))))))
 
 (ert-deftest clutch-db-test-idle-metadata-call-passes-a-nil-result ()
   "A nil result is a result: it reaches the callback, not the error callback."

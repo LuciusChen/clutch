@@ -1712,10 +1712,21 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
                       (when errback
                         (funcall errback (clutch-db--error-message err))))
                      ;; `C-g' is not an `error'; without this the caller's
-                     ;; state would stay "loading" forever.
+                     ;; state would stay "loading" forever.  The call may
+                     ;; have left a response unread, so cancel it as a
+                     ;; query timeout does, and close CONN if that fails.
                      (quit
-                      (when errback
-                        (funcall errback "Interrupted"))))
+                      (let ((recovered
+                             (condition-case nil
+                                 (clutch-db-interrupt-query conn)
+                               (error nil))))
+                        (unless recovered
+                          (ignore-errors (clutch-db-disconnect conn)))
+                        (when errback
+                          (funcall errback
+                                   (if recovered
+                                       "Interrupted"
+                                     "Interrupted; the connection was closed"))))))
                  (remhash conn clutch-db--idle-metadata-connections)))
            (when errback
              (funcall errback "Connection closed")))))
