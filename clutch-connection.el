@@ -1033,7 +1033,10 @@ Returns non-nil on success, nil on failure."
   (let* ((conn clutch-connection)
          (entry (clutch--schema-status-entry conn)))
     (cond
-     ((eq (plist-get entry :state) 'refreshing)
+     ;; A synchronous refresh runs to the end before Emacs reads another
+     ;; command, so a `refreshing' state seen here belongs to a refresh that
+     ;; was lost, and only a new one can clear it.
+     ((and (eq (plist-get entry :state) 'refreshing) (not force-sync))
       (unless quiet
         (message "Schema refresh already in progress"))
       nil)
