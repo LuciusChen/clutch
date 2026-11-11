@@ -1703,12 +1703,16 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
                (puthash conn t clutch-db--idle-metadata-connections)
                (unwind-protect
                    (condition-case err
-                       (funcall callback (apply fn conn args))
+                       (funcall callback
+                                ;; A timer runs with `inhibit-quit' t, which
+                                ;; would make `C-g' wait out a slow call.
+                                (let ((inhibit-quit nil))
+                                  (apply fn conn args)))
                      (error
                       (when errback
                         (funcall errback (clutch-db--error-message err))))
-                     ;; `C-g' during a slow call is not an `error'; without
-                     ;; this the caller's state would stay "loading" forever.
+                     ;; `C-g' is not an `error'; without this the caller's
+                     ;; state would stay "loading" forever.
                      (quit
                       (when errback
                         (funcall errback "Interrupted"))))

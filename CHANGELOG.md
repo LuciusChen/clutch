@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Pressing `C-g` while a background schema refresh, or another idle metadata fetch, was waiting on a slow database no longer leaves it loading forever. The header showed `[schema...]` with no way out; the refresh now fails with "Interrupted" and the usual `C-c C-s` hint.
+- `C-g` now interrupts a background schema refresh, or another idle metadata fetch, that is waiting on a slow database. Emacs used to ignore it until the database answered or timed out, because timers run with quitting inhibited; and a quit that did arrive left the header showing `[schema...]` for good. The refresh now fails with "Interrupted" and the usual `C-c C-s` hint.
 
 ## 0.7.3 - 2026-11-03
 
