@@ -213,7 +213,7 @@ synchronously."
                                       seen-message)))))))))
 
 (ert-deftest clutch-test-refresh-schema-command-replaces-a-lost-refresh ()
-  "The command should replace a refresh marked as running, in the background.
+  "The command should replace a refresh marked as running.
 An automatic refresh leaves a refresh that may be running alone."
   (let ((clutch--schema-status-cache (make-hash-table :test 'eq))
         (async-started 0)

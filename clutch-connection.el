@@ -1063,8 +1063,9 @@ Returns non-nil on success, nil on failure."
 Useful after DDL operations (CREATE TABLE, ALTER TABLE, DROP TABLE)
 executed outside clutch that would otherwise leave stale completions."
   (interactive)
-  ;; Refresh in the background when one is already marked as running, so
-  ;; that a slow database does not block Emacs a second time.
+  ;; When a refresh is marked as running, start a new one the usual
+  ;; background way instead of a synchronous one: the command returns at
+  ;; once, and the work runs when Emacs is idle or in the JDBC agent.
   (clutch--refresh-current-schema
    nil (not (eq (plist-get (clutch--schema-status-entry clutch-connection)
                            :state)
