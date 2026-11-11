@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Pressing `C-g` while a background schema refresh, or another idle metadata fetch, was waiting on a slow database no longer leaves it loading forever. The header showed `[schema...]` with no way out; the refresh now fails with "Interrupted" and the usual `C-c C-s` hint.
+
 ## 0.7.3 - 2026-11-03
 
 ### Added

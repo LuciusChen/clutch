@@ -2461,6 +2461,27 @@ Filtering the category listing ran a schema-wide query per describe."
                                (string< (symbol-name a) (symbol-name b))))
                        '(first second)))))))
 
+(ert-deftest clutch-db-test-idle-metadata-call-reports-a-quit ()
+  "A `C-g' during an idle metadata call should reach the error callback."
+  (let ((conn 'fake-conn)
+        (clutch-db--idle-metadata-connections (make-hash-table :test 'eq))
+        timer-fn
+        errors)
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (_secs _repeat fn &rest _args)
+                 (setq timer-fn fn)
+                 'fake-timer))
+              ((symbol-function 'clutch-db-live-p)
+               (lambda (_conn) t))
+              ((symbol-function 'clutch-db-busy-p)
+               (lambda (_conn) nil)))
+      (clutch-db--schedule-idle-metadata-call
+       conn #'ignore (lambda (message) (push message errors))
+       (lambda (_conn) (signal 'quit nil)))
+      (funcall timer-fn)
+      (should (equal errors '("Interrupted")))
+      (should-not (gethash conn clutch-db--idle-metadata-connections)))))
+
 (ert-deftest clutch-db-test-jdbc-list-columns-async-maps-column-names ()
   "JDBC async column-name preheat should normalize the returned names."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9

@@ -1706,7 +1706,12 @@ INITIAL-DELAY, when positive, is the idle delay before the first attempt."
                        (funcall callback (apply fn conn args))
                      (error
                       (when errback
-                        (funcall errback (clutch-db--error-message err)))))
+                        (funcall errback (clutch-db--error-message err))))
+                     ;; `C-g' during a slow call is not an `error'; without
+                     ;; this the caller's state would stay "loading" forever.
+                     (quit
+                      (when errback
+                        (funcall errback "Interrupted"))))
                  (remhash conn clutch-db--idle-metadata-connections)))
            (when errback
              (funcall errback "Connection closed")))))
