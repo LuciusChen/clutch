@@ -327,26 +327,80 @@ WHERE type='table' AND name=%s"
       (when-let* ((rowid (clutch-db-sqlite--rowid-identity conn table schema)))
         (list rowid))))
 
+(defun clutch-db-sqlite--key-rows (handle table schema)
+  "Return the foreign keys of TABLE in SCHEMA on HANDLE, column by column.
+Each is (ID REF-TABLE FROM TO), in the order of each key's columns.  A
+key that names no columns references the primary key, and TO is then
+the primary-key column at that position."
+  ;; foreign_key_list row: (id seq table from to on_update on_delete match)
+  (let ((rows (sort (copy-sequence
+                     (clutch-db-sqlite--pragma-strict
+                      handle "foreign_key_list" table schema))
+                    (lambda (a b)
+                      (or (< (nth 0 a) (nth 0 b))
+                          (and (= (nth 0 a) (nth 0 b))
+                               (< (nth 1 a) (nth 1 b)))))))
+        (primary-keys nil))
+    (cl-flet ((primary-key (ref-table)
+                (or (cdr (assoc ref-table primary-keys))
+                    (let ((columns
+                           ;; table_info row: (cid name type notnull dflt pk)
+                           (mapcar #'cadr
+                                   (sort (cl-remove-if-not
+                                          (lambda (row) (> (nth 5 row) 0))
+                                          (clutch-db-sqlite--pragma-strict
+                                           handle "table_info" ref-table
+                                           schema))
+                                         (lambda (a b)
+                                           (< (nth 5 a) (nth 5 b)))))))
+                      (push (cons ref-table columns) primary-keys)
+                      columns))))
+      (mapcar (pcase-lambda (`(,id ,seq ,ref-table ,from ,to . ,_))
+                (list id ref-table from
+                      (or to (nth seq (primary-key ref-table)))))
+              rows))))
+
 (defun clutch-db-sqlite--fk-alist (handle table schema)
   "Return FK alist for TABLE in SCHEMA from HANDLE.
-Result: ((from-col :ref-table T :ref-column C) ...), with :ref-schema
-SCHEMA when SCHEMA is given, since a foreign key stays in its database."
-  ;; foreign_key_list row: (id seq table from to on_update on_delete match)
-  (let ((rows (clutch-db-sqlite--pragma-strict
-               handle "foreign_key_list" table schema)))
-    (cl-loop for row in rows
-             collect (pcase-let ((`(,_id ,_seq ,ref-table ,from-col ,ref-column . ,_)
-                                  row))
-                       (cons from-col
-                             (append (list :ref-table ref-table
-                                           :ref-column ref-column)
-                                     (and schema
-                                          (list :ref-schema schema))))))))
+Result: ((from-col :ref-table T :ref-column C :constraint ID) ...), with
+:ref-schema SCHEMA when SCHEMA is given, since a foreign key stays in
+its database.  ID is the key's number in its table."
+  (mapcar (pcase-lambda (`(,id ,ref-table ,from ,to))
+            (cons from
+                  (append (list :ref-table ref-table :ref-column to)
+                          (and schema (list :ref-schema schema))
+                          (list :constraint id))))
+          (clutch-db-sqlite--key-rows handle table schema)))
 
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-sqlite-conn) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on SQLite CONN."
   (clutch-db-sqlite--fk-alist (clutch-db-sqlite-conn-handle conn) table schema))
+
+(cl-defmethod clutch-db-referencing-keys ((conn clutch-db-sqlite-conn) table
+                                          &optional schema _catalog)
+  "Return the foreign keys that reference TABLE in SCHEMA on SQLite CONN.
+SQLite keeps no index of them, so each table of SCHEMA is asked for its
+keys.  A key stays in its database, and SQLite compares names without
+regard to case."
+  (let ((handle (clutch-db-sqlite-conn-handle conn)))
+    (cl-loop
+     for referencing in
+     (mapcar #'car
+             (clutch-db--translate-library-error sqlite-error
+               (sqlite-select
+                handle
+                (format "SELECT name FROM %ssqlite_master \
+WHERE type='table' AND name NOT LIKE 'sqlite_%%' ORDER BY name"
+                        (clutch-db-sqlite--schema-prefix schema)))))
+     nconc
+     (cl-loop for (id ref-table from to)
+              in (clutch-db-sqlite--key-rows handle referencing schema)
+              when (string-equal-ignore-case ref-table table)
+              collect (append (list :table referencing)
+                              (and schema (list :schema schema))
+                              (list :column from :ref-column to
+                                    :constraint id))))))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-db-sqlite-conn) table
                                             callback &optional errback

@@ -6,6 +6,8 @@
 
 - A query console no longer shows `[schema...]` for good when another buffer of the same connection cannot refresh itself. A Record buffer whose row is gone, for example, signalled while the schema status changed, and the refresh behind that change was never queued. Such a buffer is now reported in the echo area and skipped.
 - PostgreSQL foreign keys are read from the system catalogs. A key whose columns reference a table in another schema is no longer missing; each column of a composite key is paired with the column it references instead of every referenced column; a key named like a key of another table in the same schema no longer adds that table's columns; and a user who can read a table sees its keys without owning the tables they reference. Foreign-key highlighting, Follow FK, describe buffers and column hints show these keys.
+- A MySQL foreign key to a table in another database names that database, so Follow FK opens the referenced table there instead of a table of the same name in the current database.
+- A SQLite foreign key that names no referenced columns, such as `REFERENCES parent`, references the parent's primary key. Follow FK on such a column failed, as the key had no referenced column.
 
 ## 0.7.3 - 2026-11-03
 

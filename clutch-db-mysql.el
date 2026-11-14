@@ -319,6 +319,25 @@ itself succeeded."
        (message "Could not read the current database back: %s"
                 (clutch-db--error-message err))))))
 
+(defun clutch-db-mysql--key-column-rows (conn columns where)
+  "Return KEY_COLUMN_USAGE rows of foreign keys on CONN matching WHERE.
+COLUMNS lists the columns to select.  Rows come in key order, and names
+come back as strings."
+  (let ((sql (format "SELECT %s \
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+WHERE %s AND REFERENCED_TABLE_NAME IS NOT NULL \
+ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
+                     (string-join columns ", ") where)))
+    (mapcar (lambda (row)
+              (mapcar (lambda (value)
+                        (if (stringp value) value (format "%s" value)))
+                      row))
+            (mysql-result-rows (mysql-query conn sql)))))
+
+(defun clutch-db-mysql--schema-literal (schema)
+  "Return SQL naming SCHEMA, or the current database without one."
+  (if schema (mysql-escape-literal schema) "DATABASE()"))
+
 ;;;; Lifecycle methods
 
 (when (require 'mysql nil t)
@@ -851,22 +870,36 @@ or costs, so neither hierarchy nor costs are inferred."
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on MySQL CONN.
-Returns alist of (COL-NAME . (:ref-table T :ref-column C))."
+Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
+:constraint K))."
   (clutch-db--translate-library-error mysql-error
-    (let* ((sql (format
-                   "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
-FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
-WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s \
-AND REFERENCED_TABLE_NAME IS NOT NULL"
-                   (if schema (mysql-escape-literal schema) "DATABASE()")
-                   (mysql-escape-literal table)))
-             (result (mysql-query conn sql))
-             (rows (mysql-result-rows result)))
-        (cl-loop for row in rows
-                 collect (pcase-let ((`(,n ,ref-table ,ref-column) row))
-                           (let ((col-name (if (stringp n) n (format "%s" n))))
-                           (cons col-name (list :ref-table ref-table
-                                                :ref-column ref-column))))))))
+    (mapcar
+     (pcase-lambda (`(,column ,ref-schema ,ref-table ,ref-column ,constraint))
+       (cons column (list :ref-table ref-table :ref-column ref-column
+                          :ref-schema ref-schema :constraint constraint)))
+     (clutch-db-mysql--key-column-rows
+      conn
+      '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
+        "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
+      (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+              (clutch-db-mysql--schema-literal schema)
+              (mysql-escape-literal table))))))
+
+(cl-defmethod clutch-db-referencing-keys ((conn mysql-conn) table
+                                          &optional schema _catalog)
+  "Return the foreign keys that reference TABLE in SCHEMA on MySQL CONN."
+  (clutch-db--translate-library-error mysql-error
+    (mapcar
+     (pcase-lambda (`(,ref-schema ,ref-table ,column ,ref-column ,constraint))
+       (list :table ref-table :schema ref-schema :column column
+             :ref-column ref-column :constraint constraint))
+     (clutch-db-mysql--key-column-rows
+      conn
+      '("TABLE_SCHEMA" "TABLE_NAME" "COLUMN_NAME" "REFERENCED_COLUMN_NAME"
+        "CONSTRAINT_NAME")
+      (format "REFERENCED_TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME = %s"
+              (clutch-db-mysql--schema-literal schema)
+              (mysql-escape-literal table))))))
 
 ;;;; Column details
 

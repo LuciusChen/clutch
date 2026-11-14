@@ -1385,7 +1385,8 @@ who can read TABLE, whoever owns the tables it references."
     a.attname,
     rc.relname AS referenced_table,
     ra.attname AS referenced_column,
-    rn.nspname AS referenced_schema
+    rn.nspname AS referenced_schema,
+    con.conname
 FROM pg_constraint con
 CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
     WITH ORDINALITY AS k(attnum, refattnum, ord)
@@ -1402,11 +1403,48 @@ ORDER BY con.conname, k.ord"
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema) row))
+           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema
+                                    ,constraint)
+                        row))
              (cons col-name
                    (list :ref-table ref-table :ref-column ref-column
-                         :ref-schema ref-schema))))
+                         :ref-schema ref-schema :constraint constraint))))
          (clutch-db-pg--metadata-rows result)))))
+
+(cl-defmethod clutch-db-referencing-keys ((conn clutch-db-pg--connection) table
+                                          &optional schema _catalog)
+  "Return the foreign keys that reference TABLE in SCHEMA on PostgreSQL CONN.
+A key declared on a partitioned table is reported once, not again for
+each partition that inherits it."
+  (clutch-db--translate-library-error pgsql-error
+    (let* ((sql (format "SELECT
+    c.relname,
+    n.nspname,
+    a.attname,
+    ra.attname AS referenced_column,
+    con.conname
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conparentid = 0
+    AND con.confrelid = %s
+ORDER BY n.nspname, c.relname, con.conname, k.ord"
+                        (clutch-db-pg--relation table schema)))
+           (result (clutch-db-pg--exec conn sql)))
+      (mapcar
+       (lambda (row)
+         (pcase-let ((`(,ref-table ,ref-schema ,column ,ref-column ,constraint)
+                      row))
+           (list :table ref-table :schema ref-schema :column column
+                 :ref-column ref-column :constraint constraint)))
+       (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
                                         &optional schema _catalog)
@@ -1689,6 +1727,11 @@ XTDB has no table comments."
 
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-db-pg--xtdb-connection) _table
                                       &optional _schema _catalog)
+  "Return nil, since XTDB has no foreign keys."
+  nil)
+
+(cl-defmethod clutch-db-referencing-keys ((_conn clutch-db-pg--xtdb-connection)
+                                          _table &optional _schema _catalog)
   "Return nil, since XTDB has no foreign keys."
   nil)
 
