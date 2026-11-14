@@ -7178,6 +7178,69 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
               (should-not (string-match-p "pgsql-null" ddl))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
+(ert-deftest clutch-db-test-pg-live-foreign-keys-pair-columns-across-schemas ()
+  "PostgreSQL foreign keys pair columns, cross schemas and need no ownership.
+Each column of a composite key gets its own referenced column, a key to
+another schema is reported, a same-named key of another table stays out,
+and a user who reads only the child table sees every key."
+  :tags '(:db-live :pg-live)
+  (clutch-db-test--with-pg conn
+    (let* ((parents (clutch-db-test--live-name "clutch_fk_parents"))
+           (children (clutch-db-test--live-name "clutch_fk_children"))
+           (reader (clutch-db-test--live-name "clutch_fk_reader"))
+           (expected
+            `(("l" :ref-table "local" :ref-column "id" :ref-schema ,children)
+              ("o" :ref-table "other" :ref-column "id" :ref-schema ,parents)
+              ("x" :ref-table "pair" :ref-column "a" :ref-schema ,parents)
+              ("y" :ref-table "pair" :ref-column "b" :ref-schema ,parents)
+              ("p" :ref-table "local_pair" :ref-column "c" :ref-schema ,children)
+              ("q" :ref-table "local_pair" :ref-column "d" :ref-schema ,children)))
+           (cleanup
+            (list (format "DROP SCHEMA IF EXISTS %s CASCADE" children)
+                  (format "DROP SCHEMA IF EXISTS %s CASCADE" parents)
+                  (format "DROP ROLE IF EXISTS %s" reader))))
+      (unwind-protect
+          (progn
+            (dolist (sql cleanup) (clutch-db-query conn sql))
+            (dolist (sql
+                     (list
+                      (format "CREATE SCHEMA %s" parents)
+                      (format "CREATE SCHEMA %s" children)
+                      (format "CREATE TABLE %s.pair (a INT, b INT, PRIMARY KEY (a, b))" parents)
+                      (format "CREATE TABLE %s.other (id INT PRIMARY KEY)" parents)
+                      (format "CREATE TABLE %s.local (id INT PRIMARY KEY)" children)
+                      (format "CREATE TABLE %s.local_pair (c INT, d INT, PRIMARY KEY (c, d))" children)
+                      ;; Constraint names sort in the order EXPECTED lists them.
+                      (format "CREATE TABLE %s.child (x INT, y INT, o INT, l INT, p INT, q INT,
+ CONSTRAINT fk_a_local FOREIGN KEY (l) REFERENCES %s.local (id),
+ CONSTRAINT fk_b_other FOREIGN KEY (o) REFERENCES %s.other (id),
+ CONSTRAINT fk_c_pair FOREIGN KEY (x, y) REFERENCES %s.pair (a, b),
+ CONSTRAINT fk_d_local_pair FOREIGN KEY (p, q) REFERENCES %s.local_pair (c, d))"
+                              children children parents parents children)
+                      ;; A constraint of the same name on another table.
+                      (format "CREATE TABLE %s.sibling (z INT,
+ CONSTRAINT fk_a_local FOREIGN KEY (z) REFERENCES %s.local (id))"
+                              children children)
+                      (format "CREATE ROLE %s LOGIN PASSWORD 'test'" reader)
+                      (format "GRANT USAGE ON SCHEMA %s, %s TO %s"
+                              parents children reader)
+                      (format "GRANT SELECT ON %s.child TO %s" children reader)))
+              (clutch-db-query conn sql))
+            (should (equal (clutch-db-foreign-keys conn "child" children)
+                           expected))
+            (let ((reader-conn
+                   (clutch-db-connect
+                    'pg (plist-put (plist-put (clutch-db-test--pg-live-params)
+                                              :user reader)
+                                   :password "test"))))
+              (unwind-protect
+                  (should (equal (clutch-db-foreign-keys
+                                  reader-conn "child" children)
+                                 expected))
+                (clutch-db-disconnect reader-conn))))
+        (dolist (sql cleanup)
+          (ignore-errors (clutch-db-query conn sql)))))))
+
 (ert-deftest clutch-db-test-pg-live-stored-generated-columns-are-generated ()
   "A stored generated column should be generated, as an identity column is.
 PostgreSQL refuses a value for either."

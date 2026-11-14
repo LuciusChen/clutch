@@ -1376,27 +1376,28 @@ ORDER BY pk.ord"
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN.
-The query keeps the keys that reference a table in TABLE's schema, and
-each carries that schema as :ref-schema, also when the search path found
-TABLE."
+Each column is paired with the column it references, in the order of
+its constraint, and :ref-schema names the referenced table's schema.
+The catalogs, unlike the information schema, show every key to a user
+who can read TABLE, whoever owns the tables it references."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
-    kcu.column_name,
-    ccu.table_name AS referenced_table,
-    ccu.column_name AS referenced_column,
-    n.nspname AS referenced_schema
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-    ON tc.constraint_name = kcu.constraint_name
-    AND tc.table_schema = kcu.table_schema
-JOIN information_schema.constraint_column_usage ccu
-    ON ccu.constraint_name = tc.constraint_name
-    AND ccu.table_schema = tc.table_schema
-JOIN pg_class c ON c.oid = %s
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE tc.constraint_type = 'FOREIGN KEY'
-    AND tc.table_name = c.relname
-    AND tc.table_schema = n.nspname"
+    a.attname,
+    rc.relname AS referenced_table,
+    ra.attname AS referenced_column,
+    rn.nspname AS referenced_schema
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_class rc ON rc.oid = con.confrelid
+JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conrelid = %s
+ORDER BY con.conname, k.ord"
                           (clutch-db-pg--relation table schema)))
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
