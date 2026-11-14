@@ -36,8 +36,18 @@ ON-DISCONNECT, when non-nil, runs with the connection before closing it,
 for faults during disconnect.
 COMMIT-MODE is nil without Clutch-managed manual commit, else `auto' or
 `manual'.  BACKEND, when non-nil, is the backend key it answers to, for
-features such as DEFAULT in an UPDATE."
-  (live t) table columns commit-mode backend params queries on-disconnect)
+features such as DEFAULT in an UPDATE.
+TABLES declares further tables with their keys, as (NAME :columns C
+:foreign-keys F :referencing-keys R), in the shapes the generics return.
+Without TABLES the connection reports no referencing keys, as a backend
+without them does."
+  (live t) table columns commit-mode backend params queries on-disconnect
+  tables)
+
+(defun clutch-test-conn--table (conn table)
+  "Return the declaration of TABLE in CONN's TABLES, or fail the test."
+  (or (cdr (assoc table (clutch-test-conn-tables conn)))
+      (ert-fail (format "Unexpected test-backend table: %S" table))))
 
 (cl-defmethod clutch-db-backend-key ((conn clutch-test-conn))
   "Return the backend CONN declares, or nil."
@@ -79,8 +89,26 @@ features such as DEFAULT in an UPDATE."
   "Return CONN's declared columns for TABLE, without SCHEMA or CATALOG."
   (should (clutch-db-live-p conn))
   (should-not (or schema catalog))
-  (should (equal table (clutch-test-conn-table conn)))
-  (clutch-test-conn-columns conn))
+  (if (equal table (clutch-test-conn-table conn))
+      (clutch-test-conn-columns conn)
+    (plist-get (clutch-test-conn--table conn table) :columns)))
+
+(cl-defmethod clutch-db-foreign-keys
+  ((conn clutch-test-conn) table &optional schema catalog)
+  "Return the foreign keys CONN declares for TABLE, without SCHEMA or CATALOG."
+  (should (clutch-db-live-p conn))
+  (should-not (or schema catalog))
+  (plist-get (clutch-test-conn--table conn table) :foreign-keys))
+
+(cl-defmethod clutch-db-referencing-keys
+  ((conn clutch-test-conn) table &optional schema catalog)
+  "Return the keys CONN declares as referencing TABLE.
+Without declared tables, refuse as the default method does."
+  (if (null (clutch-test-conn-tables conn))
+      (cl-call-next-method)
+    (should (clutch-db-live-p conn))
+    (should-not (or schema catalog))
+    (plist-get (clutch-test-conn--table conn table) :referencing-keys)))
 
 (cl-defmethod clutch-db-query ((conn clutch-test-conn) sql)
   "Consume CONN's next expected SQL and return its declared response."

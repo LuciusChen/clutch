@@ -42,6 +42,24 @@ and stop at the top of the scale."
   (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (should (eq (clutch-viz-charset) 'ascii))))
 
+(ert-deftest clutch-test-viz-box-and-columns-align-by-display-width ()
+  "Columns and box edges line up by display width, CJK names included."
+  (let* ((rows (clutch-viz-columns '(("◆" "id" "int")
+                                     (" " "金额" "numeric"))
+                                   2))
+         (box (clutch-viz-box "账单" rows 'unicode)))
+    (should (equal (mapcar #'substring-no-properties rows)
+                   '("◆  id    int" "   金额  numeric")))
+    (should (equal (mapcar #'substring-no-properties box)
+                   '("┌ 账单 ────────────┐"
+                     "│ ◆  id    int     │"
+                     "│    金额  numeric │"
+                     "└──────────────────┘")))
+    (should (= 1 (length (delete-dups (mapcar #'string-width box)))))
+    (should (equal (mapcar #'substring-no-properties
+                           (clutch-viz-box "t" '("ab") 'ascii))
+                   '("+ t -+" "| ab |" "+----+")))))
+
 (ert-deftest clutch-test-viz-bar-chart-aligns-columns ()
   "Labels, bars and values line up by display width, including CJK labels."
   (let* ((chart (clutch-viz-bar-chart '(("北京" 40 "40")

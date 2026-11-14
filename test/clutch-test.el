@@ -91,6 +91,7 @@
 (require 'clutch-test-result)
 (require 'clutch-test-query)
 (require 'clutch-test-viz)
+(require 'clutch-test-er)
 (require 'clutch-document)
 
 ;;;; Test backend matrix

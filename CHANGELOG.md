@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `clutch-er-diagram`, `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, the tables its foreign keys reference and the tables whose foreign keys reference it. A key over several columns is one relation. `RET` follows a relation to the table at its other end and `l` returns; moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it; other connections refuse it. In a CJK language environment that makes its symbols two columns wide, it draws with ASCII.
+
 ### Fixed
 
 - A query console no longer shows `[schema...]` for good when another buffer of the same connection cannot refresh itself. A Record buffer whose row is gone, for example, signalled while the schema status changed, and the refresh behind that change was never queued. Such a buffer is now reported in the echo area and skipped.

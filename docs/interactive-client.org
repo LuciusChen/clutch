@@ -257,6 +257,23 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions           |
 
+* ER View (clutch-er-mode) Key Bindings
+
+=r= in the object actions (=C-c C-o=) or =M-x clutch-er-diagram= opens the ER view of a table: a box with its primary-key columns and the columns of its relations, then the tables its foreign keys reference and the tables whose foreign keys reference it, one line for each key.  A key over several columns is one line, such as =(region, country)  →  regions (code, country)=.  In the box, =◆= marks a primary-key column and =→=, =←= or =↔= a column whose keys reference another table, are referenced by one, or both.  Names in the table's own schema are not qualified.  Moving point onto a relation highlights it and the columns it joins; moving onto a column highlights its relations.  Moving point never redraws the view.
+
+The view is available on native PostgreSQL, MySQL and SQLite connections; other connections refuse it, as they cannot list the keys that reference a table.  Columns and foreign keys come from the metadata cache, loaded when missing; the keys that reference the table are read each time the view loads.  SQLite keeps no index of them, so the view reads the keys of every table in the table's database.  When =◆=, the arrows or =…= are two columns wide, as in CJK language environments that make ambiguous characters wide, the view draws with ASCII: =+=, =-=, =|=, =*= and =>=, =<= or ===.
+
+| Key         | Action                                         |
+|-------------+------------------------------------------------|
+| =RET=       | Show the table at the other end of the relation at point |
+| =l=         | Show the table shown before                    |
+| =TAB=       | Show every column, or only key columns         |
+| =n= / =p=   | Next / previous line that belongs to a relation |
+| =b=         | Browse the table's rows                        |
+| =d=         | Describe the table                             |
+| =g=         | Load the table's columns and relations again   |
+| =C-c C-o=   | Show object actions                            |
+
 * Typical Workflows
 
 ** Query + Pagination + Filter + Sort
@@ -433,6 +450,7 @@ The main navigation path is object-centric rather than tree-centric.  =C-c C-j= 
 
 - =d=: describe object
 - =s=: show DDL / source
+- =r=: open the ER view of a table
 - =j=: jump to the target object for objects with explicit target metadata such as indexes, triggers, and synonyms
 - =n=: copy object name
 - =f=: copy fully-qualified object name
@@ -463,6 +481,7 @@ If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers
 |-----+--------|
 | =d= | Describe object |
 | =s= | Show definition |
+| =r= | ER diagram (tables) |
 | =i= | Show index insight (MongoDB collections) |
 | =e= | Explain sample query (MongoDB collections) |
 | =v= | Show validation (MongoDB collections) |

@@ -19,11 +19,14 @@
 (defconst clutch-viz--eighths [nil ?▏ ?▎ ?▍ ?▌ ?▋ ?▊ ?▉]
   "Block characters filling one to seven eighths of a cell.")
 
-(defun clutch-viz-charset ()
+(defun clutch-viz-charset (&optional chars)
   "Return `unicode' when block and box characters fill one column.
 Otherwise return `ascii'.  CJK language environments can make them two
-columns wide, which would break the alignment of every chart."
-  (if (cl-every (lambda (char) (= (char-width char) 1)) '(?█ ?▏ ?├ ?─))
+columns wide, which would break the alignment of every chart.  CHARS
+lists other characters a caller draws with, which must fill one column
+too."
+  (if (cl-every (lambda (char) (= (char-width char) 1))
+                (append '(?█ ?▏ ?├ ?─) chars))
       'unicode
     'ascii))
 
@@ -107,6 +110,61 @@ CHARSET defaults to `clutch-viz-charset'."
         rows "\n")
        (when header
          (concat "\n" rule))))))
+
+(defun clutch-viz-columns (rows &optional indent)
+  "Return ROWS aligned in columns, one string for each row.
+A row is a list of cells, which are strings.  Each column is as wide as
+its widest cell, and two spaces separate columns; the last cell of a row
+is not padded.  Rows start at column INDENT, 0 by default, from which
+the padding's `:align-to' counts."
+  (let* ((widths (cl-loop for index below (apply #'max 0 (mapcar #'length rows))
+                          collect (apply #'max 0
+                                         (mapcar (lambda (row)
+                                                   (string-width
+                                                    (or (nth index row) "")))
+                                                 rows)))))
+    (mapcar (lambda (row)
+              (let ((column (or indent 0))
+                    (widths widths)
+                    parts)
+                (while row
+                  (let ((cell (pop row))
+                        (width (pop widths)))
+                    (push cell parts)
+                    (when row
+                      (setq column (+ column width 2))
+                      (push (clutch-viz--pad cell (+ width 2) column) parts))))
+                (apply #'concat (nreverse parts))))
+            rows)))
+
+(defun clutch-viz-box (title lines &optional charset)
+  "Return LINES framed by a box with TITLE in its top edge.
+The result is a list of strings: the top edge, a string for each of
+LINES, and the bottom edge.  The box is drawn from column 0, from which
+the padding's `:align-to' counts.  It uses box characters, or ASCII when
+CHARSET is `ascii'; CHARSET defaults to `clutch-viz-charset'."
+  (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down)
+                (if (eq (or charset (clutch-viz-charset)) 'ascii)
+                    '("+" "+" "+" "+" ?- "|")
+                  '("┌" "┐" "└" "┘" ?─ "│")))
+               (inner (apply #'max (string-width title)
+                             (mapcar #'string-width lines))))
+    (cl-flet ((edge (&rest parts)
+                (propertize (apply #'concat parts) 'face 'shadow)))
+      (append
+       (list (concat (edge top-left " ")
+                     title
+                     (edge " " (make-string (- inner (string-width title))
+                                            across)
+                           top-right)))
+       (mapcar (lambda (line)
+                 (concat (edge down " ")
+                         line
+                         (clutch-viz--pad line (1+ inner) (+ inner 3))
+                         (edge down)))
+               lines)
+       (list (edge bottom-left (make-string (+ inner 2) across)
+                   bottom-right))))))
 
 (defun clutch-viz-tree (roots children label &optional charset)
   "Return the lines of a tree of ROOTS, depth first, as (TEXT . NODE).

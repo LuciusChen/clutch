@@ -22,6 +22,7 @@ flowchart TB
       Conn["clutch-connection.el<br/>connection lifecycle, auth,<br/>SSH/TRAMP transport, transactions"]
       Result["clutch-result.el<br/>result lifecycle/state owner,<br/>action registry, record/value workflows"]
       Object["clutch-object.el<br/>object discovery, describe buffers,<br/>object actions"]
+      ER["clutch-er.el<br/>ER view of a table:<br/>its keys in both directions"]
       Edit["clutch-edit.el<br/>staged mutation state,<br/>validation and submission"]
       Schema["clutch-schema.el<br/>schema refresh lifecycle,<br/>metadata caches"]
       UI["clutch-ui.el<br/>grid and header rendering helpers,<br/>footer, navigation"]
@@ -83,6 +84,8 @@ This diagram shows primary runtime/workflow ownership, not every `require` form;
 
 Staged submission has one backend contract: `clutch-db-call-with-atomic-batch`. `clutch-edit.el` owns statement order, row-count validation, and local staged state. Backends own the database boundary: an Auto-mode transaction or a Manual-mode savepoint. Transaction and savepoint completion are distinct: a failed savepoint release can still be recovered by rolling back to that savepoint, while a failed commit has an unknown outcome and must not be followed by a rollback presented as proof that nothing committed. The same unknown-outcome rule applies to explicit `clutch-commit`. JDBC keeps `java.sql.Savepoint` objects in the agent and exposes only opaque ids; neither SQL savepoint dialects nor partial-statement state leak into the result workflow. Transaction state is tracked as clean, dirty, or uncertain, with uncertain reserved for failed batch recovery or an unknown commit outcome. Rollback or reconnect clears the unsafe session state, but UI messaging preserves the distinction between known discarded work and a historical commit outcome that still requires verification.
 
+`clutch-er.el` owns the ER view of a table. It reads the table's columns and foreign keys through the schema metadata cache and asks the backend each time for the keys that reference the table (`clutch-db-referencing-keys`), whose default refuses. A backend that tells foreign keys apart marks each column of a key with the key's `:constraint`, so the view groups a composite key into one relation; it draws with `clutch-viz.el` and keeps its model in its buffer. The view runs no SQL of its own, so it is not a query activity; a connection replaced under it moves with the other attached buffers.
+
 `clutch-viz.el` draws text charts from plain Lisp data and requires no Clutch module, which the architecture check enforces; `clutch-result.el` owns the plan buffer and decides what it shows. `clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug capture, the dedicated debug buffer, and buffer/connection-scoped problem records. Workflow modules call it directly for capture and error context. Problem records retain their source-buffer provenance, and diagnostics derives redacted labels through the generic backend contract, so it has no reverse dependency on connection.
 
 ## Module Dependencies
@@ -100,6 +103,7 @@ flowchart LR
   Edit["clutch-edit.el"]
   Object["clutch-object.el"]
   Result["clutch-result.el"]
+  ER["clutch-er.el"]
   Viz["clutch-viz.el"]
 
   Diagnostics --> Backend
@@ -116,6 +120,8 @@ flowchart LR
   Result --> Edit
   Result --> Object
   Result --> Viz
+  ER --> Object
+  ER --> Viz
 ```
 
 Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. `clutch.el` requires all of them. The backend adapters require only `clutch-backend.el`. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.
