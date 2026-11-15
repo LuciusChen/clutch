@@ -194,54 +194,88 @@ A straight cell is dashed unless SOLID; ASCII when CHARSET is `ascii'."
         ((and (not solid) (memq mask '(4 8 12))) "┄")
         (t (aref clutch-viz--junctions mask))))
 
+(defun clutch-viz--route (height edges lanes)
+  "Route EDGES across a gutter HEIGHT lines tall, edge I down lane I of LANES.
+A lane of 0 means a straight edge, which needs none.  Return a plist of
+the gutter's :width, the cells' direction :masks and whether each is
+:solid, the lines with :arrows, each edge's :cells and the number of
+:crossings, cells where one edge runs across another."
+  (let* ((width (+ (apply #'max 0 lanes) 3))
+         (masks (make-vector (* height width) 0))
+         (solid (make-vector (* height width) nil))
+         (arrows (make-vector height nil))
+         cells)
+    (cl-loop
+     for (from to dashed) in edges
+     for lane in lanes
+     do (let (own)
+          (cl-flet ((mark (line column bits)
+                      (let ((cell (+ (* line width) column)))
+                        (aset masks cell (logior (aref masks cell) bits))
+                        (unless dashed (aset solid cell t))
+                        (push (cons line column) own))))
+            (if (zerop lane)
+                (dotimes (column (1- width))
+                  (mark from column 12))
+              (dotimes (column lane)
+                (mark from column 12))
+              (mark from lane (if (> to from) 6 5))
+              (cl-loop for line from (1+ (min from to)) below (max from to)
+                       do (mark line lane 3))
+              (mark to lane (if (> to from) 9 10))
+              (cl-loop for column from (1+ lane) below (1- width)
+                       do (mark to column 12)))
+            (aset arrows to t)
+            (push (cons to (1- width)) own))
+          (push (nreverse own) cells)))
+    (list :width width :masks masks :solid solid :arrows arrows
+          :cells (nreverse cells)
+          :crossings (cl-count 15 masks))))
+
 (defun clutch-viz-connectors (height edges &optional charset)
   "Return the connectors of EDGES across a gutter HEIGHT lines tall.
 Each edge is (FROM TO DASHED): it leaves the gutter's left side at line
 FROM and ends at its right side at line TO in an arrow, drawn dashed when
-DASHED.  Each edge runs down a lane of its own, the first edge nearest
-the left side; where edges cross or meet, the characters join.  The
-result is (LINES . CELLS): LINES are the gutter's lines, all as wide,
-and CELLS lists, for each edge in order, its cells as (LINE . COLUMN).
-CHARSET is as in `clutch-viz-tree'."
+DASHED.  An edge between lines of the same number runs straight; each
+other edge turns down a lane of its own, in the order of lanes that
+crosses fewest edges.  Where edges cross or meet, the characters join.
+The result is (LINES . CELLS): LINES are the gutter's lines, all as
+wide, and CELLS lists, for each edge in order, its cells as (LINE .
+COLUMN).  CHARSET is as in `clutch-viz-tree'."
   (let* ((charset (or charset (clutch-viz-charset '(?▶ ?╭))))
-         (width (+ (length edges) 3))
-         (masks (make-vector (* height width) 0))
-         (solid (make-vector (* height width) nil))
-         (arrows (make-vector height nil))
-         (lane 0)
-         cells)
-    (pcase-dolist (`(,from ,to ,dashed) edges)
-      (let (own)
-        (cl-flet ((mark (line column bits)
-                    (let ((cell (+ (* line width) column)))
-                      (aset masks cell (logior (aref masks cell) bits))
-                      (unless dashed (aset solid cell t))
-                      (push (cons line column) own))))
-          (cl-incf lane)
-          (dotimes (column lane)
-            (mark from column 12))
-          (cond ((= from to) (mark from lane 12))
-                (t (mark from lane (if (> to from) 6 5))
-                   (cl-loop for line from (1+ (min from to)) below (max from to)
-                            do (mark line lane 3))
-                   (mark to lane (if (> to from) 9 10))))
-          (cl-loop for column from (1+ lane) below (1- width)
-                   do (mark to column 12))
-          (aset arrows to t)
-          (push (cons to (1- width)) own))
-        (push (nreverse own) cells)))
+         (bent (cl-loop for (from to) in edges
+                        for index from 0
+                        unless (= from to) collect (list index from (< to from))))
+         (by-from (sort (copy-sequence bent) (lambda (a b) (< (nth 1 a) (nth 1 b)))))
+         (up (cl-remove-if-not #'cl-third by-from))
+         (down (reverse (cl-remove-if #'cl-third by-from)))
+         (route
+          (car (sort
+                (mapcar (lambda (order)
+                          (clutch-viz--route
+                           height edges
+                           (cl-loop for index below (length edges)
+                                    collect (let ((lane (cl-position index order
+                                                                     :key #'car)))
+                                              (if lane (1+ lane) 0)))))
+                        (list (append up down) (append down up)
+                              by-from (reverse by-from)))
+                (lambda (a b) (< (plist-get a :crossings)
+                                 (plist-get b :crossings))))))
+         (width (plist-get route :width)))
     (cons (cl-loop for line below height
                    collect
                    (concat
                     (cl-loop for column below (1- width)
                              for cell = (+ (* line width) column)
-                             concat (clutch-viz--junction (aref masks cell)
-                                                          (aref solid cell)
-                                                          charset))
-                    (if (aref arrows line)
+                             concat (clutch-viz--junction
+                                     (aref (plist-get route :masks) cell)
+                                     (aref (plist-get route :solid) cell)
+                                     charset))
+                    (if (aref (plist-get route :arrows) line)
                         (if (eq charset 'ascii) ">" "▶")
                       " ")))
-          (nreverse cells))))
+          (plist-get route :cells))))
 
 (defun clutch-viz-tree (roots children label &optional charset)
   "Return the lines of a tree of ROOTS, depth first, as (TEXT . NODE).

@@ -516,50 +516,67 @@ when UNICODE, else ASCII."
                                               name relations)))
                              line)))))
 
-(defun clutch-er--side (relations shown-schema unicode)
-  "Return the boxes of the tables RELATIONS join, stacked with gaps.
-The result is (LINES . ROWS): the lines, and ROWS mapping each listed
-\(TABLE SCHEMA COLUMN) to its line.  A column's line carries the ids of
-its relations as `clutch-er-ids'.  Names in SHOWN-SCHEMA are not
-qualified; box characters are used when UNICODE, else ASCII."
+(defun clutch-er--side (relations line shown-schema unicode)
+  "Return the boxes of the tables RELATIONS join, placed beside the table.
+LINE returns the line of a column of the shown table's box.  Boxes and
+the columns in them follow the order of the lines their relations leave
+from, and a box moves down to bring its first column level with that
+line where the box above leaves room, so that most connectors run
+straight and none need cross.  The result is (LINES . ROWS): the lines,
+and ROWS mapping each listed (TABLE SCHEMA COLUMN) to its line.  A
+column's line carries the ids of its relations as `clutch-er-ids'.
+Names in SHOWN-SCHEMA are not qualified; box characters are used when
+UNICODE, else ASCII."
   (let (groups lines rows width)
     (dolist (relation relations)
       (let ((key (list (plist-get relation :table) (plist-get relation :schema))))
         (if-let* ((group (assoc key groups)))
             (setcdr group (append (cdr group) (list relation)))
           (push (list key relation) groups))))
-    (setq groups
-          (mapcar (pcase-lambda (`((,table ,schema) . ,group))
-                    (list (clutch-er--name table schema shown-schema)
-                          table schema group
-                          (delete-dups
-                           (cl-loop for relation in group
-                                    append (mapcar #'cdr
-                                                   (plist-get relation :pairs))))))
-                  (nreverse groups)))
+    (cl-flet ((level (column group)
+                ;; The highest line of the shown table that COLUMN joins.
+                (cl-loop for relation in group
+                         for pair = (rassoc column (plist-get relation :pairs))
+                         when pair minimize (funcall line (car pair)))))
+      (setq groups
+            (sort
+             (mapcar (pcase-lambda (`((,table ,schema) . ,group))
+                       (let ((columns
+                              (sort (delete-dups
+                                     (cl-loop for relation in group
+                                              append (mapcar #'cdr
+                                                             (plist-get relation :pairs))))
+                                    (lambda (a b) (< (level a group) (level b group))))))
+                         (list (clutch-er--name table schema shown-schema)
+                               table schema group columns
+                               (level (car columns) group))))
+                     (nreverse groups))
+             (lambda (a b) (< (nth 5 a) (nth 5 b))))))
     ;; Boxes of one width end where the connectors start.
     (setq width (apply #'max 0 (mapcar (pcase-lambda (`(,title ,_ ,_ ,_ ,columns))
                                          (apply #'max (string-width title)
                                                 (mapcar #'string-width columns)))
                                        groups)))
-    (pcase-dolist (`(,title ,table ,schema ,group ,columns) groups)
-      (when lines
-        (setq lines (append lines (list ""))))
-      (cl-loop for line in (clutch-viz-box title columns
+    (pcase-dolist (`(,title ,table ,schema ,group ,columns ,level) groups)
+      (let ((top (max (if lines (1+ (length lines)) 0)
+                      (- level clutch-viz-box-head))))
+        (while (< (length lines) top)
+          (setq lines (append lines (list "")))))
+      (cl-loop for text in (clutch-viz-box title columns
                                            (if unicode 'unicode 'ascii) width)
                for index from (- clutch-viz-box-head)
                for column = (and (>= index 0) (nth index columns))
                do (when column
                     (push (cons (list table schema column) (length lines))
                           rows)
-                    (setq line
+                    (setq text
                           (propertize
-                           line 'clutch-er-ids
+                           text 'clutch-er-ids
                            (cl-loop for relation in group
                                     when (rassoc column
                                                  (plist-get relation :pairs))
                                     collect (plist-get relation :id)))))
-               (setq lines (append lines (list line)))))
+               (setq lines (append lines (list text)))))
     (cons lines rows)))
 
 (defun clutch-er--diagram (focus names relations shown-schema unicode)
@@ -576,16 +593,20 @@ qualified; box characters are used when UNICODE, else ASCII."
                (outgoing (cl-remove-if-not
                           (lambda (relation) (eq (plist-get relation :direction) 'out))
                           relations))
-               (`(,left . ,left-rows) (clutch-er--side incoming shown-schema unicode))
-               (`(,right . ,right-rows) (clutch-er--side outgoing shown-schema unicode))
+               (line (lambda (name)
+                       (+ clutch-viz-box-head
+                          (cl-position name names :test #'equal))))
+               (`(,left . ,left-rows)
+                (clutch-er--side incoming line shown-schema unicode))
+               (`(,right . ,right-rows)
+                (clutch-er--side outgoing line shown-schema unicode))
                (height (max (length left) (length focus) (length right))))
     (cl-flet ((gutter (group rows)
                 ;; Each relation leaves from its upper end first.
                 (let* ((ends (mapcar
                               (lambda (relation)
                                 (let* ((pair (car (plist-get relation :pairs)))
-                                       (own (+ clutch-viz-box-head (cl-position (car pair) names
-                                                             :test #'equal)))
+                                       (own (funcall line (car pair)))
                                        (other (cdr (assoc (list (plist-get relation :table)
                                                                 (plist-get relation :schema)
                                                                 (cdr pair))

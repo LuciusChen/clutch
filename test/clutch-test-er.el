@@ -342,24 +342,26 @@ again, and a width that keeps the layout draws nothing."
       (clutch-test-er--with-view (clutch-test-er--conn)
         (should (string-prefix-p
                  "
-╭──────────╮     ╭───────────────────────╮     ╭───────────╮
-│ items    │     │ orders                │     │ customers │
-├──────────┤     ├───────────────────────┤     ├───────────┤
-│ order_id │──┬─▶│ ◆←  id           int  │ ╭──▶│ id        │
-╰──────────╯  │  │  →  customer_id  int  │─╯   ╰───────────╯
-              │  │  →  region       text │──╮  
-╭──────────╮  │  │  →  country      text │  │  ╭───────────╮
-│ refunds  │  │  │ … 1 more column       │  │  │ regions   │
-├──────────┤  │  ╰───────────────────────╯  │  ├───────────┤
-│ order_id │──╯                             ╰─▶│ code      │
-╰──────────╯                                   │ country   │
-                                               ╰───────────╯
+╭──────────╮    ╭───────────────────────╮    
+│ items    │    │ orders                │    ╭───────────╮
+├──────────┤    ├───────────────────────┤    │ customers │
+│ order_id │─┬─▶│ ◆←  id           int  │    ├───────────┤
+╰──────────╯ │  │  →  customer_id  int  │───▶│ id        │
+             │  │  →  region       text │─╮  ╰───────────╯
+╭──────────╮ │  │  →  country      text │ │  
+│ refunds  │ │  │ … 1 more column       │ │  ╭───────────╮
+├──────────┤ │  ╰───────────────────────╯ │  │ regions   │
+│ order_id │─╯                            │  ├───────────┤
+╰──────────╯                              ╰─▶│ code      │
+                                             │ country   │
+                                             ╰───────────╯
 
 References  2
 "
                  (clutch-test-er--text)))
+        (should-not (string-match-p "┼" (clutch-test-er--text)))
         (clutch-test-er--goto "region       text")
-        (search-forward "──╮")
+        (search-forward "─╮")
         (backward-char)
         (run-hooks 'post-command-hook)
         (let ((highlighted (clutch-test-er--highlighted)))
