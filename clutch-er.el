@@ -22,13 +22,13 @@
 (require 'clutch-object)
 (require 'clutch-viz)
 
-(defcustom clutch-er-charset 'ascii
+(defcustom clutch-er-charset 'auto
   "Characters the ER view draws with.
-`ascii', the default, draws with characters every font and terminal
-gives one column, so the view aligns everywhere.  `unicode' draws with
-box characters, and `auto' with box characters where they are one
-column wide and with ASCII where they are not, as in CJK language
-environments that make ambiguous characters wide."
+`auto' draws with Unicode symbols and line characters where each is one
+column wide, and with ASCII where one is not, as in CJK language
+environments that make ambiguous characters wide.  `unicode' and
+`ascii' force one set, for a terminal whose widths differ from those
+Emacs assumes."
   :type '(choice (const :tag "Choose by character width" auto)
                  (const :tag "Box characters" unicode)
                  (const :tag "ASCII" ascii))
@@ -52,9 +52,14 @@ are taller than a line, and a graphical frame redraws the background of
 the lines next to them over a highlighted line's background."
   :group 'clutch)
 
+(defface clutch-er-title
+  '((t :inherit (bold font-lock-keyword-face)))
+  "Face for the name of the table the ER view shows."
+  :group 'clutch)
+
 (defface clutch-er-table
   '((t :inherit bold))
-  "Face for table names in the ER view."
+  "Face for the names of related tables in the ER view."
   :group 'clutch)
 
 (defface clutch-er-key
@@ -62,9 +67,14 @@ the lines next to them over a highlighted line's background."
   "Face for the primary-key marker in the ER view."
   :group 'clutch)
 
+(defface clutch-er-reference
+  '((t :inherit font-lock-type-face))
+  "Face for the marker of a column whose foreign key references a table."
+  :group 'clutch)
+
 (defface clutch-er-manual
   '((t :inherit shadow :slant italic))
-  "Face for the arrow of a relation added by hand."
+  "Face for the link and marker of a relation added by hand."
   :group 'clutch)
 
 (defvar-local clutch-er--entry nil
@@ -88,12 +98,6 @@ current schema.")
   "The highlightable stretches of the ER view, as (BEG END IDS).
 IDS lists the relations the stretch belongs to, as its `clutch-er-ids'
 property does.")
-
-(defvar-local clutch-er--layout nil
-  "Layout the ER view is drawn in: `wide', three columns, or `list'.")
-
-(defvar-local clutch-er--wide-width nil
-  "Columns the wide layout of the ER view needs, or nil without relations.")
 
 (defvar-local clutch-er--highlighted nil
   "Relation ids highlighted now, or `none' before the first highlight.")
@@ -396,11 +400,16 @@ read each time."
 
 ;;;; Drawing
 
+;; The view is one card: the table's name over a rule, then a line for
+;; each column with, beside it, the relation that column ends.  A
+;; relation over several adjacent columns draws a bracket down them,
+;; and a column that ends several relations takes a line for each.
+
 (defun clutch-er--charset ()
   "Return the characters the ER view draws with: `unicode' or `ascii'.
 See `clutch-er-charset'."
   (if (eq clutch-er-charset 'auto)
-      (clutch-viz-charset '(?◆ ?→ ?← ?↔ ?⇢ ?▶ ?╭ ?…))
+      (clutch-viz-charset '(?◆ ?● ?○ ?▸ ?◂ ?┐ ?┤ ?┴ ?┄ ?▌ ?· ?…))
     clutch-er-charset))
 
 (defun clutch-er--name (table schema shown-schema)
@@ -410,12 +419,6 @@ See `clutch-er-charset'."
             "")
           (propertize table 'face 'clutch-er-table)))
 
-(defun clutch-er--column-list (columns &optional bare)
-  "Return COLUMNS, names, in parentheses.
-With BARE, a single name stands without them."
-  (format (if (and bare (null (cdr columns))) "%s" "(%s)")
-          (string-join columns ", ")))
-
 (defun clutch-er--relation-ids (column relations)
   "Return the ids of RELATIONS that join COLUMN of the table."
   (cl-loop for relation in relations
@@ -423,294 +426,178 @@ With BARE, a single name stands without them."
            collect (plist-get relation :id)))
 
 (defun clutch-er--marker (column relations unicode)
-  "Return the marker of COLUMN among RELATIONS: its key and directions.
-Use box characters when UNICODE, else ASCII."
-  (let* ((directions (cl-loop for relation in relations
-                              when (assoc column (plist-get relation :pairs))
-                              collect (plist-get relation :direction)))
-         (out (memq 'out directions))
-         (in (memq 'in directions)))
-    (cond ((and out in) (if unicode "↔" "="))
-          (out (if unicode "→" ">"))
-          (in (if unicode "←" "<"))
+  "Return the marker of COLUMN for its primary key or a key from it.
+COLUMN is a column details plist; RELATIONS are those shown.  Use box
+characters when UNICODE, else ASCII."
+  (let ((starts (cl-loop for relation in relations
+                         when (and (eq (plist-get relation :direction) 'out)
+                                   (assoc (plist-get column :name)
+                                          (plist-get relation :pairs)))
+                         collect relation)))
+    (cond ((plist-get column :primary-key)
+           (propertize (if unicode "◆" "*") 'face 'clutch-er-key))
+          ((cl-find-if-not (lambda (relation) (plist-get relation :stored)) starts)
+           (propertize (if unicode "●" "o") 'face 'clutch-er-reference))
+          (starts (propertize (if unicode "○" ".") 'face 'clutch-er-manual))
           (t " "))))
 
-(defun clutch-er--relation-row (relation shown-schema unicode)
-  "Return the cells of RELATION's line.
-Names in SHOWN-SCHEMA are not qualified.  The arrow between the ends
-is dashed for a relation added by hand, and ASCII unless UNICODE."
-  (let* ((pairs (plist-get relation :pairs))
-         (own (clutch-er--column-list (mapcar #'car pairs) t))
-         (other (concat (clutch-er--name (plist-get relation :table)
-                                         (plist-get relation :schema)
-                                         shown-schema)
-                        " "
-                        (propertize (clutch-er--column-list (mapcar #'cdr pairs))
-                                    'face 'shadow)))
-         (arrow (if (plist-get relation :stored)
-                    (propertize (if unicode "⇢" "~>") 'face 'clutch-er-manual)
-                  (propertize (if unicode "→" "->") 'face 'shadow))))
-    (if (eq (plist-get relation :direction) 'out)
-        (list own arrow other)
-      (list other arrow own))))
+(defun clutch-er--end (relation shown-schema)
+  "Return the other end of RELATION: its table and the columns there.
+Names in SHOWN-SCHEMA are not qualified."
+  (let ((columns (mapcar #'cdr (plist-get relation :pairs))))
+    (concat (clutch-er--name (plist-get relation :table)
+                             (plist-get relation :schema) shown-schema)
+            (propertize (if (cdr columns)
+                            (format " (%s)" (string-join columns ", "))
+                          (concat "." (car columns)))
+                        'face 'shadow))))
 
-(defun clutch-er--window-width ()
-  "Return the body width of a window showing the current buffer, or 0."
-  (if-let* ((window (get-buffer-window (current-buffer) t)))
-      (window-body-width window)
-    0))
+(defun clutch-er--link (relation part unicode)
+  "Return the link drawn for RELATION on one of its lines.
+PART is `only' for a relation over one column, else `first', `middle'
+or `last' down the bracket of its columns.  The link is three columns
+wide and points from the key to what it references; a relation added
+by hand is dotted.  Use box characters when UNICODE, else ASCII."
+  (let* ((in (eq (plist-get relation :direction) 'in))
+         (dot (plist-get relation :stored))
+         (line (if unicode (if dot "┄" "─") (if dot "." "-")))
+         (text (pcase part
+                 ('first (concat line (if unicode "┐" "+") " "))
+                 ('middle (concat line (if unicode "┤" "+") " "))
+                 ('last (if in
+                            (concat (if unicode "◂┴" "<+") line)
+                          (concat line (if unicode "┴▸" "+>"))))
+                 (_ (if in
+                        (concat (if unicode "◂" "<") line line)
+                      (concat line line (if unicode "▸" ">")))))))
+    (propertize text 'face (if dot 'clutch-er-manual 'shadow))))
 
-(defun clutch-er--layout ()
-  "Return the layout the ER view needs now, `wide' or `list'.
-It is `wide', three columns, when a window showing the view is wide
-enough for them."
-  (if (and clutch-er--wide-width
-           (<= clutch-er--wide-width (clutch-er--window-width)))
-      'wide
-    'list))
-
-(defun clutch-er--focus-lines (columns relations unicode)
-  "Return the lines of the box of the shown table with COLUMNS shown.
-The line of a column carries its name as `clutch-er-column' and the ids
-of the RELATIONS that join it as `clutch-er-ids'.  Use box characters
-when UNICODE, else ASCII."
-  (let* ((all (plist-get clutch-er--model :columns))
-         (hidden (- (length all) (length columns)))
-         (rows (clutch-viz-columns
-                (mapcar (lambda (column)
-                          (list (concat
-                                 (if (plist-get column :primary-key)
-                                     (propertize (if unicode "◆" "*")
-                                                 'face 'clutch-er-key)
-                                   " ")
-                                 (propertize (clutch-er--marker
-                                              (plist-get column :name)
-                                              relations unicode)
-                                             'face 'shadow))
-                                (plist-get column :name)
-                                (propertize (or (plist-get column :type) "")
-                                            'face 'shadow)))
-                        columns)
-                2))
-         (box (clutch-viz-box
-               (clutch-er--name (plist-get clutch-er--entry :name)
-                                (plist-get clutch-er--entry :schema)
-                                nil)
-               (append rows
-                       (when (> hidden 0)
-                         (list (propertize
-                                (format "%s %d more column%s"
-                                        (if unicode "…" "...")
-                                        hidden (if (= hidden 1) "" "s"))
-                                'face 'shadow))))
-               (if unicode 'unicode 'ascii))))
-    (append (seq-take box (clutch-viz-box-head))
-          (cl-loop for line in (nthcdr (clutch-viz-box-head) box)
-                   for index from 0
-                   for column = (nth index columns)
-                   collect (if column
-                               (let ((name (plist-get column :name)))
-                                 (propertize line
-                                             'clutch-er-column name
-                                             'clutch-er-ids
-                                             (clutch-er--relation-ids
-                                              name relations)))
-                             line)))))
-
-(defun clutch-er--side (relations line shown-schema unicode)
-  "Return the boxes of the tables RELATIONS join, placed beside the table.
-LINE returns the line of a column of the shown table's box.  Boxes and
-the columns in them follow the order of the lines their relations leave
-from, and a box moves down to bring its first column level with that
-line where the box above leaves room, so that most connectors run
-straight and none need cross.  The result is (LINES . ROWS): the lines,
-and ROWS mapping each listed (TABLE SCHEMA COLUMN) to its line.  A
-column's line carries the ids of its relations as `clutch-er-ids'.
-Names in SHOWN-SCHEMA are not qualified; box characters are used when
-UNICODE, else ASCII."
-  (let (groups lines rows width)
-    (dolist (relation relations)
-      (let ((key (list (plist-get relation :table) (plist-get relation :schema))))
-        (if-let* ((group (assoc key groups)))
-            (setcdr group (append (cdr group) (list relation)))
-          (push (list key relation) groups))))
-    (cl-flet ((level (column group)
-                ;; The highest line of the shown table that COLUMN joins.
-                (cl-loop for relation in group
-                         for pair = (rassoc column (plist-get relation :pairs))
-                         when pair minimize (funcall line (car pair)))))
-      (setq groups
-            (sort
-             (mapcar (pcase-lambda (`((,table ,schema) . ,group))
-                       (let ((columns
-                              (sort (delete-dups
-                                     (cl-loop for relation in group
-                                              append (mapcar #'cdr
-                                                             (plist-get relation :pairs))))
-                                    (lambda (a b) (< (level a group) (level b group))))))
-                         (list (clutch-er--name table schema shown-schema)
-                               table schema group columns
-                               (level (car columns) group))))
-                     (nreverse groups))
-             (lambda (a b) (< (nth 5 a) (nth 5 b)))))
-      ;; Boxes of one width end where the connectors start.
-      (setq width (apply #'max 0 (mapcar (pcase-lambda (`(,title ,_ ,_ ,_ ,columns))
-                                           (apply #'max (+ 2 (string-width title))
-                                                  (mapcar #'string-width columns)))
-					 groups)))
-      (pcase-dolist (`(,title ,table ,schema ,group ,columns ,level) groups)
-	(let ((top (max (if lines (1+ (length lines)) 0)
-			(- level (clutch-viz-box-head t))))
-              (starts (mapcar (lambda (relation)
-				(funcall line (caar (plist-get relation :pairs))))
-                              relations)))
-          ;; A column level with the start of another relation would put
-          ;; one connector's end beside another's start on one line, and
-          ;; the two would read as one; move the box down past it.
-          (while (cl-loop for column in columns
-                          for row from (+ top (clutch-viz-box-head t))
-                          thereis (and (memq row starts)
-                                       (/= row (level column group))))
-            (cl-incf top))
-          (while (< (length lines) top)
-            (setq lines (append lines (list "")))))
-	(cl-loop for text in (clutch-viz-box title columns
-                                             (if unicode 'unicode 'ascii) width t)
-		 for index from (- (clutch-viz-box-head t))
-		 for column = (and (>= index 0) (nth index columns))
-		 do (when column
-                      (push (cons (list table schema column) (length lines))
-                            rows)
-                      (setq text
-                            (propertize
-                             text 'clutch-er-ids
-                             (cl-loop for relation in group
-                                      when (rassoc column
-                                                   (plist-get relation :pairs))
-                                      collect (plist-get relation :id)))))
-		 (setq lines (append lines (list text))))))
-    (cons lines rows)))
-
-(defun clutch-er--diagram (focus names relations shown-schema unicode)
-  "Return the lines of the wide layout around FOCUS, the shown table's box.
-NAMES are the columns FOCUS lists, in order.  Of RELATIONS, the tables
-whose keys reference the table stand on the left, the tables it
-references on the right, and connectors join each relation's first pair
-of columns, with the arrow at the referenced end.  Names in SHOWN-SCHEMA are not
+(defun clutch-er--lines (columns relations shown-schema unicode)
+  "Return the lines of COLUMNS with RELATIONS beside them, as cell lists.
+Each line is (PROPERTIES COLUMN-CELL TYPE-CELL LINK-CELL): a column's
+first line carries its marker, name and type, and a further line for a
+column that ends several relations leaves them blank.  PROPERTIES are
+the text properties of the whole line.  Names in SHOWN-SCHEMA are not
 qualified; box characters are used when UNICODE, else ASCII."
-  (pcase-let* ((charset (if unicode 'unicode 'ascii))
-               (incoming (cl-remove-if-not
-                          (lambda (relation) (eq (plist-get relation :direction) 'in))
+  (let* ((names (mapcar (lambda (column) (plist-get column :name)) columns))
+         (position (lambda (name) (cl-position name names :test #'equal)))
+         ;; A relation ends at its last shown column.  One over several
+         ;; adjacent columns that end no other relation brackets them.
+         (anchor (lambda (relation)
+                   (car (sort (mapcar (lambda (pair) (funcall position (car pair)))
+                                      (plist-get relation :pairs))
+                              #'>))))
+         (anchors (mapcar (lambda (relation) (cons relation (funcall anchor relation)))
                           relations))
-               (outgoing (cl-remove-if-not
-                          (lambda (relation) (eq (plist-get relation :direction) 'out))
-                          relations))
-               (line (lambda (name)
-                       (+ (clutch-viz-box-head)
-                          (cl-position name names :test #'equal))))
-               (`(,left . ,left-rows)
-                (clutch-er--side incoming line shown-schema unicode))
-               (`(,right . ,right-rows)
-                (clutch-er--side outgoing line shown-schema unicode))
-               (height (max (length left) (length focus) (length right))))
-    (cl-flet ((gutter (group rows)
-                ;; Each relation leaves from its upper end first.
-                (let* ((ends (mapcar
-                              (lambda (relation)
-                                (let* ((pair (car (plist-get relation :pairs)))
-                                       (own (funcall line (car pair)))
-                                       (other (cdr (assoc (list (plist-get relation :table)
-                                                                (plist-get relation :schema)
-                                                                (cdr pair))
-                                                          rows))))
-                                  (list (if (eq (plist-get relation :direction) 'in)
-                                            (list other own)
-                                          (list own other))
-                                        (plist-get relation :stored)
-                                        (plist-get relation :id))))
-                              group))
-                       (ends (sort ends (lambda (a b) (< (caar a) (caar b)))))
-                       (drawn (clutch-viz-connectors
-                               height
-                               (mapcar (pcase-lambda (`((,from ,to) ,stored ,_))
-                                         (list from to stored))
-                                       ends)
-                               charset))
-                       (lines (mapcar (lambda (line)
-                                        (propertize line 'face 'shadow))
-                                      (car drawn))))
-                  (cl-loop for cells in (cdr drawn)
-                           for end in ends
-                           do (pcase-dolist (`(,line . ,column) cells)
-                                (let ((text (nth line lines)))
-                                  (put-text-property
-                                   column (1+ column) 'clutch-er-ids
-                                   (cons (nth 2 end)
-                                         (get-text-property column 'clutch-er-ids
-                                                            text))
-                                   text))))
-                  lines)))
-      (let ((left-gutter (and incoming (gutter incoming left-rows)))
-            (right-gutter (and outgoing (gutter outgoing right-rows))))
-        (clutch-viz-columns
-         (cl-loop for index below height
-                  collect (append
-                           (and incoming (list (or (nth index left) "")
-                                               (nth index left-gutter)))
-                           (list (or (nth index focus) ""))
-                           (and outgoing (list (nth index right-gutter)
-                                               (or (nth index right) "")))))
-         0 0)))))
+         (brackets
+          (cl-loop for (relation . end) in anchors
+                   for rows = (sort (mapcar (lambda (pair)
+                                              (funcall position (car pair)))
+                                            (plist-get relation :pairs))
+                                    #'<)
+                   when (and (cdr rows)
+                             (= (- end (car rows)) (1- (length rows)))
+                             (cl-notany (lambda (other)
+                                          (and (memq (cdr other) (butlast rows))
+                                               (not (eq (car other) relation))))
+                                        anchors))
+                   collect (cons relation rows))))
+    (cl-loop
+     for column in columns
+     for index from 0
+     for name = (plist-get column :name)
+     for ending = (cl-loop for (relation . end) in anchors
+                           when (eql end index) collect relation)
+     for crossing = (cl-loop for (relation . rows) in brackets
+                             when (and (memq index rows) (/= index (car (last rows))))
+                             return (cons relation (if (= index (car rows))
+                                                       'first 'middle)))
+     for column-cell = (concat " " (clutch-er--marker column relations unicode)
+                               " " name)
+     for type-cell = (propertize (or (plist-get column :type) "") 'face 'shadow)
+     nconc
+     (if crossing
+         (list (list (list 'clutch-er-column name
+                           'clutch-er-relation (car crossing)
+                           'clutch-er-ids (clutch-er--relation-ids name relations))
+                     column-cell type-cell
+                     (clutch-er--link (car crossing) (cdr crossing) unicode)))
+       (or (cl-loop
+            for relation in ending
+            for first = t then nil
+            for bracketed = (assq relation brackets)
+            collect
+            (list (append (and first (list 'clutch-er-column name))
+                          (list 'clutch-er-relation relation
+                                'clutch-er-ids
+                                (if first
+                                    (clutch-er--relation-ids name relations)
+                                  (list (plist-get relation :id)))))
+                  (if first column-cell "")
+                  (if first type-cell "")
+                  (concat (clutch-er--link relation (if bracketed 'last 'only)
+                                           unicode)
+                          " "
+                          (clutch-er--end relation shown-schema)
+                          (and (cdr (plist-get relation :pairs)) (not bracketed)
+                               (propertize
+                                (format "  %s (%s)"
+                                        (if (eq (plist-get relation :direction) 'in)
+                                            "to" "from")
+                                        (string-join (mapcar #'car (plist-get relation :pairs))
+                                                     ", "))
+                                'face 'shadow))
+                          (and (plist-get relation :stored)
+                               (propertize "  manual" 'face 'clutch-er-manual)))))
+           (list (list (list 'clutch-er-column name
+                             'clutch-er-ids (clutch-er--relation-ids name relations))
+                       column-cell type-cell "")))))))
 
 (defun clutch-er--render ()
-  "Draw the current ER model in the current buffer.
-The layout is the one a window showing it is wide enough for."
+  "Draw the current ER model in the current buffer."
   (let* ((inhibit-read-only t)
          (unicode (eq (clutch-er--charset) 'unicode))
          (relations (plist-get clutch-er--model :relations))
          (shown-schema (plist-get clutch-er--model :schema))
-         (columns
-          (cl-remove-if-not
-           (lambda (column)
-             (or clutch-er--all-columns
-                 (plist-get column :primary-key)
-                 (clutch-er--relation-ids (plist-get column :name) relations)))
-           (plist-get clutch-er--model :columns)))
-         (focus (clutch-er--focus-lines columns relations unicode))
-         (diagram (and relations
-                       (clutch-er--diagram
-                        focus (mapcar (lambda (column) (plist-get column :name))
-                                      columns)
-                        relations shown-schema unicode)))
-         (line (line-number-at-pos)))
-    (setq clutch-er--wide-width
-          (and diagram (apply #'max (mapcar #'string-width diagram)))
-          clutch-er--layout (clutch-er--layout))
+         (all (plist-get clutch-er--model :columns))
+         (columns (cl-remove-if-not
+                   (lambda (column)
+                     (or clutch-er--all-columns
+                         (plist-get column :primary-key)
+                         (clutch-er--relation-ids (plist-get column :name) relations)))
+                   all))
+         (lines (clutch-er--lines columns relations shown-schema unicode))
+         (texts (mapcar #'string-trim-right
+                        (clutch-viz-columns (mapcar #'cdr lines) 0 3)))
+         (hidden (- (length all) (length columns)))
+         (title (concat " " (propertize (plist-get clutch-er--entry :name)
+                                        'face 'clutch-er-title)))
+         (summary (propertize
+                   (concat (if shown-schema
+                               (concat shown-schema (if unicode " · " " - "))
+                             "")
+                           (format "%d column%s" (length all)
+                                   (if (= (length all) 1) "" "s")))
+                   'face 'shadow))
+         (width (max 40 (+ (string-width title) (string-width summary) 4)
+                     (apply #'max 0 (mapcar #'string-width texts))))
+         (point-line (line-number-at-pos)))
     (erase-buffer)
-    (insert "\n")
-    (dolist (text (if (eq clutch-er--layout 'wide) diagram focus))
-      (insert text "\n"))
-    (dolist (section '((out . "References") (in . "Referenced by")))
-      (let ((group (cl-remove-if-not
-                    (lambda (relation)
-                      (eq (plist-get relation :direction) (car section)))
-                    relations)))
-        (insert "\n" (propertize (cdr section) 'face 'bold)
-                (propertize (format "  %d" (length group)) 'face 'shadow)
-                "\n")
-        (if (null group)
-            (insert (propertize "  none" 'face 'shadow) "\n")
-          (cl-loop for text in (clutch-viz-columns
-                                (mapcar (lambda (relation)
-                                          (clutch-er--relation-row
-                                           relation shown-schema unicode))
-                                        group)
-                                2)
-                   for relation in group
-                   do (insert (propertize (concat "  " text "\n")
-                                          'clutch-er-relation relation
-                                          'clutch-er-ids
-                                          (list (plist-get relation :id))))))))
+    (insert "\n" title
+            (make-string (- width (string-width title) (string-width summary)) ?\s)
+            summary "\n"
+            " " (propertize (make-string (1- width) (if unicode ?─ ?-)) 'face 'shadow)
+            "\n")
+    (cl-loop for (properties) in lines
+             for text in texts
+             do (insert (apply #'propertize (concat text "\n") properties)))
+    (when (> hidden 0)
+      (insert (propertize (format "   %s %d more column%s\n"
+                                  (if unicode "…" "...") hidden
+                                  (if (= hidden 1) "" "s"))
+                          'face 'shadow)))
+    (unless relations
+      (insert "\n" (propertize "   No foreign keys reach this table." 'face 'shadow) "\n"))
     (setq clutch-er--lines
           (let ((position (point-min)) spans)
             (while (< position (point-max))
@@ -721,19 +608,16 @@ The layout is the one a window showing it is wide enough for."
                 (setq position next)))
             (nreverse spans)))
     (goto-char (point-min))
-    (forward-line (1- line))
+    (forward-line (1- point-line))
     (setq clutch-er--highlighted 'none)
     (clutch-er--update-highlight)))
 
-(defun clutch-er--relayout (window)
-  "Draw the ER view in WINDOW again for a width that needs another layout."
-  (with-current-buffer (window-buffer window)
-    (when (and clutch-er--model (not (eq clutch-er--layout (clutch-er--layout))))
-      (clutch-er--render))))
-
 (defun clutch-er--update-highlight ()
-  "Highlight the relations of the text at point, if they changed."
-  (let ((ids (get-text-property (point) 'clutch-er-ids)))
+  "Highlight the relations of the line at point, if they changed.
+A highlighted line also shows a bar in its first column."
+  (let ((ids (get-text-property (point) 'clutch-er-ids))
+        (bar (propertize (if (eq (clutch-er--charset) 'unicode) "▌" "|")
+                         'face 'clutch-er-highlight)))
     (unless (equal ids clutch-er--highlighted)
       (setq clutch-er--highlighted ids)
       (mapc #'delete-overlay clutch-er--overlays)
@@ -742,6 +626,9 @@ The layout is the one a window showing it is wide enough for."
         (when (cl-intersection ids span-ids)
           (let ((overlay (make-overlay beg end)))
             (overlay-put overlay 'face 'clutch-er-highlight)
+            (push overlay clutch-er--overlays))
+          (let ((overlay (make-overlay beg (1+ beg))))
+            (overlay-put overlay 'display bar)
             (push overlay clutch-er--overlays)))))))
 
 ;;;; Buffer
@@ -774,11 +661,15 @@ MODEL is its ER model, loaded now when nil."
                                                          id))
                                                   relations)))
                           (cons (substring-no-properties
-                                 (string-join
-                                  (clutch-er--relation-row
-                                   relation (plist-get clutch-er--model :schema)
-                                   nil)
-                                  " "))
+                                 (format "%s %s %s"
+                                         (string-join
+                                          (mapcar #'car (plist-get relation :pairs))
+                                          ", ")
+                                         (if (eq (plist-get relation :direction) 'in)
+                                             "<-" "->")
+                                         (clutch-er--end
+                                          relation
+                                          (plist-get clutch-er--model :schema))))
                                 relation)))
                       (get-text-property (point) 'clutch-er-ids))))
         (pcase choices
@@ -1021,8 +912,7 @@ Only a relation added by hand can change."
               header-line-format
               (list :eval (list #'clutch--header-with-disconnect-badge
                                 'clutch-er--header-base)))
-  (add-hook 'post-command-hook #'clutch-er--update-highlight nil t)
-  (add-hook 'window-size-change-functions #'clutch-er--relayout nil t))
+  (add-hook 'post-command-hook #'clutch-er--update-highlight nil t))
 
 ;;;###autoload
 (defun clutch-er-diagram (&optional entry)

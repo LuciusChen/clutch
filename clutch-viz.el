@@ -116,9 +116,7 @@ CHARSET defaults to `clutch-viz-charset'."
 A row is a list of cells, which are strings.  Each column is as wide as
 its widest cell, and GAP spaces, 2 by default, separate columns; the
 last cell of a row is not padded.  Rows start at column INDENT, 0 by
-default, from which the padding's `:align-to' counts.  A cell's own
-`:align-to' padding counted from column 0, so a cell placed further
-right loses its `display' properties and keeps its spaces."
+default, from which the padding's `:align-to' counts."
   (let* ((widths (cl-loop for index below (apply #'max 0 (mapcar #'length rows))
                           collect (apply #'max 0
                                          (mapcar (lambda (row)
@@ -132,13 +130,7 @@ right loses its `display' properties and keeps its spaces."
                 (while row
                   (let ((cell (pop row))
                         (width (pop widths)))
-                    (push (if (zerop column)
-                              cell
-                            (let ((cell (copy-sequence cell)))
-                              (remove-text-properties 0 (length cell)
-                                                      '(display nil) cell)
-                              cell))
-                          parts)
+                    (push cell parts)
                     (when row
                       (setq column (+ column width (or gap 2)))
                       (when (< (string-width cell) (+ width (or gap 2)))
@@ -146,156 +138,6 @@ right loses its `display' properties and keeps its spaces."
                               parts)))))
                 (apply #'concat (nreverse parts))))
             rows)))
-
-(defun clutch-viz-box-head (&optional tab)
-  "Return the lines `clutch-viz-box' draws before its first line.
-TAB is as in `clutch-viz-box'."
-  (if tab 1 3))
-
-(defun clutch-viz-box (title lines &optional charset width tab)
-  "Return LINES framed by a box headed by TITLE.
-The result is a list of strings: the top edge, TITLE and a rule, a
-string for each of LINES, and the bottom edge.  With TAB, TITLE sits in
-the top edge instead, for a lighter box.  LINES start after
-`clutch-viz-box-head' strings.  The box is drawn from column 0, from
-which the padding's `:align-to' counts, and is at least WIDTH columns
-wide inside.  It uses ASCII when CHARSET is `ascii', else rounded box
-characters; CHARSET defaults to `clutch-viz-charset'."
-  (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down
-                            ,rule-left ,rule-right)
-                (if (eq (or charset (clutch-viz-charset '(?╭))) 'ascii)
-                    '("+" "+" "+" "+" ?- "|" "+" "+")
-                  '("╭" "╮" "╰" "╯" ?─ "│" "├" "┤")))
-               ;; A title in the top edge needs room for a rule on either
-               ;; side of it.
-               (inner (apply #'max (or width 0)
-                             (+ (string-width title) (if tab 2 0))
-                             (mapcar #'string-width lines))))
-    (cl-flet ((edge (&rest parts)
-                (propertize (apply #'concat parts) 'face 'shadow))
-              (row (line)
-                (concat (propertize (concat down " ") 'face 'shadow)
-                        line
-                        (clutch-viz--pad line (1+ inner) (+ inner 3))
-                        (propertize down 'face 'shadow))))
-      (append
-       (if tab
-           (list (concat (edge top-left (string across) " ")
-                         title
-                         (edge " " (make-string (- inner (string-width title) 1)
-                                                across)
-                               top-right)))
-         (list (edge top-left (make-string (+ inner 2) across) top-right)
-               (row title)
-               (edge rule-left (make-string (+ inner 2) across) rule-right)))
-       (mapcar #'row lines)
-       (list (edge bottom-left (make-string (+ inner 2) across)
-                   bottom-right))))))
-
-(defconst clutch-viz--junctions
-  ;; Indexed by the directions a cell joins: up 1, down 2, left 4, right 8.
-  [" " "│" "│" "│" "─" "╯" "╮" "┤" "─" "╰" "╭" "├" "─" "┴" "┬" "┼"]
-  "Box characters joining the directions of a connector cell.")
-
-(defun clutch-viz--junction (mask solid charset)
-  "Return the character of a connector cell joining the directions of MASK.
-A straight cell is dashed unless SOLID; ASCII when CHARSET is `ascii'."
-  (cond ((eq charset 'ascii)
-         (pcase mask
-           (0 " ")
-           ((or 1 2 3) (if solid "|" ":"))
-           ((or 4 8 12) (if solid "-" "."))
-           (_ "+")))
-        ((and (not solid) (memq mask '(1 2 3))) "┆")
-        ((and (not solid) (memq mask '(4 8 12))) "┄")
-        (t (aref clutch-viz--junctions mask))))
-
-(defun clutch-viz--route (height edges lanes)
-  "Route EDGES across a gutter HEIGHT lines tall, edge I down lane I of LANES.
-A lane of 0 means a straight edge, which needs none.  Return a plist of
-the gutter's :width, the cells' direction :masks and whether each is
-:solid, the lines with :arrows, each edge's :cells and the number of
-:crossings, cells where one edge runs across another."
-  (let* ((width (+ (* 2 (apply #'max 0 lanes)) 5))
-         (masks (make-vector (* height width) 0))
-         (solid (make-vector (* height width) nil))
-         (arrows (make-vector height nil))
-         cells)
-    (cl-loop
-     for (from to dashed) in edges
-     for lane in lanes
-     do (let (own)
-          (cl-flet ((mark (line column bits)
-                      (let ((cell (+ (* line width) column)))
-                        (aset masks cell (logior (aref masks cell) bits))
-                        (unless dashed (aset solid cell t))
-                        (push (cons line column) own))))
-            ;; Lanes start after two columns, so a connector leaves its
-            ;; box before it turns, and stand a column apart, so that
-            ;; neighbouring connectors do not read as one.
-            (if (zerop lane)
-                (dotimes (column (1- width))
-                  (mark from column 12))
-              (let ((column (* 2 lane)))
-                (dotimes (left column)
-                  (mark from left 12))
-                (mark from column (if (> to from) 6 5))
-                (cl-loop for line from (1+ (min from to)) below (max from to)
-                         do (mark line column 3))
-                (mark to column (if (> to from) 9 10))
-                (cl-loop for right from (1+ column) below (1- width)
-                         do (mark to right 12))))
-            (aset arrows to t)
-            (push (cons to (1- width)) own))
-          (push (nreverse own) cells)))
-    (list :width width :masks masks :solid solid :arrows arrows
-          :cells (nreverse cells)
-          :crossings (cl-count 15 masks))))
-
-(defun clutch-viz-connectors (height edges &optional charset)
-  "Return the connectors of EDGES across a gutter HEIGHT lines tall.
-Each edge is (FROM TO DASHED): it leaves the gutter's left side at line
-FROM and ends at its right side at line TO in an arrow, drawn dashed when
-DASHED.  An edge between lines of the same number runs straight; each
-other edge turns down a lane of its own, in the order of lanes that
-crosses fewest edges.  Where edges cross or meet, the characters join.
-The result is (LINES . CELLS): LINES are the gutter's lines, all as
-wide, and CELLS lists, for each edge in order, its cells as (LINE .
-COLUMN).  CHARSET is as in `clutch-viz-tree'."
-  (let* ((charset (or charset (clutch-viz-charset '(?▶ ?╭))))
-         (bent (cl-loop for (from to) in edges
-                        for index from 0
-                        unless (= from to) collect (list index from (< to from))))
-         (by-from (sort (copy-sequence bent) (lambda (a b) (< (nth 1 a) (nth 1 b)))))
-         (up (cl-remove-if-not #'cl-third by-from))
-         (down (reverse (cl-remove-if #'cl-third by-from)))
-         (route
-          (car (sort
-                (mapcar (lambda (order)
-                          (clutch-viz--route
-                           height edges
-                           (cl-loop for index below (length edges)
-                                    collect (let ((lane (cl-position index order
-                                                                     :key #'car)))
-                                              (if lane (1+ lane) 0)))))
-                        (list (append up down) (append down up)
-                              by-from (reverse by-from)))
-                (lambda (a b) (< (plist-get a :crossings)
-                                 (plist-get b :crossings))))))
-         (width (plist-get route :width)))
-    (cons (cl-loop for line below height
-                   collect
-                   (concat
-                    (cl-loop for column below (1- width)
-                             for cell = (+ (* line width) column)
-                             concat (clutch-viz--junction
-                                     (aref (plist-get route :masks) cell)
-                                     (aref (plist-get route :solid) cell)
-                                     charset))
-                    (if (aref (plist-get route :arrows) line)
-                        (if (eq charset 'ascii) ">" "▶")
-                      " ")))
-          (plist-get route :cells))))
 
 (defun clutch-viz-tree (roots children label &optional charset)
   "Return the lines of a tree of ROOTS, depth first, as (TEXT . NODE).

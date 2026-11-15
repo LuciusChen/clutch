@@ -121,32 +121,23 @@ with TABLE.  Return the column lists offered first, in order."
         #'string<))
 
 (ert-deftest clutch-test-er-shows-key-columns-and-relations ()
-  "A key over two columns is one relation, and only key columns show
-until all columns are asked for."
+  "Each column shows the relations it ends beside it, a key over two
+adjacent columns as one bracket, and only key columns show until all
+columns are asked for."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (should (equal (clutch-test-er--text)
                    "
-+-----------------------+
-| orders                |
-+-----------------------+
-| *<  id           int  |
-|  >  customer_id  int  |
-|  >  region       text |
-|  >  country      text |
-| ... 1 more column     |
-+-----------------------+
-
-References  2
-  customer_id        ->  customers (id)
-  (region, country)  ->  regions (code, country)
-
-Referenced by  2
-  items (order_id)    ->  id
-  refunds (order_id)  ->  id
+ orders                                   5 columns
+ ──────────────────────────────────────────────────
+ ◆ id            int    ◂── items.order_id
+                        ◂── refunds.order_id
+ ● customer_id   int    ──▸ customers.id
+ ● region        text   ─┐
+ ● country       text   ─┴▸ regions (code, country)
+   … 1 more column
 "))
     (clutch-er-toggle-columns)
-    (should (string-match-p "^|     note         text |$"
-                            (clutch-test-er--text)))
+    (should (string-match-p "^   note +text$" (clutch-test-er--text)))
     (should-not (string-match-p "more column" (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-highlight-follows-point-without-redrawing ()
@@ -157,15 +148,11 @@ highlights its relations.  Neither changes the text."
       (clutch-test-er--goto "regions")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("(region, country)  ->  regions (code, country)"
-                       "|  >  country      text |"
-                       "|  >  region       text |")))
-      (clutch-test-er--goto "*<")
+                     '("● country       text   ─┴▸ regions (code, country)" "● region        text   ─┐")))
+      (clutch-test-er--goto "◆")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("items (order_id)    ->  id"
-                       "refunds (order_id)  ->  id"
-                       "| *<  id           int  |")))
+                     '("◂── refunds.order_id" "◆ id            int    ◂── items.order_id")))
       (goto-char (point-min))
       (run-hooks 'post-command-hook)
       (should-not (clutch-test-er--highlighted))
@@ -174,13 +161,12 @@ highlights its relations.  Neither changes the text."
 (ert-deftest clutch-test-er-follows-relations-and-returns ()
   "Following a relation centers its other table; back returns."
   (clutch-test-er--with-view (clutch-test-er--conn)
-    (clutch-test-er--goto "customers (id)")
+    (clutch-test-er--goto "customers.id")
     (clutch-er-follow)
-    (should (string-match-p "\\`\n\\+-+\\+\n| customers " (clutch-test-er--text)))
-    (should (string-match-p "^  orders (customer_id)  ->  id$"
-                            (clutch-test-er--text)))
+    (should (string-match-p "\\`\n customers " (clutch-test-er--text)))
+    (should (string-match-p "◂── orders.customer_id$" (clutch-test-er--text)))
     (clutch-er-back)
-    (should (string-match-p "\\`\n\\+-+\\+\n| orders " (clutch-test-er--text)))
+    (should (string-match-p "\\`\n orders " (clutch-test-er--text)))
     (should-error (clutch-er-back) :type 'user-error)))
 
 (ert-deftest clutch-test-er-refuses-what-it-cannot-show ()
@@ -197,8 +183,8 @@ not a table are refused before a view opens."
     (should-not (cl-set-difference (buffer-list) buffers))))
 
 (ert-deftest clutch-test-er-relations-by-hand-are-added-changed-and-deleted ()
-  "A relation added by hand is stored in its file and shown with a dashed
-arrow; it can change and go, and it cannot repeat a stored relation or a
+  "A relation added by hand is stored in its file and shown with a dotted
+link; it can change and go, and it cannot repeat a stored relation or a
 key of the database."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (clutch-er-toggle-columns)
@@ -219,11 +205,9 @@ key of the database."
   ]
 }
 "))
-    (should (string-match-p "^  note +~>  customers (name)$"
+    (should (string-match-p "^ ○ note +text +┄┄▸ customers.name  manual$"
                             (clutch-test-er--text)))
-    (should (string-match-p "^| \\*<  id  " (clutch-test-er--text)))
-    (should (string-match-p "^|  >  note  " (clutch-test-er--text)))
-    (clutch-test-er--goto "customers (name)")
+    (clutch-test-er--goto "customers.name")
     (should (equal (clutch-test-er--answering '(("note") ("id")) "customers"
                      (clutch-er-edit-relation))
                    '("note" "name")))
@@ -237,16 +221,14 @@ key of the database."
                       "regions"
                     (clutch-er-add-relation))
                   :type 'user-error)
-    (clutch-test-er--goto "customers (id)")
+    (clutch-test-er--goto "customers.id")
     (should-error (clutch-er-delete-relation) :type 'user-error)
-    (clutch-test-er--goto "note  ")
-    (forward-line 0)
-    (search-forward "~>")
+    (clutch-test-er--goto "customers.id  manual")
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t)))
       (clutch-er-delete-relation))
     (should (equal (clutch-test-er--file-text)
                    "{\n  \"version\": 1,\n  \"relations\": []\n}\n"))
-    (should-not (string-match-p "~>" (clutch-test-er--text)))))
+    (should-not (string-match-p "manual" (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-relations-by-hand-show-at-both-ends ()
   "A stored relation shows from either table, and one that repeats a key
@@ -261,16 +243,14 @@ connection's current one."
  {\"from\": {\"table\": \"orders\"}, \"to\": {\"table\": \"customers\"},
   \"columns\": [[\"note\", \"name\"]]}]}"))
     (clutch-er-refresh)
-    (should (string-match-p "^  customer_id  +->  customers (id)$"
+    (should (string-match-p "^ ● customer_id +int +──▸ customers.id$"
                             (clutch-test-er--text)))
-    (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers (id)" line))
+    (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
-    (clutch-test-er--goto "customers (name)")
+    (clutch-test-er--goto "customers.name")
     (clutch-er-follow)
-    (should (string-match-p "^  orders (customer_id)  ->  id$"
-                            (clutch-test-er--text)))
-    (should (string-match-p "^  orders (note)  +~>  name$"
-                            (clutch-test-er--text)))))
+    (should (string-match-p "◂── orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p "◂┄┄ orders.note  manual$" (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-refuses-a-relations-file-it-cannot-read ()
   "A file that is not JSON, or is of another version, is reported by name
@@ -332,64 +312,18 @@ not the name the result shows it under."
                                   (clutch-test-er--file-text))))
       (delete-directory clutch-er-relations-directory t))))
 
-(ert-deftest clutch-test-er-wide-window-draws-three-columns ()
-  "A window wide enough shows referencing tables left and referenced
-tables right, joined to the table by connectors that belong to their
-relations; the lists stay below.  A narrower window draws the list
-again, and a width that keeps the layout draws nothing."
-  (let ((width 120))
-    (cl-letf (((symbol-function 'clutch-er--window-width) (lambda () width)))
-      (clutch-test-er--with-view (clutch-test-er--conn)
-        (should (string-prefix-p
-                 "
-                    +-----------------------+       
-                    | orders                |       
-+- items ---+       +-----------------------+       
-| order_id  |--+--->| *<  id           int  |       +- customers -+
-+-----------+  |    |  >  customer_id  int  |------>| id          |
-               |    |  >  region       text |--+    +-------------+
-+- refunds -+  |    |  >  country      text |  |    
-| order_id  |--+    | ... 1 more column     |  |    +- regions ---+
-+-----------+       +-----------------------+  +--->| code        |
-                                                    | country     |
-                                                    +-------------+
-
-References  2
-"
-                 (clutch-test-er--text)))
-        (clutch-test-er--goto "region       text")
-        (search-forward "--+")
-        (backward-char)
-        (run-hooks 'post-command-hook)
-        (let ((highlighted (clutch-test-er--highlighted)))
-          (should (member "(region, country)  ->  regions (code, country)"
-                          highlighted))
-          (should (member "| code        |" highlighted))
-          (should-not (member "customer_id        ->  customers (id)"
-                              highlighted)))
-        (setq width 40)
-        (clutch-er--relayout (progn (set-window-buffer (selected-window)
-                                                       (current-buffer))
-                                    (selected-window)))
-        (should (string-prefix-p "\n+-" (clutch-test-er--text)))
-        (should (string-match-p "^| orders  +|$" (clutch-test-er--text)))
-        (let ((tick (buffer-chars-modified-tick)))
-          (clutch-er--relayout (selected-window))
-          (should (= tick (buffer-chars-modified-tick))))))))
-
-(ert-deftest clutch-test-er-draws-box-characters-only-where-asked ()
-  "The view draws with ASCII unless asked for box characters, and `auto'
-asks for them only where they are one column wide."
-  (let ((clutch-er-charset 'unicode))
+(ert-deftest clutch-test-er-falls-back-to-ascii ()
+  "Where its symbols are two columns wide, or when asked to, the view
+draws with ASCII."
+  (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (clutch-test-er--with-view (clutch-test-er--conn)
-      (should (string-prefix-p "\n╭─" (clutch-test-er--text)))
-      (should (string-match-p "^│ ◆←  id  " (clutch-test-er--text)))
-      (should (string-match-p "^  customer_id  +→  customers (id)$"
+      (should (string-match-p "^ \\* id +int +<-- items.order_id$"
+                              (clutch-test-er--text)))
+      (should (string-match-p "^ o country +text +-\\+> regions (code, country)$"
                               (clutch-test-er--text)))))
-  (let ((clutch-er-charset 'auto))
-    (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
-      (clutch-test-er--with-view (clutch-test-er--conn)
-        (should (string-prefix-p "\n+-" (clutch-test-er--text)))))))
+  (let ((clutch-er-charset 'ascii))
+    (clutch-test-er--with-view (clutch-test-er--conn)
+      (should (string-match-p "--> customers.id$" (clutch-test-er--text))))))
 
 (provide 'clutch-test-er)
 

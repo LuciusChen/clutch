@@ -42,62 +42,19 @@ and stop at the top of the scale."
   (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (should (eq (clutch-viz-charset) 'ascii))))
 
-(ert-deftest clutch-test-viz-box-and-columns-align-by-display-width ()
-  "Columns and box edges line up by display width, CJK names included."
-  (let* ((rows (clutch-viz-columns '(("◆" "id" "int")
-                                     (" " "金额" "numeric"))
-                                   2))
-         (box (clutch-viz-box "账单" rows 'unicode)))
+(ert-deftest clutch-test-viz-columns-align-by-display-width ()
+  "Columns line up by display width, CJK names included, and padding
+carries the column it aligns to."
+  (let ((rows (clutch-viz-columns '(("◆" "id" "int")
+                                    (" " "金额" "numeric"))
+                                  2)))
     (should (equal (mapcar #'substring-no-properties rows)
                    '("◆  id    int" "   金额  numeric")))
-    (should (equal (mapcar #'substring-no-properties box)
-                   '("╭──────────────────╮"
-                     "│ 账单             │"
-                     "├──────────────────┤"
-                     "│ ◆  id    int     │"
-                     "│    金额  numeric │"
-                     "╰──────────────────╯")))
-    (should (= 1 (length (delete-dups (mapcar #'string-width box)))))
+    (should (equal (get-text-property 1 'display (car rows))
+                   '(space :align-to 5)))
     (should (equal (mapcar #'substring-no-properties
-                           (clutch-viz-box "t" '("ab") 'ascii))
-                   '("+----+" "| t  |" "+----+" "| ab |" "+----+")))))
-
-(ert-deftest clutch-test-viz-columns-keep-padding-only-from-column-zero ()
-  "Padding aligns to columns counted from 0, so a cell placed further
-right keeps its spaces but not the alignment it was padded with."
-  (let* ((inner (clutch-viz-box "t" (clutch-viz-columns '(("a" "b") ("cc" "d")) 2)
-                                'ascii))
-         (row (car (clutch-viz-columns (list (list "x" (nth 3 inner))) 0 0)))
-         (aligned (lambda (string)
-                    (cl-loop for index below (length string)
-                             thereis (get-text-property index 'display string)))))
-    (should (funcall aligned (nth 3 inner)))
-    (should (equal (substring-no-properties row) "x| a   b |"))
-    (should-not (funcall aligned (substring row 1)))))
-
-(ert-deftest clutch-test-viz-connectors-join-where-edges-meet ()
-  "Each edge that turns runs down a lane of its own, in the order that
-crosses fewest edges, and ends in an arrow; edges that meet join their
-characters, a dashed edge stays dashed where it runs alone, and every
-cell an edge passes is reported for it."
-  (should (equal (clutch-viz-connectors 4 '((0 2 nil) (3 2 t)) 'unicode)
-                 '(("────╮    " "    │    " "  ╭┄┴───▶" "┄┄╯      ")
-                   ((0 . 0) (0 . 1) (0 . 2) (0 . 3) (0 . 4) (1 . 4)
-                    (2 . 4) (2 . 5) (2 . 6) (2 . 7) (2 . 8))
-                   ((3 . 0) (3 . 1) (3 . 2) (2 . 2) (2 . 3) (2 . 4)
-                    (2 . 5) (2 . 6) (2 . 7) (2 . 8)))))
-  ;; Edges that keep their order cross nothing, and a level one is straight.
-  (should-not (cl-some (lambda (line) (string-match-p "┼" line))
-                       (car (clutch-viz-connectors
-                             6 '((0 3 nil) (1 4 nil) (5 5 nil)) 'unicode))))
-  (should (equal (nth 5 (car (clutch-viz-connectors
-                              6 '((0 3 nil) (1 4 nil) (5 5 nil)) 'unicode)))
-                 "────────▶"))
-  (should (equal (car (clutch-viz-connectors 3 '((0 2 nil)) 'ascii))
-                 '("--+    " "  |    " "  +--->")))
-  ;; In ASCII a dashed edge is dotted, so it is told from a solid one.
-  (should (equal (car (clutch-viz-connectors 1 '((0 0 t)) 'ascii))
-                 '("....>"))))
+                           (clutch-viz-columns '(("a" "b") ("ccc" "d")) 0 3))
+                   '("a     b" "ccc   d")))))
 
 (ert-deftest clutch-test-viz-bar-chart-aligns-columns ()
   "Labels, bars and values line up by display width, including CJK labels."
