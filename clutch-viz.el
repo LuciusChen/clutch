@@ -111,12 +111,12 @@ CHARSET defaults to `clutch-viz-charset'."
        (when header
          (concat "\n" rule))))))
 
-(defun clutch-viz-columns (rows &optional indent)
+(defun clutch-viz-columns (rows &optional indent gap)
   "Return ROWS aligned in columns, one string for each row.
 A row is a list of cells, which are strings.  Each column is as wide as
-its widest cell, and two spaces separate columns; the last cell of a row
-is not padded.  Rows start at column INDENT, 0 by default, from which
-the padding's `:align-to' counts."
+its widest cell, and GAP spaces, 2 by default, separate columns; the
+last cell of a row is not padded.  Rows start at column INDENT, 0 by
+default, from which the padding's `:align-to' counts."
   (let* ((widths (cl-loop for index below (apply #'max 0 (mapcar #'length rows))
                           collect (apply #'max 0
                                          (mapcar (lambda (row)
@@ -132,22 +132,25 @@ the padding's `:align-to' counts."
                         (width (pop widths)))
                     (push cell parts)
                     (when row
-                      (setq column (+ column width 2))
-                      (push (clutch-viz--pad cell (+ width 2) column) parts))))
+                      (setq column (+ column width (or gap 2)))
+                      (when (< (string-width cell) (+ width (or gap 2)))
+                        (push (clutch-viz--pad cell (+ width (or gap 2)) column)
+                              parts)))))
                 (apply #'concat (nreverse parts))))
             rows)))
 
-(defun clutch-viz-box (title lines &optional charset)
+(defun clutch-viz-box (title lines &optional charset width)
   "Return LINES framed by a box with TITLE in its top edge.
 The result is a list of strings: the top edge, a string for each of
 LINES, and the bottom edge.  The box is drawn from column 0, from which
-the padding's `:align-to' counts.  It uses box characters, or ASCII when
-CHARSET is `ascii'; CHARSET defaults to `clutch-viz-charset'."
+the padding's `:align-to' counts, and is at least WIDTH columns wide
+inside.  It uses box characters, or ASCII when CHARSET is `ascii';
+CHARSET defaults to `clutch-viz-charset'."
   (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down)
                 (if (eq (or charset (clutch-viz-charset)) 'ascii)
                     '("+" "+" "+" "+" ?- "|")
                   '("┌" "┐" "└" "┘" ?─ "│")))
-               (inner (apply #'max (string-width title)
+               (inner (apply #'max (or width 0) (string-width title)
                              (mapcar #'string-width lines))))
     (cl-flet ((edge (&rest parts)
                 (propertize (apply #'concat parts) 'face 'shadow)))
@@ -165,6 +168,69 @@ CHARSET is `ascii'; CHARSET defaults to `clutch-viz-charset'."
                lines)
        (list (edge bottom-left (make-string (+ inner 2) across)
                    bottom-right))))))
+
+(defconst clutch-viz--junctions
+  ;; Indexed by the directions a cell joins: up 1, down 2, left 4, right 8.
+  [" " "│" "│" "│" "─" "┘" "┐" "┤" "─" "└" "┌" "├" "─" "┴" "┬" "┼"]
+  "Box characters joining the directions of a connector cell.")
+
+(defun clutch-viz--junction (mask solid charset)
+  "Return the character of a connector cell joining the directions of MASK.
+A straight cell is dashed unless SOLID; ASCII when CHARSET is `ascii'."
+  (cond ((eq charset 'ascii)
+         (pcase mask (0 " ") ((or 1 2 3) "|") ((or 4 8 12) "-") (_ "+")))
+        ((and (not solid) (memq mask '(1 2 3))) "┆")
+        ((and (not solid) (memq mask '(4 8 12))) "┄")
+        (t (aref clutch-viz--junctions mask))))
+
+(defun clutch-viz-connectors (height edges &optional charset)
+  "Return the connectors of EDGES across a gutter HEIGHT lines tall.
+Each edge is (FROM TO DASHED): it leaves the gutter's left side at line
+FROM and ends at its right side at line TO in an arrow, drawn dashed when
+DASHED.  Each edge runs down a lane of its own, the first edge nearest
+the left side; where edges cross or meet, the characters join.  The
+result is (LINES . CELLS): LINES are the gutter's lines, all as wide,
+and CELLS lists, for each edge in order, its cells as (LINE . COLUMN).
+CHARSET is as in `clutch-viz-tree'."
+  (let* ((charset (or charset (clutch-viz-charset '(?▶))))
+         (width (+ (length edges) 3))
+         (masks (make-vector (* height width) 0))
+         (solid (make-vector (* height width) nil))
+         (arrows (make-vector height nil))
+         (lane 0)
+         cells)
+    (pcase-dolist (`(,from ,to ,dashed) edges)
+      (let (own)
+        (cl-flet ((mark (line column bits)
+                    (let ((cell (+ (* line width) column)))
+                      (aset masks cell (logior (aref masks cell) bits))
+                      (unless dashed (aset solid cell t))
+                      (push (cons line column) own))))
+          (cl-incf lane)
+          (dotimes (column lane)
+            (mark from column 12))
+          (cond ((= from to) (mark from lane 12))
+                (t (mark from lane (if (> to from) 6 5))
+                   (cl-loop for line from (1+ (min from to)) below (max from to)
+                            do (mark line lane 3))
+                   (mark to lane (if (> to from) 9 10))))
+          (cl-loop for column from (1+ lane) below (1- width)
+                   do (mark to column 12))
+          (aset arrows to t)
+          (push (cons to (1- width)) own))
+        (push (nreverse own) cells)))
+    (cons (cl-loop for line below height
+                   collect
+                   (concat
+                    (cl-loop for column below (1- width)
+                             for cell = (+ (* line width) column)
+                             concat (clutch-viz--junction (aref masks cell)
+                                                          (aref solid cell)
+                                                          charset))
+                    (if (aref arrows line)
+                        (if (eq charset 'ascii) ">" "▶")
+                      " ")))
+          (nreverse cells))))
 
 (defun clutch-viz-tree (roots children label &optional charset)
   "Return the lines of a tree of ROOTS, depth first, as (TEXT . NODE).

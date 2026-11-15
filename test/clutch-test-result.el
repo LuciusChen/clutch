@@ -1995,8 +1995,10 @@ SQLite finds main.parents first for the bare name, with a row of the same key."
                     (buffer-local-value 'clutch--last-result-buffer source))))
           (ert-run-idle-timers)
           (with-current-buffer result-buf
-            (clutch-record--follow-fk
-             (cdr (assq 1 clutch--fk-info)) 1 result-buf)
+            (let ((clutch-er-relations-directory
+                   (make-temp-name (expand-file-name "clutch-er-none-"
+                                                     temporary-file-directory))))
+              (clutch-record--follow-column result-buf 1 0))
             (clutch-test--await-queries)
             (should (equal clutch--last-query
                            "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
@@ -2008,6 +2010,57 @@ SQLite finds main.parents first for the bare name, with a row of the same key."
       (when (buffer-live-p result-buf)
         (kill-buffer result-buf))
       (clutch-db-disconnect conn))))
+
+(ert-deftest clutch-test-sqlite-record-follows-whole-keys-and-stored-relations ()
+  "Following a key over two columns names both, so it finds one row.  A
+relation added by hand starts at the same field, offered after the key."
+  (require 'clutch-db-sqlite)
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (clutch-er-relations-directory (make-temp-file "clutch-er-" t))
+        result-buf)
+    (cl-flet ((show-shops ()
+                (with-temp-buffer
+                  (clutch-mode)
+                  (setq-local clutch-connection conn)
+                  (let ((source (current-buffer)))
+                    (clutch-test--execute-and-present "SELECT * FROM shops" conn)
+                    (setq result-buf
+                          (buffer-local-value 'clutch--last-result-buffer
+                                              source))))
+                (ert-run-idle-timers)))
+      (unwind-protect
+          (progn
+            (dolist (sql '("CREATE TABLE regions (code TEXT, country TEXT, name TEXT, PRIMARY KEY (code, country))"
+                           "INSERT INTO regions VALUES ('n', 'a', 'north a'), ('n', 'b', 'north b')"
+                           "CREATE TABLE notes (code TEXT PRIMARY KEY, body TEXT)"
+                           "INSERT INTO notes VALUES ('n', 'note n')"
+                           "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, FOREIGN KEY (code, country) REFERENCES regions)"
+                           "INSERT INTO shops VALUES (1, 'n', 'b')"))
+              (clutch-db-query conn sql))
+            (clutch-er--write-relations
+             (clutch-er--relations-file conn nil)
+             '(((from . ((table . "shops"))) (to . ((table . "notes")))
+                (columns . [["code" "code"]]))))
+            (show-shops)
+            (with-current-buffer result-buf
+              (clutch-record--follow-column result-buf 1 0)
+              (clutch-test--await-queries)
+              (should (equal clutch--last-query
+                             "SELECT * FROM \"regions\" WHERE \"code\" = 'n' AND \"country\" = 'b'"))
+              (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
+                                     clutch--result-rows)
+                             '(("n" "b" "north b")))))
+            (show-shops)
+            (with-current-buffer result-buf
+              (clutch-test--with-minibuffer-answers '("notes (code) from code")
+                (clutch-record--follow-column result-buf 1 0 t))
+              (clutch-test--await-queries)
+              (should (equal clutch--last-query
+                             "SELECT * FROM \"notes\" WHERE \"code\" = 'n'"))))
+        (when (buffer-live-p result-buf)
+          (kill-buffer result-buf))
+        (delete-directory clutch-er-relations-directory t)
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-copy-csv-separates-fields-with-the-delimiter ()
   "CSV copy separates fields with `clutch-csv-delimiter' and quotes it."

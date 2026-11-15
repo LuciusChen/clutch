@@ -2657,9 +2657,9 @@ Point left behind made the next cell command scroll back to it."
                   (render-count 0))
               (cl-letf (((symbol-function 'clutch-record--render)
                          (lambda () (cl-incf render-count)))
-                        ((symbol-function 'clutch-record--follow-fk)
-                         (lambda (fk value source)
-                           (setq followed (list fk value source)))))
+                        ((symbol-function 'clutch-record--follow-column)
+                         (lambda (source cidx ridx)
+                           (setq followed (list source cidx ridx)))))
                 (clutch-record-toggle-expand)
                 (should (equal clutch-record--expanded-fields '(0)))
                 (clutch-record-toggle-expand)
@@ -2670,9 +2670,7 @@ Point left behind made the next cell command scroll back to it."
                               '((0 . (:ref-table "users"
                                       :ref-column "id")))))
                 (clutch-record-toggle-expand)
-                (should (equal followed
-                               (list '(:ref-table "users" :ref-column "id")
-                                     (make-string 100 ?x) result-buf)))))))
+                (should (equal followed (list result-buf 0 0)))))))
       (kill-buffer result-buf))))
 
 ;;;; Rendering — header-line and footer

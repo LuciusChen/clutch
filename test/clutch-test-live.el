@@ -3084,9 +3084,12 @@ whose first schema, public, has a parent table of the same name."
                       (with-current-buffer result-name
                         (clutch-test--await (lambda () (assq 1 clutch--fk-info)))
                         (cl-letf (((symbol-function 'clutch--execute)
-                                   (lambda (sql &rest _) (setq followed sql))))
-                          (clutch-record--follow-fk
-                           (cdr (assq 1 clutch--fk-info)) 1 (current-buffer)))))
+                                   (lambda (sql &rest _) (setq followed sql)))
+                                  (clutch-er-relations-directory
+                                   (make-temp-name
+                                    (expand-file-name "clutch-er-none-"
+                                                      temporary-file-directory))))
+                          (clutch-record--follow-column (current-buffer) 1 0))))
                     (clutch-db-result-rows (clutch-db-query conn followed)))))
         (unwind-protect
             (progn

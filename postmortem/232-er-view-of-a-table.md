@@ -1,6 +1,6 @@
 # ER view of a table
 
-`clutch-er-diagram`, `r` in the object actions, shows one hop of relations around a table: its key columns in a box, the tables its foreign keys reference and the tables whose foreign keys reference it, one line for each key. Relations the database does not declare can be added by hand; a wide layout is deferred, as listed at the end.
+`clutch-er-diagram`, `r` in the object actions, shows one hop of relations around a table: its key columns in a box, the tables its foreign keys reference and the tables whose foreign keys reference it, one line for each key. Relations the database does not declare can be added by hand, a wide window draws three connected columns, and the record view follows the same relations.
 
 ## Keys stay in one contract
 
@@ -28,9 +28,15 @@ The file belongs to a connection: `:relations-file` names it, for a file shared 
 
 A result starts a relation at the source column of the column at point, through `clutch-result--writable-source-column`, so an alias names its column and a computed column is refused; it first checks that the result has a connection and that the session still resolves names as the result's query did.
 
+## Wide layout
+
+A window wide enough draws the referencing tables on the left and the referenced tables on the right, so every arrow points the same way, from the table that holds a key to the table it references. A general graph layout was not attempted: one hop has a fixed shape, and a deterministic three-column layout is all it needs. Each relation gets a lane of its own in its gutter, and each gutter cell records the directions it connects as four bits; the character is looked up from them, so crossings and merges need no special case, and `clutch-viz-connectors` stays a pure function of line numbers. A connector joins only the first pair of a composite relation; highlighting its relation shows the rest. Boxes in a column share one width, so every connector starts at a box edge. The lists stay under the boxes in both layouts, so the commands that act on a relation work on the same lines, and the connectors carry the relation ids for highlighting only. The view is drawn after its window is shown, and a change of width redraws it only when the layout it needs changes. Spans to highlight are read back from the `clutch-er-ids` property after drawing, so both layouts share them.
+
+## Following relations from a record
+
+Follow FK names every column of a key, from the row's values in the result, so a composite key opens the one row the record references; a column of the key that the result does not show, or a NULL in it, is refused rather than dropped from the condition. It uses the values the database holds, not staged edits. `RET` takes the first relation through the field, and `r` chooses among the foreign keys and the relations added by hand, which come from `clutch-er-outgoing-relations`, the grouping and deduplication the ER view uses. Without key identity, as over JDBC, each column is a relation of its own rather than being joined to a neighbouring column that references the same table.
+
 ## Deferred
 
-- A wide three-column layout with drawn connectors.
 - JDBC: the agent's foreign-key operations must report key identity and the keys that reference a table.
-- Follow FK in the record view still builds a one-column condition for a composite key, and does not follow relations added by hand.
 - `clutch-db-primary-key-columns` on SQLite lists primary-key columns in table order rather than key order; the view's implicit-reference lookup sorts by key position itself.

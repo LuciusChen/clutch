@@ -60,6 +60,17 @@ and stop at the top of the scale."
                            (clutch-viz-box "t" '("ab") 'ascii))
                    '("+ t -+" "| ab |" "+----+")))))
 
+(ert-deftest clutch-test-viz-connectors-join-where-edges-meet ()
+  "Each edge runs down a lane of its own and ends in an arrow; edges that
+meet join their characters, a dashed edge stays dashed where it runs
+alone, and every cell an edge passes is reported for it."
+  (should (equal (clutch-viz-connectors 4 '((0 2 nil) (3 2 t)) 'unicode)
+                 '(("─┐   " " │   " " └┬─▶" "┄┄┘  ")
+                   ((0 . 0) (0 . 1) (1 . 1) (2 . 1) (2 . 2) (2 . 3) (2 . 4))
+                   ((3 . 0) (3 . 1) (3 . 2) (2 . 2) (2 . 3) (2 . 4)))))
+  (should (equal (car (clutch-viz-connectors 3 '((0 2 nil)) 'ascii))
+                 '("-+  " " |  " " +->"))))
+
 (ert-deftest clutch-test-viz-bar-chart-aligns-columns ()
   "Labels, bars and values line up by display width, including CJK labels."
   (let* ((chart (clutch-viz-bar-chart '(("北京" 40 "40")

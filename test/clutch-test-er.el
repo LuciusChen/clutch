@@ -330,6 +330,47 @@ not the name the result shows it under."
                                   (clutch-test-er--file-text))))
       (delete-directory clutch-er-relations-directory t))))
 
+(ert-deftest clutch-test-er-wide-window-draws-three-columns ()
+  "A window wide enough shows referencing tables left and referenced
+tables right, joined to the table by connectors that belong to their
+relations; the lists stay below.  A narrower window draws the list
+again, and a width that keeps the layout draws nothing."
+  (let ((width 120))
+    (cl-letf (((symbol-function 'clutch-er--window-width) (lambda () width)))
+      (clutch-test-er--with-view (clutch-test-er--conn)
+        (should (string-prefix-p
+                 "\
+┌ items ───┐     ┌ orders ───────────────┐     ┌ customers ┐
+│ order_id │──┬─▶│ ◆←  id           int  │ ┌──▶│ id        │
+└──────────┘  │  │  →  customer_id  int  │─┘   └───────────┘
+              │  │  →  region       text │──┐  
+┌ refunds ─┐  │  │  →  country      text │  │  ┌ regions ──┐
+│ order_id │──┘  │ … 1 more column       │  └─▶│ code      │
+└──────────┘     └───────────────────────┘     │ country   │
+                                               └───────────┘
+
+References (2)
+"
+                 (clutch-test-er--text)))
+        (clutch-test-er--goto "region       text")
+        (search-forward "──┐")
+        (backward-char)
+        (run-hooks 'post-command-hook)
+        (let ((highlighted (clutch-test-er--highlighted)))
+          (should (member "(region, country)  →  regions (code, country)"
+                          highlighted))
+          (should (member "│ code      │" highlighted))
+          (should-not (member "customer_id        →  customers (id)"
+                              highlighted)))
+        (setq width 40)
+        (clutch-er--relayout (progn (set-window-buffer (selected-window)
+                                                       (current-buffer))
+                                    (selected-window)))
+        (should (string-prefix-p "┌ orders ─" (clutch-test-er--text)))
+        (let ((tick (buffer-chars-modified-tick)))
+          (clutch-er--relayout (selected-window))
+          (should (= tick (buffer-chars-modified-tick))))))))
+
 (ert-deftest clutch-test-er-falls-back-to-ascii ()
   "Where its glyphs are two columns wide, or when asked to, the view
 draws with ASCII."
