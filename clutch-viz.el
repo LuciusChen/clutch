@@ -147,23 +147,29 @@ right loses its `display' properties and keeps its spaces."
                 (apply #'concat (nreverse parts))))
             rows)))
 
-(defconst clutch-viz-box-head 3
-  "Lines a box from `clutch-viz-box' draws before its first line.")
+(defun clutch-viz-box-head (&optional tab)
+  "Return the lines `clutch-viz-box' draws before its first line.
+TAB is as in `clutch-viz-box'."
+  (if tab 1 3))
 
-(defun clutch-viz-box (title lines &optional charset width)
-  "Return LINES as the body of a card headed by TITLE.
-The result is a list of strings: the top edge, TITLE, a rule, a string
-for each of LINES, and the bottom edge, so LINES start after
-`clutch-viz-box-head' strings.  The card is drawn from column 0, from
+(defun clutch-viz-box (title lines &optional charset width tab)
+  "Return LINES framed by a box headed by TITLE.
+The result is a list of strings: the top edge, TITLE and a rule, a
+string for each of LINES, and the bottom edge.  With TAB, TITLE sits in
+the top edge instead, for a lighter box.  LINES start after
+`clutch-viz-box-head' strings.  The box is drawn from column 0, from
 which the padding's `:align-to' counts, and is at least WIDTH columns
-wide inside.  It uses rounded box characters, or ASCII when CHARSET is
-`ascii'; CHARSET defaults to `clutch-viz-charset'."
+wide inside.  It uses ASCII when CHARSET is `ascii', else rounded box
+characters; CHARSET defaults to `clutch-viz-charset'."
   (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down
                             ,rule-left ,rule-right)
                 (if (eq (or charset (clutch-viz-charset '(?╭))) 'ascii)
                     '("+" "+" "+" "+" ?- "|" "+" "+")
                   '("╭" "╮" "╰" "╯" ?─ "│" "├" "┤")))
-               (inner (apply #'max (or width 0) (string-width title)
+               ;; A title in the top edge needs room for a rule on either
+               ;; side of it.
+               (inner (apply #'max (or width 0)
+                             (+ (string-width title) (if tab 2 0))
                              (mapcar #'string-width lines))))
     (cl-flet ((edge (&rest parts)
                 (propertize (apply #'concat parts) 'face 'shadow))
@@ -173,9 +179,15 @@ wide inside.  It uses rounded box characters, or ASCII when CHARSET is
                         (clutch-viz--pad line (1+ inner) (+ inner 3))
                         (propertize down 'face 'shadow))))
       (append
-       (list (edge top-left (make-string (+ inner 2) across) top-right)
-             (row title)
-             (edge rule-left (make-string (+ inner 2) across) rule-right))
+       (if tab
+           (list (concat (edge top-left (string across) " ")
+                         title
+                         (edge " " (make-string (- inner (string-width title) 1)
+                                                across)
+                               top-right)))
+         (list (edge top-left (make-string (+ inner 2) across) top-right)
+               (row title)
+               (edge rule-left (make-string (+ inner 2) across) rule-right)))
        (mapcar #'row lines)
        (list (edge bottom-left (make-string (+ inner 2) across)
                    bottom-right))))))
@@ -189,7 +201,11 @@ wide inside.  It uses rounded box characters, or ASCII when CHARSET is
   "Return the character of a connector cell joining the directions of MASK.
 A straight cell is dashed unless SOLID; ASCII when CHARSET is `ascii'."
   (cond ((eq charset 'ascii)
-         (pcase mask (0 " ") ((or 1 2 3) "|") ((or 4 8 12) "-") (_ "+")))
+         (pcase mask
+           (0 " ")
+           ((or 1 2 3) (if solid "|" ":"))
+           ((or 4 8 12) (if solid "-" "."))
+           (_ "+")))
         ((and (not solid) (memq mask '(1 2 3))) "┆")
         ((and (not solid) (memq mask '(4 8 12))) "┄")
         (t (aref clutch-viz--junctions mask))))
@@ -200,7 +216,7 @@ A lane of 0 means a straight edge, which needs none.  Return a plist of
 the gutter's :width, the cells' direction :masks and whether each is
 :solid, the lines with :arrows, each edge's :cells and the number of
 :crossings, cells where one edge runs across another."
-  (let* ((width (+ (apply #'max 0 lanes) 3))
+  (let* ((width (+ (* 2 (apply #'max 0 lanes)) 5))
          (masks (make-vector (* height width) 0))
          (solid (make-vector (* height width) nil))
          (arrows (make-vector height nil))
@@ -214,17 +230,21 @@ the gutter's :width, the cells' direction :masks and whether each is
                         (aset masks cell (logior (aref masks cell) bits))
                         (unless dashed (aset solid cell t))
                         (push (cons line column) own))))
+            ;; Lanes start after two columns, so a connector leaves its
+            ;; box before it turns, and stand a column apart, so that
+            ;; neighbouring connectors do not read as one.
             (if (zerop lane)
                 (dotimes (column (1- width))
                   (mark from column 12))
-              (dotimes (column lane)
-                (mark from column 12))
-              (mark from lane (if (> to from) 6 5))
-              (cl-loop for line from (1+ (min from to)) below (max from to)
-                       do (mark line lane 3))
-              (mark to lane (if (> to from) 9 10))
-              (cl-loop for column from (1+ lane) below (1- width)
-                       do (mark to column 12)))
+              (let ((column (* 2 lane)))
+                (dotimes (left column)
+                  (mark from left 12))
+                (mark from column (if (> to from) 6 5))
+                (cl-loop for line from (1+ (min from to)) below (max from to)
+                         do (mark line column 3))
+                (mark to column (if (> to from) 9 10))
+                (cl-loop for right from (1+ column) below (1- width)
+                         do (mark to right 12))))
             (aset arrows to t)
             (push (cons to (1- width)) own))
           (push (nreverse own) cells)))

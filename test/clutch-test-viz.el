@@ -81,18 +81,23 @@ crosses fewest edges, and ends in an arrow; edges that meet join their
 characters, a dashed edge stays dashed where it runs alone, and every
 cell an edge passes is reported for it."
   (should (equal (clutch-viz-connectors 4 '((0 2 nil) (3 2 t)) 'unicode)
-                 '(("──╮  " "  │  " " ╭┴─▶" "┄╯   ")
-                   ((0 . 0) (0 . 1) (0 . 2) (1 . 2) (2 . 2) (2 . 3) (2 . 4))
-                   ((3 . 0) (3 . 1) (2 . 1) (2 . 2) (2 . 3) (2 . 4)))))
+                 '(("────╮    " "    │    " "  ╭┄┴───▶" "┄┄╯      ")
+                   ((0 . 0) (0 . 1) (0 . 2) (0 . 3) (0 . 4) (1 . 4)
+                    (2 . 4) (2 . 5) (2 . 6) (2 . 7) (2 . 8))
+                   ((3 . 0) (3 . 1) (3 . 2) (2 . 2) (2 . 3) (2 . 4)
+                    (2 . 5) (2 . 6) (2 . 7) (2 . 8)))))
   ;; Edges that keep their order cross nothing, and a level one is straight.
   (should-not (cl-some (lambda (line) (string-match-p "┼" line))
                        (car (clutch-viz-connectors
                              6 '((0 3 nil) (1 4 nil) (5 5 nil)) 'unicode))))
   (should (equal (nth 5 (car (clutch-viz-connectors
                               6 '((0 3 nil) (1 4 nil) (5 5 nil)) 'unicode)))
-                 "────▶"))
+                 "────────▶"))
   (should (equal (car (clutch-viz-connectors 3 '((0 2 nil)) 'ascii))
-                 '("-+  " " |  " " +->"))))
+                 '("--+    " "  |    " "  +--->")))
+  ;; In ASCII a dashed edge is dotted, so it is told from a solid one.
+  (should (equal (car (clutch-viz-connectors 1 '((0 0 t)) 'ascii))
+                 '("....>"))))
 
 (ert-deftest clutch-test-viz-bar-chart-aligns-columns ()
   "Labels, bars and values line up by display width, including CJK labels."

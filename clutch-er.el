@@ -22,12 +22,13 @@
 (require 'clutch-object)
 (require 'clutch-viz)
 
-(defcustom clutch-er-charset 'auto
+(defcustom clutch-er-charset 'ascii
   "Characters the ER view draws with.
-`auto' draws with box characters where they are one column wide and
-with ASCII where they are not, as in CJK language environments that
-make ambiguous characters wide.  `unicode' and `ascii' force one set,
-for a terminal whose widths differ from those Emacs assumes."
+`ascii', the default, draws with characters every font and terminal
+gives one column, so the view aligns everywhere.  `unicode' draws with
+box characters, and `auto' with box characters where they are one
+column wide and with ASCII where they are not, as in CJK language
+environments that make ambiguous characters wide."
   :type '(choice (const :tag "Choose by character width" auto)
                  (const :tag "Box characters" unicode)
                  (const :tag "ASCII" ascii))
@@ -503,8 +504,8 @@ when UNICODE, else ASCII."
                                         hidden (if (= hidden 1) "" "s"))
                                 'face 'shadow))))
                (if unicode 'unicode 'ascii))))
-    (append (seq-take box clutch-viz-box-head)
-          (cl-loop for line in (nthcdr clutch-viz-box-head box)
+    (append (seq-take box (clutch-viz-box-head))
+          (cl-loop for line in (nthcdr (clutch-viz-box-head) box)
                    for index from 0
                    for column = (nth index columns)
                    collect (if column
@@ -551,32 +552,43 @@ UNICODE, else ASCII."
                                table schema group columns
                                (level (car columns) group))))
                      (nreverse groups))
-             (lambda (a b) (< (nth 5 a) (nth 5 b))))))
-    ;; Boxes of one width end where the connectors start.
-    (setq width (apply #'max 0 (mapcar (pcase-lambda (`(,title ,_ ,_ ,_ ,columns))
-                                         (apply #'max (string-width title)
-                                                (mapcar #'string-width columns)))
-                                       groups)))
-    (pcase-dolist (`(,title ,table ,schema ,group ,columns ,level) groups)
-      (let ((top (max (if lines (1+ (length lines)) 0)
-                      (- level clutch-viz-box-head))))
-        (while (< (length lines) top)
-          (setq lines (append lines (list "")))))
-      (cl-loop for text in (clutch-viz-box title columns
-                                           (if unicode 'unicode 'ascii) width)
-               for index from (- clutch-viz-box-head)
-               for column = (and (>= index 0) (nth index columns))
-               do (when column
-                    (push (cons (list table schema column) (length lines))
-                          rows)
-                    (setq text
-                          (propertize
-                           text 'clutch-er-ids
-                           (cl-loop for relation in group
-                                    when (rassoc column
-                                                 (plist-get relation :pairs))
-                                    collect (plist-get relation :id)))))
-               (setq lines (append lines (list text)))))
+             (lambda (a b) (< (nth 5 a) (nth 5 b)))))
+      ;; Boxes of one width end where the connectors start.
+      (setq width (apply #'max 0 (mapcar (pcase-lambda (`(,title ,_ ,_ ,_ ,columns))
+                                           (apply #'max (+ 2 (string-width title))
+                                                  (mapcar #'string-width columns)))
+					 groups)))
+      (pcase-dolist (`(,title ,table ,schema ,group ,columns ,level) groups)
+	(let ((top (max (if lines (1+ (length lines)) 0)
+			(- level (clutch-viz-box-head t))))
+              (starts (mapcar (lambda (relation)
+				(funcall line (caar (plist-get relation :pairs))))
+                              relations)))
+          ;; A column level with the start of another relation would put
+          ;; one connector's end beside another's start on one line, and
+          ;; the two would read as one; move the box down past it.
+          (while (cl-loop for column in columns
+                          for row from (+ top (clutch-viz-box-head t))
+                          thereis (and (memq row starts)
+                                       (/= row (level column group))))
+            (cl-incf top))
+          (while (< (length lines) top)
+            (setq lines (append lines (list "")))))
+	(cl-loop for text in (clutch-viz-box title columns
+                                             (if unicode 'unicode 'ascii) width t)
+		 for index from (- (clutch-viz-box-head t))
+		 for column = (and (>= index 0) (nth index columns))
+		 do (when column
+                      (push (cons (list table schema column) (length lines))
+                            rows)
+                      (setq text
+                            (propertize
+                             text 'clutch-er-ids
+                             (cl-loop for relation in group
+                                      when (rassoc column
+                                                   (plist-get relation :pairs))
+                                      collect (plist-get relation :id)))))
+		 (setq lines (append lines (list text))))))
     (cons lines rows)))
 
 (defun clutch-er--diagram (focus names relations shown-schema unicode)
@@ -594,7 +606,7 @@ qualified; box characters are used when UNICODE, else ASCII."
                           (lambda (relation) (eq (plist-get relation :direction) 'out))
                           relations))
                (line (lambda (name)
-                       (+ clutch-viz-box-head
+                       (+ (clutch-viz-box-head)
                           (cl-position name names :test #'equal))))
                (`(,left . ,left-rows)
                 (clutch-er--side incoming line shown-schema unicode))
