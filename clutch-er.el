@@ -20,6 +20,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'clutch-object)
+(require 'clutch-connection)
 (require 'clutch-viz)
 
 (defcustom clutch-er-charset 'auto
@@ -37,8 +38,9 @@ Emacs assumes."
 (defcustom clutch-er-relations-directory
   (expand-file-name "clutch/relations" user-emacs-directory)
   "Directory of the files that keep relations added by hand.
-Each connection has its own file there, named after its backend and
-endpoint, unless its parameters name one with `:relations-file'."
+Each connection has its own file there, named after its non-secret
+connection identity, unless its parameters name one with
+`:relations-file'."
   :type 'directory
   :group 'clutch)
 
@@ -183,18 +185,16 @@ A relation without a schema is in CURRENT, the connection's schema."
 ;; vectors, and written back in the same shape.
 
 (defun clutch-er--relations-file (conn params)
-  "Return the relations file of CONN, opened with PARAMS."
+  "Return the relations file of CONN, opened with PARAMS.
+Its default name uses the console's non-secret connection identity,
+which includes the SSH or TRAMP origin, excluding the current schema."
   (or (plist-get params :relations-file)
-      (let ((name (mapconcat (lambda (key) (format "%s" (plist-get params key)))
-                             (cl-remove-if-not
-                              (lambda (key) (plist-get params key))
-                              '(:backend :url :profile-entry :host :port
-                                         :database))
-                             "-")))
+      (let ((identity-params (copy-sequence params)))
+        ;; Unqualified relation ends follow a schema switch within this file.
+        (cl-remf identity-params :schema)
         (expand-file-name
-         (concat (replace-regexp-in-string
-                  "[^[:alnum:]._-]+" "_"
-                  (if (string-empty-p name) (clutch--connection-key conn) name))
+         (concat (or (clutch--console-identity-from-params identity-params)
+                     (secure-hash 'sha256 (clutch--connection-key conn)))
                  ".json")
          clutch-er-relations-directory))))
 
@@ -566,10 +566,20 @@ qualified; box characters are used when UNICODE, else ASCII."
                          (plist-get column :primary-key)
                          (clutch-er--relation-ids (plist-get column :name) relations)))
                    all))
+         (hidden (- (length all) (length columns)))
+         ;; A saved relation survives schema changes and can still be removed
+         ;; from its line when a column is gone.
+         (missing (cl-set-difference
+                   (delete-dups (cl-loop for relation in relations
+                                        append (mapcar #'car (plist-get relation :pairs))))
+                   (mapcar (lambda (column) (plist-get column :name)) all)
+                   :test #'equal))
+         (columns (append columns (mapcar (lambda (name)
+                                            (list :name name :type "(missing column)"))
+                                         missing)))
          (lines (clutch-er--lines columns relations shown-schema unicode))
          (texts (mapcar #'string-trim-right
                         (clutch-viz-columns (mapcar #'cdr lines) 0 3)))
-         (hidden (- (length all) (length columns)))
          (title (concat " " (propertize (plist-get clutch-er--entry :name)
                                         'face 'clutch-er-title)))
          (summary (propertize

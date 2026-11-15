@@ -192,46 +192,6 @@ MODE-LINE-NAME is the base name shown while the buffer is idle."
     (unless (eq major-mode mode)
       (funcall mode))))
 
-(defconst clutch--console-url-secret-param-regexp
-  (concat "\\([?&;]"
-          (regexp-opt '("access_token" "pass" "password" "passwd"
-                        "private_key" "private-key" "pwd" "secret" "token"))
-          "=\\)[^&;]*")
-  "Regexp matching URL parameters that must not affect console identity.")
-
-(defconst clutch--console-identity-param-keys
-  '(:user :host :port :database :schema :sid :ssh-host
-    :tramp-default-directory)
-  "Connection params that distinguish query console identity.")
-
-(defun clutch--console-redacted-url (url)
-  "Return URL with obvious password parameters redacted."
-  (when url
-    (let ((case-fold-search t))
-      (replace-regexp-in-string
-       clutch--console-url-secret-param-regexp
-       "\\1REDACTED"
-       url))))
-
-(defun clutch--console-identity-pairs (params)
-  "Return canonical non-secret identity pairs for connection PARAMS."
-  (when params
-    (let ((backend (or (plist-get params :backend)
-                       (plist-get params :driver)))
-          (url (clutch--console-redacted-url (plist-get params :url))))
-      (append
-       (and backend (list (cons :backend backend)))
-       (cl-loop for key in clutch--console-identity-param-keys
-                when (plist-member params key)
-                collect (cons key (plist-get params key)))
-       (and url (list (cons :url url)))))))
-
-(defun clutch--console-identity-from-params (params)
-  "Return a stable query-console persistence identity from PARAMS."
-  (when-let* ((pairs (clutch--console-identity-pairs params)))
-    (concat "console-"
-            (secure-hash 'sha256 (prin1-to-string pairs)))))
-
 (defun clutch--console-persistence-name (name &optional params)
   "Return storage identity for console NAME and PARAMS."
   (or (clutch--console-identity-from-params params)

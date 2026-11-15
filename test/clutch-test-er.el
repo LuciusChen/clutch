@@ -72,13 +72,14 @@ Relations added by hand are kept in a temporary directory."
 
 (defun clutch-test-er--file ()
   "Return the relations file of the test connection."
-  (expand-file-name "db-shop.json" clutch-er-relations-directory))
+  (clutch-er--relations-file clutch-connection clutch--connection-params))
 
 (defun clutch-test-er--file-text ()
   "Return the text of the relations file of the test connection."
-  (with-temp-buffer
-    (insert-file-contents (clutch-test-er--file))
-    (buffer-string)))
+  (let ((file (clutch-test-er--file)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (buffer-string))))
 
 (defmacro clutch-test-er--answering (columns table &rest body)
   "Run BODY answering column reads with COLUMNS in turn and the table read
@@ -266,6 +267,44 @@ and leaves the view as it was."
           (should (string-match-p (regexp-quote (clutch-test-er--file))
                                   (cadr err))))
         (should (equal text (clutch-test-er--text)))))))
+
+(ert-deftest clutch-test-er-relations-files-distinguish-targets ()
+  "Relations are isolated by target and transport, with no URL secret in a name."
+  (let ((conn (clutch-test-er--conn)))
+    (dolist (pair '(((:backend sqlite :database "/tmp/review_a.db")
+                     (:backend sqlite :database "/tmp/review/a.db"))
+                    ((:backend pg :host "127.0.0.1" :port 5432 :database "app" :ssh-host "a")
+                     (:backend pg :host "127.0.0.1" :port 5432 :database "app" :ssh-host "b"))))
+      (should-not (equal (clutch-er--relations-file conn (car pair))
+                         (clutch-er--relations-file conn (cadr pair)))))
+    (should (equal (clutch-er--relations-file
+                    conn '(:backend pg :database "shop" :schema "public"))
+                   (clutch-er--relations-file
+                    conn '(:backend pg :database "shop" :schema "other"))))
+    (let* ((params '(:backend jdbc :url "jdbc:postgresql://db/app?password=REVIEW_SECRET"))
+           (file (clutch-er--relations-file conn params)))
+      (should-not (string-match-p "REVIEW_SECRET" file))
+      (should (equal file (clutch-er--relations-file
+                           conn '(:backend jdbc :url "jdbc:postgresql://db/app?password=CHANGED_SECRET")))))))
+
+(ert-deftest clutch-test-er-keeps-relations-with-missing-columns ()
+  "A removed column leaves its relation visible and deletable."
+  (clutch-test-er--with-view (clutch-test-er--conn)
+    (clutch-test-er--answering '(("id" "note") ("id" "name")) "customers"
+      (clutch-er-add-relation))
+    (setf (clutch-test-conn-tables clutch-connection)
+          (copy-tree (clutch-test-conn-tables clutch-connection)))
+    (let* ((table (assoc "orders" (clutch-test-conn-tables clutch-connection)))
+           (columns (plist-get (cdr table) :columns)))
+      (setcdr table (plist-put (cdr table) :columns
+                               (cl-remove "note" columns :test #'equal
+                                          :key (lambda (column) (plist-get column :name))))))
+    (clutch-er-refresh)
+    (should (string-match-p "note +(missing column)" (clutch-test-er--text)))
+    (clutch-test-er--goto "manual")
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+      (clutch-er-delete-relation))
+    (should-not (string-match-p "missing column" (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-relations-file-keeps-names-as-written ()
   "Names keep their case and characters, written as UTF-8, and a file

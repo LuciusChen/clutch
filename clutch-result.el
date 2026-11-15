@@ -4308,10 +4308,11 @@ the label column width."
                    max-name-w)))
     (goto-char (point-min))))
 
-(defun clutch-record--follow (relation ridx result-buf)
+(defun clutch-record--follow (relation ridx result-buf columns)
   "Show the row RELATION references from row RIDX of RESULT-BUF.
 The query names every column of RELATION, so a key over several columns
-finds one row; each must be in the result with a value.  The referenced
+finds one row; each must be in the result with a value.  COLUMNS are its
+source column names, in result order, with nil for expressions.  The referenced
 table is qualified by RELATION's :schema when it has one."
   (with-current-buffer result-buf
     (let* ((conn clutch-connection)
@@ -4323,7 +4324,7 @@ table is qualified by RELATION's :schema when it has one."
                (clutch-db-escape-identifier conn (plist-get relation :table))
                (mapconcat
                 (pcase-lambda (`(,column . ,referenced))
-                  (let* ((cidx (or (cl-position column clutch--result-columns
+                  (let* ((cidx (or (cl-position column columns
                                                 :test #'equal)
                                    (user-error "The relation also needs %s, which the result does not show"
                                                column)))
@@ -4346,11 +4347,18 @@ The relations are those of `clutch-er-outgoing-relations' for the
 result's table that join the column.  Follow the first, a foreign key of
 the database before a relation added by hand, or with ASK choose when
 there are several."
-  (let* ((relations
+  (let* ((source-columns
+          (with-current-buffer result-buf
+            (cl-mapcar (lambda (name definition)
+                         (if (plist-member definition :source-column)
+                             (plist-get definition :source-column)
+                           name))
+                       clutch--result-columns clutch--result-column-defs)))
+         (relations
           (with-current-buffer result-buf
             (clutch-result--require-connection)
             (clutch--refuse-while-running clutch-connection)
-            (let ((column (nth cidx clutch--result-columns)))
+            (let ((column (nth cidx source-columns)))
               (cl-remove-if-not
                (lambda (relation) (assoc column (plist-get relation :pairs)))
                (clutch-er-outgoing-relations
@@ -4375,7 +4383,7 @@ there are several."
            ((or (not ask) (null (cdr relations))) (car relations))
            (t (cdr (assoc (completing-read "Follow relation: " choices nil t)
                           choices))))
-     ridx result-buf)))
+     ridx result-buf source-columns)))
 
 (defun clutch-record-follow-relation ()
   "Follow a relation from the field at point, asking when several start there.

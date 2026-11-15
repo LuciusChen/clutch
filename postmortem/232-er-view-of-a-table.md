@@ -24,7 +24,11 @@ They live in `clutch-er.el` with the view, as plain parsed JSON (alists and vect
 
 An end leaves out its schema when it is the connection's current schema, and an end without one means the current schema. One rule for writing and reading keeps a file shared by databases whose schemas differ usable, at the cost that such a relation follows a schema switch. Matching a relation to the shown table or to a key of the database uses the same rule. Names are compared as stored, since both ends come from metadata. A relation that repeats a key of the database is refused when added and hidden when shown, as the database may have gained the key since; comparing the set of column pairs, not their order, is what makes a composite key and its stored twin equal.
 
-The file belongs to a connection: `:relations-file` names it, for a file shared in a project, and otherwise it is named after the backend, URL or profile entry, host, port and database in the connection's parameters. Those are the parameters it was opened with, not the endpoint of an SSH or TRAMP forward, whose local port changes each time, and not the saved connection's name, which the parameters do not carry. `:relations-file` is removed from the parameters a backend receives, with the other Clutch keys.
+The existing console identity helpers now live with connection handling, shared by console persistence and relation files without a dependency back into query execution.
+
+The file belongs to a connection: `:relations-file` names it, for a file shared in a project, and otherwise its filename hashes the console's existing non-secret connection identity, including its SSH or TRAMP origin and excluding the current schema so unqualified relation ends still follow a schema switch. This keeps punctuation in database paths distinct, separates identical endpoints reached through different origins and keeps credentials out of filenames. Those are the parameters it was opened with, not the endpoint of an SSH or TRAMP forward, whose local port changes each time, and not the saved connection's name, which the parameters do not carry. `:relations-file` is removed from the parameters a backend receives, with the other Clutch keys.
+
+A saved relation whose local column has been removed remains visible with a temporary `(missing column)` label, so it can still be changed or deleted. The stored relation is kept intact.
 
 A result starts a relation at the source column of the column at point, through `clutch-result--writable-source-column`, so an alias names its column and a computed column is refused; it first checks that the result has a connection and that the session still resolves names as the result's query did.
 
@@ -38,7 +42,7 @@ The view draws the same characters in graphical frames and terminals, aligned by
 
 ## Following relations from a record
 
-Follow FK names every column of a key, from the row's values in the result, so a composite key opens the one row the record references; a column of the key that the result does not show, or a NULL in it, is refused rather than dropped from the condition. It uses the values the database holds, not staged edits. `RET` takes the first relation through the field, and `r` chooses among the foreign keys and the relations added by hand, which come from `clutch-er-outgoing-relations`, the grouping and deduplication the ER view uses. Without key identity, as over JDBC, each column is a relation of its own rather than being joined to a neighbouring column that references the same table.
+Follow FK names every column of a key, from the row's values in the result, resolving projected aliases to source names, so a composite key opens the one row the record references; a column of the key that the result does not show, or a NULL in it, is refused rather than dropped from the condition. It uses the values the database holds, not staged edits. `RET` takes the first relation through the field, and `r` chooses among the foreign keys and the relations added by hand, which come from `clutch-er-outgoing-relations`, the grouping and deduplication the ER view uses. Without key identity, as over JDBC, each column is a relation of its own rather than being joined to a neighbouring column that references the same table.
 
 ## Deferred
 
