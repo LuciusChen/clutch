@@ -147,39 +147,42 @@ right loses its `display' properties and keeps its spaces."
                 (apply #'concat (nreverse parts))))
             rows)))
 
+(defconst clutch-viz-box-head 3
+  "Lines a box from `clutch-viz-box' draws before its first line.")
+
 (defun clutch-viz-box (title lines &optional charset width)
-  "Return LINES framed by a box with TITLE in its top edge.
-The result is a list of strings: the top edge, a string for each of
-LINES, and the bottom edge.  The box is drawn from column 0, from which
-the padding's `:align-to' counts, and is at least WIDTH columns wide
-inside.  It uses box characters, or ASCII when CHARSET is `ascii';
-CHARSET defaults to `clutch-viz-charset'."
-  (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down)
-                (if (eq (or charset (clutch-viz-charset)) 'ascii)
-                    '("+" "+" "+" "+" ?- "|")
-                  '("┌" "┐" "└" "┘" ?─ "│")))
+  "Return LINES as the body of a card headed by TITLE.
+The result is a list of strings: the top edge, TITLE, a rule, a string
+for each of LINES, and the bottom edge, so LINES start after
+`clutch-viz-box-head' strings.  The card is drawn from column 0, from
+which the padding's `:align-to' counts, and is at least WIDTH columns
+wide inside.  It uses rounded box characters, or ASCII when CHARSET is
+`ascii'; CHARSET defaults to `clutch-viz-charset'."
+  (pcase-let* ((`(,top-left ,top-right ,bottom-left ,bottom-right ,across ,down
+                            ,rule-left ,rule-right)
+                (if (eq (or charset (clutch-viz-charset '(?╭))) 'ascii)
+                    '("+" "+" "+" "+" ?- "|" "+" "+")
+                  '("╭" "╮" "╰" "╯" ?─ "│" "├" "┤")))
                (inner (apply #'max (or width 0) (string-width title)
                              (mapcar #'string-width lines))))
     (cl-flet ((edge (&rest parts)
-                (propertize (apply #'concat parts) 'face 'shadow)))
+                (propertize (apply #'concat parts) 'face 'shadow))
+              (row (line)
+                (concat (propertize (concat down " ") 'face 'shadow)
+                        line
+                        (clutch-viz--pad line (1+ inner) (+ inner 3))
+                        (propertize down 'face 'shadow))))
       (append
-       (list (concat (edge top-left " ")
-                     title
-                     (edge " " (make-string (- inner (string-width title))
-                                            across)
-                           top-right)))
-       (mapcar (lambda (line)
-                 (concat (edge down " ")
-                         line
-                         (clutch-viz--pad line (1+ inner) (+ inner 3))
-                         (edge down)))
-               lines)
+       (list (edge top-left (make-string (+ inner 2) across) top-right)
+             (row title)
+             (edge rule-left (make-string (+ inner 2) across) rule-right))
+       (mapcar #'row lines)
        (list (edge bottom-left (make-string (+ inner 2) across)
                    bottom-right))))))
 
 (defconst clutch-viz--junctions
   ;; Indexed by the directions a cell joins: up 1, down 2, left 4, right 8.
-  [" " "│" "│" "│" "─" "┘" "┐" "┤" "─" "└" "┌" "├" "─" "┴" "┬" "┼"]
+  [" " "│" "│" "│" "─" "╯" "╮" "┤" "─" "╰" "╭" "├" "─" "┴" "┬" "┼"]
   "Box characters joining the directions of a connector cell.")
 
 (defun clutch-viz--junction (mask solid charset)
@@ -200,7 +203,7 @@ the left side; where edges cross or meet, the characters join.  The
 result is (LINES . CELLS): LINES are the gutter's lines, all as wide,
 and CELLS lists, for each edge in order, its cells as (LINE . COLUMN).
 CHARSET is as in `clutch-viz-tree'."
-  (let* ((charset (or charset (clutch-viz-charset '(?▶))))
+  (let* ((charset (or charset (clutch-viz-charset '(?▶ ?╭))))
          (width (+ (length edges) 3))
          (masks (make-vector (* height width) 0))
          (solid (make-vector (* height width) nil))

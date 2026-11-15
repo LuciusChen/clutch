@@ -125,20 +125,22 @@ with TABLE.  Return the column lists offered first, in order."
 until all columns are asked for."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (should (equal (clutch-test-er--text)
-                   "\
-┌ orders ───────────────┐
+                   "
+╭───────────────────────╮
+│ orders                │
+├───────────────────────┤
 │ ◆←  id           int  │
 │  →  customer_id  int  │
 │  →  region       text │
 │  →  country      text │
 │ … 1 more column       │
-└───────────────────────┘
+╰───────────────────────╯
 
-References (2)
+References  2
   customer_id        →  customers (id)
   (region, country)  →  regions (code, country)
 
-Referenced by (2)
+Referenced by  2
   items (order_id)    →  id
   refunds (order_id)  →  id
 "))
@@ -174,11 +176,11 @@ highlights its relations.  Neither changes the text."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (clutch-test-er--goto "customers (id)")
     (clutch-er-follow)
-    (should (string-prefix-p "┌ customers " (clutch-test-er--text)))
+    (should (string-match-p "\\`\n╭─+╮\n│ customers " (clutch-test-er--text)))
     (should (string-match-p "^  orders (customer_id)  →  id$"
                             (clutch-test-er--text)))
     (clutch-er-back)
-    (should (string-prefix-p "┌ orders " (clutch-test-er--text)))
+    (should (string-match-p "\\`\n╭─+╮\n│ orders " (clutch-test-er--text)))
     (should-error (clutch-er-back) :type 'user-error)))
 
 (ert-deftest clutch-test-er-refuses-what-it-cannot-show ()
@@ -339,21 +341,25 @@ again, and a width that keeps the layout draws nothing."
     (cl-letf (((symbol-function 'clutch-er--window-width) (lambda () width)))
       (clutch-test-er--with-view (clutch-test-er--conn)
         (should (string-prefix-p
-                 "\
-┌ items ───┐     ┌ orders ───────────────┐     ┌ customers ┐
-│ order_id │──┬─▶│ ◆←  id           int  │ ┌──▶│ id        │
-└──────────┘  │  │  →  customer_id  int  │─┘   └───────────┘
-              │  │  →  region       text │──┐  
-┌ refunds ─┐  │  │  →  country      text │  │  ┌ regions ──┐
-│ order_id │──┘  │ … 1 more column       │  └─▶│ code      │
-└──────────┘     └───────────────────────┘     │ country   │
-                                               └───────────┘
+                 "
+╭──────────╮     ╭───────────────────────╮     ╭───────────╮
+│ items    │     │ orders                │     │ customers │
+├──────────┤     ├───────────────────────┤     ├───────────┤
+│ order_id │──┬─▶│ ◆←  id           int  │ ╭──▶│ id        │
+╰──────────╯  │  │  →  customer_id  int  │─╯   ╰───────────╯
+              │  │  →  region       text │──╮  
+╭──────────╮  │  │  →  country      text │  │  ╭───────────╮
+│ refunds  │  │  │ … 1 more column       │  │  │ regions   │
+├──────────┤  │  ╰───────────────────────╯  │  ├───────────┤
+│ order_id │──╯                             ╰─▶│ code      │
+╰──────────╯                                   │ country   │
+                                               ╰───────────╯
 
-References (2)
+References  2
 "
                  (clutch-test-er--text)))
         (clutch-test-er--goto "region       text")
-        (search-forward "──┐")
+        (search-forward "──╮")
         (backward-char)
         (run-hooks 'post-command-hook)
         (let ((highlighted (clutch-test-er--highlighted)))
@@ -366,7 +372,8 @@ References (2)
         (clutch-er--relayout (progn (set-window-buffer (selected-window)
                                                        (current-buffer))
                                     (selected-window)))
-        (should (string-prefix-p "┌ orders ─" (clutch-test-er--text)))
+        (should (string-prefix-p "\n╭─" (clutch-test-er--text)))
+        (should (string-match-p "^│ orders  +│$" (clutch-test-er--text)))
         (let ((tick (buffer-chars-modified-tick)))
           (clutch-er--relayout (selected-window))
           (should (= tick (buffer-chars-modified-tick))))))))
@@ -376,13 +383,13 @@ References (2)
 draws with ASCII."
   (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (clutch-test-er--with-view (clutch-test-er--conn)
-      (should (string-prefix-p "+ orders -" (clutch-test-er--text)))
+      (should (string-prefix-p "\n+-" (clutch-test-er--text)))
       (should (string-match-p "^| \\*<  id  " (clutch-test-er--text)))
       (should (string-match-p "^  customer_id  +->  customers (id)$"
                               (clutch-test-er--text)))))
   (let ((clutch-er-charset 'ascii))
     (clutch-test-er--with-view (clutch-test-er--conn)
-      (should (string-prefix-p "+ orders -" (clutch-test-er--text))))))
+      (should (string-prefix-p "\n+-" (clutch-test-er--text))))))
 
 (provide 'clutch-test-er)
 

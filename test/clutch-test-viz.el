@@ -51,25 +51,27 @@ and stop at the top of the scale."
     (should (equal (mapcar #'substring-no-properties rows)
                    '("◆  id    int" "   金额  numeric")))
     (should (equal (mapcar #'substring-no-properties box)
-                   '("┌ 账单 ────────────┐"
+                   '("╭──────────────────╮"
+                     "│ 账单             │"
+                     "├──────────────────┤"
                      "│ ◆  id    int     │"
                      "│    金额  numeric │"
-                     "└──────────────────┘")))
+                     "╰──────────────────╯")))
     (should (= 1 (length (delete-dups (mapcar #'string-width box)))))
     (should (equal (mapcar #'substring-no-properties
                            (clutch-viz-box "t" '("ab") 'ascii))
-                   '("+ t -+" "| ab |" "+----+")))))
+                   '("+----+" "| t  |" "+----+" "| ab |" "+----+")))))
 
 (ert-deftest clutch-test-viz-columns-keep-padding-only-from-column-zero ()
   "Padding aligns to columns counted from 0, so a cell placed further
 right keeps its spaces but not the alignment it was padded with."
   (let* ((inner (clutch-viz-box "t" (clutch-viz-columns '(("a" "b") ("cc" "d")) 2)
                                 'ascii))
-         (row (car (clutch-viz-columns (list (list "x" (nth 1 inner))) 0 0)))
+         (row (car (clutch-viz-columns (list (list "x" (nth 3 inner))) 0 0)))
          (aligned (lambda (string)
                     (cl-loop for index below (length string)
                              thereis (get-text-property index 'display string)))))
-    (should (funcall aligned (nth 1 inner)))
+    (should (funcall aligned (nth 3 inner)))
     (should (equal (substring-no-properties row) "x| a   b |"))
     (should-not (funcall aligned (substring row 1)))))
 
@@ -78,7 +80,7 @@ right keeps its spaces but not the alignment it was padded with."
 meet join their characters, a dashed edge stays dashed where it runs
 alone, and every cell an edge passes is reported for it."
   (should (equal (clutch-viz-connectors 4 '((0 2 nil) (3 2 t)) 'unicode)
-                 '(("─┐   " " │   " " └┬─▶" "┄┄┘  ")
+                 '(("─╮   " " │   " " ╰┬─▶" "┄┄╯  ")
                    ((0 . 0) (0 . 1) (1 . 1) (2 . 1) (2 . 2) (2 . 3) (2 . 4))
                    ((3 . 0) (3 . 1) (3 . 2) (2 . 2) (2 . 3) (2 . 4)))))
   (should (equal (car (clutch-viz-connectors 3 '((0 2 nil)) 'ascii))
