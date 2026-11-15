@@ -16,6 +16,7 @@
 (require 'clutch-diagnostics)
 (require 'clutch-query)
 (require 'clutch-object)
+(require 'clutch-er)
 (require 'clutch-schema)
 (require 'clutch-sql)
 (require 'clutch-ui)
@@ -1005,6 +1006,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map "#" #'clutch-result-count-total)
     (define-key map "A" #'clutch-result-aggregate)
     (define-key map "s" #'clutch-result-sort-by-column)
+    (define-key map "R" #'clutch-result-add-relation)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "k" #'clutch-copy-context-for-agent)
     (define-key map "v" #'clutch-result-view-value)
@@ -1431,6 +1433,25 @@ The cycle is unsorted, ascending, descending, then unsorted again."
               (name (nth cidx clutch--result-columns))
               ((member name (clutch--visible-column-names))))
     name))
+
+(defun clutch-result-add-relation ()
+  "Add a relation from the column at point to a column of another table.
+The result must show one table, and the column one of its columns.  See
+`clutch-er-add-relation'."
+  (interactive)
+  (clutch-result--require-connection)
+  (clutch-result--refuse-if-moved)
+  (clutch-er-add-relation
+   (list :name (or clutch--result-source-table
+                   (user-error "This result does not show one table"))
+         :type "TABLE"
+         :schema clutch--result-source-schema
+         :catalog clutch--result-source-catalog)
+   (list (clutch-result--writable-source-column
+          (or (and (clutch-result--column-name-at-point)
+                   (clutch--col-idx-at-point))
+              (user-error "No column at point"))
+          "add a relation"))))
 
 ;;;###autoload
 (defun clutch-result-sort-by-column ()
@@ -4485,7 +4506,9 @@ The connection comes from the cached render state, not from the server."
    ["Inspect"
     ("RET" "Open record" clutch-result-open-record)
     ("v" "Full value" clutch-result-view-value)
-    ("?" "Column info" clutch-result-column-info)]
+    ("?" "Column info" clutch-result-column-info)
+    ("R" "Add relation" clutch-result-add-relation
+     :inapt-if-not clutch-result--column-name-at-point)]
    ["Copy / Export"
     ("c" "Copy..." clutch-result-copy-dispatch)
     ("e" "Export..." clutch-result-export)

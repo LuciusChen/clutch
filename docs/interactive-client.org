@@ -74,6 +74,7 @@ Without an explicit SQL row limit, paged query export and all-row result export 
 | =C=            | Jump to visible column                        |
 | ={= / =}=      | First visible data column / last visible data column |
 | =?=            | Show column type info at point                |
+| =R=            | Add a relation from the column at point (see [[*Relations added by hand][Relations added by hand]]) |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit / re-edit at point                       |
 | =i=            | Stage new row for insertion                   |
@@ -269,10 +270,36 @@ The view is available on native PostgreSQL, MySQL and SQLite connections; other 
 | =l=         | Show the table shown before                    |
 | =TAB=       | Show every column, or only key columns         |
 | =n= / =p=   | Next / previous line that belongs to a relation |
+| =a=         | Add a relation from the table, starting at the column at point |
+| =e=         | Change the relation at point, added by hand    |
+| =k=         | Delete the relation at point, added by hand    |
 | =b=         | Browse the table's rows                        |
 | =d=         | Describe the table                             |
 | =g=         | Load the table's columns and relations again   |
 | =C-c C-o=   | Show object actions                            |
+
+Set =clutch-er-charset= to =unicode= or =ascii= to choose the characters yourself, for a terminal whose widths differ from those Emacs assumes.
+
+** Relations added by hand
+
+A relation the database does not declare can be added by hand: =a= in the ER view starts from its table and the column at point, and =R= in a result buffer, also under Inspect in its =C-c ?= menu, from the result's table and the column at point; a result must show one table, and a column shown under an alias starts from its source column.  Clutch then asks for the columns of the table, the referenced table, and its columns, which default to its primary key when it has as many columns; give several columns, separated by commas, for a relation over several.  A relation that repeats a foreign key of the database or a relation stored already is refused.  The ER view shows a relation added by hand at both of its tables with a dashed arrow, =⇢= (=~>= in ASCII), and does not show one that repeats a foreign key of the database, which the database may have gained since.  Relations added by hand serve browsing only: row identity, staged edits and every other workflow that changes data never read them.
+
+They are kept in a JSON file for each connection, in =clutch-er-relations-directory= unless the connection's parameters name one with =:relations-file=.  Clutch reads the file each time the view loads and again before each change, so a change made elsewhere meanwhile is kept, and replaces it whole through a temporary file beside it.  It writes the relations in a stable order, one field to a line, so a file kept in Git shows a change as one relation:
+
+#+begin_src json
+{
+  "version": 1,
+  "relations": [
+    {
+      "from": {"table":"orders"},
+      "to": {"schema":"ref","table":"regions"},
+      "columns": [["region","code"],["country","country"]]
+    }
+  ]
+}
+#+end_src
+
+Each end names its =table= and, when needed, its =schema= and =catalog=, as the database spells them.  An end without a schema names a table in the connection's current schema; Clutch leaves the schema out when it is the current one, so a file shared by databases whose schemas are named differently still matches.  =columns= pairs each column of =from= with the column of =to= it references.  A file of another version, or one Clutch cannot read, is reported by name and left as it is.
 
 * Typical Workflows
 

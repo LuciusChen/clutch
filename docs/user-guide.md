@@ -50,6 +50,7 @@ This guide covers saved connections, the query workflow, transactions, credentia
 - TLS can be enabled with `:tls t`. For explicit plaintext, prefer `:ssl-mode disabled` on MySQL and `:sslmode disable` on PostgreSQL.
 - `:ssh-host` and `:tramp-default-directory` both create local forwards for structured `:host` / `:port` endpoints. `:ssh-host` uses a `~/.ssh/config` host alias, while `:tramp-default-directory` derives the origin from an ssh-like or container TRAMP directory.
 - Query-console SQL is saved by connection identity rather than saved connection name, so renaming a saved connection keeps the same console SQL.
+- `:relations-file` names the file that keeps relations added by hand in the ER view, for example a file checked into a project and shared by the connections to its databases; give an absolute or `~` path. Without it, each connection keeps its own file in `clutch-er-relations-directory`, named after its backend, endpoint and database, so renaming a saved connection keeps its relations. See the [interactive guide](interactive-client.org) for the ER view and the file format.
 
 JDBC-backed databases use their clutch driver/dialect symbol as `:backend`, such as `oracle`; `:backend` does not merely select the Java driver. Reserve `:backend jdbc` for databases without a dedicated clutch backend. See [docs/jdbc-backend.org](jdbc-backend.org) for supported databases and setup.
 

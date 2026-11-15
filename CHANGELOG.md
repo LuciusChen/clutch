@@ -4,7 +4,8 @@
 
 ### Added
 
-- `clutch-er-diagram`, `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, the tables its foreign keys reference and the tables whose foreign keys reference it. A key over several columns is one relation. `RET` follows a relation to the table at its other end and `l` returns; moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it; other connections refuse it. In a CJK language environment that makes its symbols two columns wide, it draws with ASCII.
+- `clutch-er-diagram`, `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, the tables its foreign keys reference and the tables whose foreign keys reference it. A key over several columns is one relation. `RET` follows a relation to the table at its other end and `l` returns; moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it; other connections refuse it. In a CJK language environment that makes its symbols two columns wide, it draws with ASCII; `clutch-er-charset` chooses the characters instead.
+- Relations the database does not declare can be added by hand, for browsing only: `a` in the ER view and `R` in a result buffer start one from the column at point, `e` changes one and `k` deletes it. The ER view shows them at both of their tables with a dashed arrow. They are kept in a versioned JSON file for each connection in `clutch-er-relations-directory`, written in a stable order for Git, or in the file a connection's `:relations-file` names, such as one shared in a project.
 
 ### Fixed
 

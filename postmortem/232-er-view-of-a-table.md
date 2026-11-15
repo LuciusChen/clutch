@@ -1,6 +1,6 @@
 # ER view of a table
 
-`clutch-er-diagram`, `r` in the object actions, shows one hop of relations around a table: its key columns in a box, the tables its foreign keys reference and the tables whose foreign keys reference it, one line for each key. This is the first stage of an ER feature; user-defined relations and a wide layout are deferred, as listed at the end.
+`clutch-er-diagram`, `r` in the object actions, shows one hop of relations around a table: its key columns in a box, the tables its foreign keys reference and the tables whose foreign keys reference it, one line for each key. Relations the database does not declare can be added by hand; a wide layout is deferred, as listed at the end.
 
 ## Keys stay in one contract
 
@@ -18,10 +18,19 @@ Moving point only moves overlays: each highlightable line records the relations 
 
 Drawing uses two pure functions added to `clutch-viz.el`, `clutch-viz-columns` and `clutch-viz-box`. Widths come from `string-width`, and padding is real spaces carrying `(space :align-to COL)`, as the plan chart's is. Alignment is exact in a monospace font whose box and arrow glyphs are one column wide, in a terminal or a graphical frame, CJK names included, which take two columns. `clutch-viz-charset` now checks the extra glyphs a caller draws with (`◆ → ← ↔ …`); when any is two columns wide, as with `cjk-ambiguous-chars-are-wide`, the view draws with ASCII. A terminal whose own width for these glyphs differs from Emacs's cannot be detected. With a proportional font, `:align-to` keeps column starts and the box's right edge in place on graphical frames, but the top edge's run of `─` after a title can still drift, and a cell is not guaranteed to fit its column.
 
+## Relations added by hand
+
+They live in `clutch-er.el` with the view, as plain parsed JSON (alists and vectors) that is read, checked strictly and written back in the same shape, so no second representation has to stay in step with the file. A file with another version, a field Clutch does not know or a malformed relation is refused by name rather than partly read, because writing it back would drop what was not understood. Writing sorts the relations by their encoded text and puts one field on a line, so Git shows a change as the relation it touches; the file is replaced through a temporary file beside it, after following a link. Each change reads the file again first, so a change made in another Emacs or by hand since the view loaded is kept, and editing or deleting a relation that is gone says so.
+
+An end leaves out its schema when it is the connection's current schema, and an end without one means the current schema. One rule for writing and reading keeps a file shared by databases whose schemas differ usable, at the cost that such a relation follows a schema switch. Matching a relation to the shown table or to a key of the database uses the same rule. Names are compared as stored, since both ends come from metadata. A relation that repeats a key of the database is refused when added and hidden when shown, as the database may have gained the key since; comparing the set of column pairs, not their order, is what makes a composite key and its stored twin equal.
+
+The file belongs to a connection: `:relations-file` names it, for a file shared in a project, and otherwise it is named after the backend, URL or profile entry, host, port and database in the connection's parameters. Those are the parameters it was opened with, not the endpoint of an SSH or TRAMP forward, whose local port changes each time, and not the saved connection's name, which the parameters do not carry. `:relations-file` is removed from the parameters a backend receives, with the other Clutch keys.
+
+A result starts a relation at the source column of the column at point, through `clutch-result--writable-source-column`, so an alias names its column and a computed column is refused; it first checks that the result has a connection and that the session still resolves names as the result's query did.
+
 ## Deferred
 
-- User-defined relations in a versioned `relations.json`, created from a result column or the view, with endpoints whose schema may be left out to mean the table an unqualified name resolves to (`clutch-db-resolution-context`), and the default file keyed by the saved connection name rather than host and port, which change under SSH tunnels.
 - A wide three-column layout with drawn connectors.
 - JDBC: the agent's foreign-key operations must report key identity and the keys that reference a table.
-- Follow FK in the record view still builds a one-column condition for a composite key.
+- Follow FK in the record view still builds a one-column condition for a composite key, and does not follow relations added by hand.
 - `clutch-db-primary-key-columns` on SQLite lists primary-key columns in table order rather than key order; the view's implicit-reference lookup sorts by key position itself.
