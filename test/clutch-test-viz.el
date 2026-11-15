@@ -60,6 +60,19 @@ and stop at the top of the scale."
                            (clutch-viz-box "t" '("ab") 'ascii))
                    '("+ t -+" "| ab |" "+----+")))))
 
+(ert-deftest clutch-test-viz-columns-keep-padding-only-from-column-zero ()
+  "Padding aligns to columns counted from 0, so a cell placed further
+right keeps its spaces but not the alignment it was padded with."
+  (let* ((inner (clutch-viz-box "t" (clutch-viz-columns '(("a" "b") ("cc" "d")) 2)
+                                'ascii))
+         (row (car (clutch-viz-columns (list (list "x" (nth 1 inner))) 0 0)))
+         (aligned (lambda (string)
+                    (cl-loop for index below (length string)
+                             thereis (get-text-property index 'display string)))))
+    (should (funcall aligned (nth 1 inner)))
+    (should (equal (substring-no-properties row) "x| a   b |"))
+    (should-not (funcall aligned (substring row 1)))))
+
 (ert-deftest clutch-test-viz-connectors-join-where-edges-meet ()
   "Each edge runs down a lane of its own and ends in an arrow; edges that
 meet join their characters, a dashed edge stays dashed where it runs

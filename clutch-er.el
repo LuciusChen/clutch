@@ -42,8 +42,13 @@ endpoint, unless its parameters name one with `:relations-file'."
   :group 'clutch)
 
 (defface clutch-er-highlight
-  '((t :inherit highlight))
-  "Face for the relation at point and the columns it joins."
+  '((((class color) (background light)) :foreground "#b5179e" :weight bold)
+    (((class color) (background dark)) :foreground "#ff79c6" :weight bold)
+    (t :inverse-video t))
+  "Face for the relation at point and the columns it joins.
+It colors text rather than its background: box characters in many fonts
+are taller than a line, and a graphical frame redraws the background of
+the lines next to them over a highlighted line's background."
   :group 'clutch)
 
 (defface clutch-er-table

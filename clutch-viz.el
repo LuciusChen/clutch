@@ -116,7 +116,9 @@ CHARSET defaults to `clutch-viz-charset'."
 A row is a list of cells, which are strings.  Each column is as wide as
 its widest cell, and GAP spaces, 2 by default, separate columns; the
 last cell of a row is not padded.  Rows start at column INDENT, 0 by
-default, from which the padding's `:align-to' counts."
+default, from which the padding's `:align-to' counts.  A cell's own
+`:align-to' padding counted from column 0, so a cell placed further
+right loses its `display' properties and keeps its spaces."
   (let* ((widths (cl-loop for index below (apply #'max 0 (mapcar #'length rows))
                           collect (apply #'max 0
                                          (mapcar (lambda (row)
@@ -130,7 +132,13 @@ default, from which the padding's `:align-to' counts."
                 (while row
                   (let ((cell (pop row))
                         (width (pop widths)))
-                    (push cell parts)
+                    (push (if (zerop column)
+                              cell
+                            (let ((cell (copy-sequence cell)))
+                              (remove-text-properties 0 (length cell)
+                                                      '(display nil) cell)
+                              cell))
+                          parts)
                     (when row
                       (setq column (+ column width (or gap 2)))
                       (when (< (string-width cell) (+ width (or gap 2)))
