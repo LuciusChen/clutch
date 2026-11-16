@@ -24,6 +24,8 @@
 (require 'clutch-connection)
 (require 'clutch-viz)
 
+(declare-function font-info "font.c" (name &optional frame))
+
 (defcustom clutch-er-charset 'auto
   "Characters the ER view draws with.
 `auto' draws with Unicode symbols and line characters where each is one
