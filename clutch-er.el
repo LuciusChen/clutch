@@ -88,8 +88,8 @@ the lines next to them over a highlighted line's background."
 (defvar-local clutch-er--model nil
   "What the ER view shows, a plist.
 :columns are the table's column details, :database the relations its
-keys make, :manual the relations stored by hand for the connection,
-:relations those of both that the view shows, numbered by :id, :schema
+keys make, :relations those keys and the stored relations that the view
+shows, numbered by :id, :schema
 the namespace names are shown relative to and :current the connection's
 current schema.")
 
@@ -342,7 +342,7 @@ is left out.  CURRENT is the connection's current schema."
   "Return MODEL of the table of ENTRY with MANUAL, the stored relations."
   (let* ((current (plist-get model :current))
          (id -1)
-         (model (plist-put (copy-sequence model) :manual manual)))
+         (model (copy-sequence model)))
     (plist-put model :relations
                (mapcar (lambda (relation)
                          (append (list :id (cl-incf id)) relation))

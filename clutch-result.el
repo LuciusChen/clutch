@@ -4424,7 +4424,6 @@ result's table; see `clutch-er-add-relation'."
             :column-index cidx
             :row-index ridx
             :result-buffer result-buf
-            :foreign-key fk
             :value value))))
 
 (defun clutch-record--field-action-description ()
