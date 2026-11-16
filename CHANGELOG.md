@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Metadata status notifications update the ER UI without starting another ER load, allowing other commands to finish loading metadata and execute their SQL.
+
 - Following a relation from an old result refuses once its connection has moved to another namespace. Manual relations preserve catalog qualification through rendering, navigation and SQL generation.
 
 - Follow FK skips current-schema lookup when no manual relations are stored, avoiding an additional synchronous query on DuckDB.
