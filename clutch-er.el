@@ -380,6 +380,15 @@ loaded now when missing."
           (clutch-er--stored-relations stored entry current))
          current)))))
 
+(defun clutch-er--metadata-model (conn params entry columns outgoing incoming)
+  "Build ENTRY's model on CONN from COLUMNS, OUTGOING and INCOMING keys.
+PARAMS select the stored manual relations."
+  (let ((current (clutch-db-current-schema conn)))
+    (clutch-er--with-manual
+     (list :columns columns :database (clutch-er--relations outgoing incoming)
+           :schema (or (plist-get entry :schema) current) :current current)
+     (clutch-er--read-relations (clutch-er--relations-file conn params)) entry)))
+
 (defun clutch-er--load (conn params entry)
   "Return the ER model of the table of ENTRY on CONN, opened with PARAMS.
 Its columns and foreign keys come from the metadata cache, loaded now
@@ -397,15 +406,8 @@ read each time."
          (incoming (apply #'clutch-db-referencing-keys conn table
                           (and schema (list schema))))
          (columns (clutch--ensure-column-details conn key t))
-         (outgoing (clutch--ensure-foreign-keys conn key))
-         (current (clutch-db-current-schema conn)))
-    (clutch-er--with-manual
-     (list :columns columns
-           :database (clutch-er--relations outgoing incoming)
-           :schema (or schema current)
-           :current current)
-     (clutch-er--read-relations (clutch-er--relations-file conn params))
-     entry)))
+         (outgoing (clutch--ensure-foreign-keys conn key)))
+    (clutch-er--metadata-model conn params entry columns outgoing incoming)))
 
 ;;;; Drawing
 
@@ -683,18 +685,114 @@ qualified; box characters are used when UNICODE, else ASCII."
   "Return the name of the ER buffer of CONN."
   (format "*clutch ER: %s*" (clutch--connection-key conn)))
 
+(defun clutch-er--finish-load (activity conn entry key metadata error cancelled)
+  "Finish ACTIVITY loading ENTRY's METADATA on CONN under cache KEY.
+ERROR and CANCELLED describe an unsuccessful load."
+  (clutch--query-activity-reply
+   activity conn
+   (lambda ()
+     (clutch--finish-query-activity
+      activity
+      (lambda ()
+        (if (or error cancelled)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert (if cancelled "ER load cancelled"
+                        (clutch-db--error-message error)) "\n")
+              (unless cancelled
+                (clutch--remember-object-operation-error
+                 (current-buffer) conn entry "er-diagram" error)))
+          (condition-case err
+              (let ((columns (plist-get metadata :columns))
+                    (foreign (plist-get metadata :foreign-keys))
+                    (incoming (plist-get metadata :referencing-keys)))
+                (clutch--set-table-metadata conn key :column-details columns)
+                (clutch--set-table-metadata conn key :foreign-keys foreign)
+                (run-hook-with-args 'clutch--table-metadata-updated-hook
+                                    conn key 'column-details)
+                (run-hook-with-args 'clutch--table-metadata-updated-hook
+                                    conn key 'foreign-keys)
+                (clutch-er--show
+                 entry (clutch-er--metadata-model
+                        conn clutch--connection-params entry columns foreign incoming)))
+            (error
+             (let ((inhibit-read-only t))
+               (erase-buffer)
+               (insert (error-message-string err) "\n"))
+             (signal (car err) (cdr err))))))))
+
+   :moved (lambda () (message "ER metadata ignored after connection change"))
+   :killed #'ignore))
+
+(defun clutch-er--request-metadata (conn entry key outcome continue)
+  "Read ENTRY on CONN under cache KEY, delivering OUTCOME while CONTINUE permits.
+Warm columns and outgoing keys are reused; incoming keys are always fresh."
+  (let* ((warm (and (clutch--column-details-cached-p conn key)
+                    (clutch--foreign-keys-cached-p conn key)))
+         (columns (and warm (clutch--cached-column-details conn key)))
+         (foreign (and warm (clutch--cached-foreign-keys conn key))))
+    (funcall (if warm #'clutch-db-referencing-keys-async
+               #'clutch-db-table-relations-async)
+             conn (plist-get entry :name)
+             (lambda (data)
+               (funcall outcome
+                        (if warm (list :columns columns :foreign-keys foreign
+                                       :referencing-keys data)
+                          data)
+                        nil))
+             (lambda (message)
+               (funcall outcome nil (list 'clutch-db-error message)))
+             (plist-get entry :schema) (plist-get entry :catalog) continue)))
+
+(defun clutch-er--load-async (entry)
+  "Start loading ENTRY in the current ER buffer, or return nil if unsupported."
+  (let* ((conn clutch-connection)
+         (buffer (current-buffer))
+         (activity (clutch--begin-query-activity conn))
+         (key (clutch--table-key (plist-get entry :name)
+                                 (plist-get entry :schema)
+                                 (plist-get entry :catalog)))
+         started)
+    (clutch--dispatch-query-activity
+     activity
+     (lambda ()
+       (setq started
+             (clutch--run-db-query-async
+              conn "ER metadata" nil
+              (lambda (metadata error cancelled)
+                (clutch-er--finish-load activity conn entry key metadata error cancelled))
+              (lambda (outcome)
+                (clutch-er--request-metadata
+                 conn entry key outcome
+                 (lambda ()
+                   (and (buffer-live-p buffer)
+                        (eq (buffer-local-value 'clutch-connection buffer) conn)
+                        (not (plist-get (gethash conn clutch--running-queries)
+                                        :cancelling))))))))))
+    (if started
+        (let ((inhibit-read-only t))
+          (setq clutch-er--entry entry clutch-er--model nil)
+          (erase-buffer)
+          (insert (format "Loading relations for %s...\n" (plist-get entry :name))))
+      (clutch--end-query-activity activity))
+    started))
+
 (defun clutch-er--show (entry &optional model)
-  "Show the table of ENTRY in the current ER buffer.
-MODEL is its ER model, loaded now when nil."
-  (let ((model (or model
-                   (clutch--with-object-error-capture
-                       (current-buffer) clutch-connection entry "er-diagram"
-                     (clutch-er--load clutch-connection clutch--connection-params
-                                      entry)))))
-    (setq clutch-er--entry entry
-          clutch-er--model model
-          clutch-browser-current-object entry)
-    (clutch-er--render)))
+  "Show ENTRY in the current ER buffer, loading asynchronously when supported.
+MODEL, when provided, is ready to render."
+  (unless model
+    (unless (clutch--connection-alive-p clutch-connection)
+      (user-error "Connection closed.  Reconnect from the SQL buffer or REPL"))
+    (clutch--refuse-while-running clutch-connection))
+  (unless (and (not model) (clutch-er--load-async entry))
+    (let ((model (or model
+                     (clutch--with-object-error-capture
+                      (current-buffer) clutch-connection entry "er-diagram"
+                      (clutch-er--load clutch-connection clutch--connection-params
+                                       entry)))))
+      (setq clutch-er--entry entry clutch-er--model model
+            clutch-browser-current-object entry)
+      (clutch-er--render))))
 
 (defun clutch-er--relation-at-point (prompt)
   "Return the relation at point, with PROMPT when the line joins several."
@@ -750,12 +848,14 @@ Signal unless that relation was added by hand."
 (defun clutch-er-toggle-columns ()
   "Show every column of the table, or only its key columns."
   (interactive)
+  (unless clutch-er--model (user-error "The ER view has not loaded yet"))
   (setq clutch-er--all-columns (not clutch-er--all-columns))
   (clutch-er--render))
 
 (defun clutch-er-refresh ()
   "Load the table's columns and relations again."
   (interactive)
+  (clutch--refuse-while-running clutch-connection)
   (clutch--clear-table-metadata-caches clutch-connection
                                        (plist-get clutch-er--entry :name))
   (clutch-er--show clutch-er--entry))
@@ -809,6 +909,7 @@ COLUMNS are the columns of FROM offered first; TO and TO-COLUMNS, the
 referenced table and its columns, when an existing relation is edited.
 The referenced columns default to the source names when all exist in
 the referenced table."
+  (clutch--refuse-while-running conn)
   (let* ((names (lambda (entry)
                   (mapcar (lambda (column) (plist-get column :name))
                           (clutch--ensure-column-details
@@ -822,7 +923,7 @@ the referenced table."
          (source (format "%s (%s)" (plist-get from :name)
                          (string-join from-columns ", ")))
          (to (clutch-object-read (format "%s -> referenced table: " source)
-                                (plist-get to :name) '("TABLE")))
+                                 (plist-get to :name) '("TABLE")))
          (details (clutch--ensure-column-details
                    conn (clutch--table-key (plist-get to :name)
                                            (plist-get to :schema)
@@ -930,6 +1031,7 @@ Only a relation added by hand can change."
 (defvar clutch-er-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
     (define-key map (kbd "RET") #'clutch-er-follow)
     (define-key map (kbd "TAB") #'clutch-er-toggle-columns)
     (define-key map (kbd "n") #'clutch-er-next)
@@ -968,8 +1070,7 @@ Only a relation added by hand can change."
   "Show the table of ENTRY with the tables its foreign keys join it to.
 Without ENTRY, use the table at point or ask for one."
   (interactive)
-  (let* ((source (current-buffer))
-         (context (clutch--command-connection-context))
+  (let* ((context (clutch--command-connection-context))
          (entry (or entry
                     (clutch--resolve-object-entry "ER diagram for table: "
                                                   t '("TABLE"))))
@@ -979,22 +1080,23 @@ Without ENTRY, use the table at point or ask for one."
          (params (plist-get context :params)))
     (unless (clutch--table-entry-p entry)
       (user-error "%s is not a table" (clutch--object-fqname entry)))
-    (let ((model (clutch--with-object-error-capture
-                     source conn entry "er-diagram"
-                   (clutch-er--load conn params entry)))
-          (buffer (get-buffer-create (clutch-er--buffer-name conn))))
-      (with-current-buffer buffer
-        (unless (derived-mode-p 'clutch-er-mode)
-          (clutch-er-mode))
-        (clutch--bind-connection-context conn params
-                                         (plist-get context :product)))
-      ;; Shown first, so the view is drawn for the width of its window.
-      (pop-to-buffer buffer)
-      (with-current-buffer buffer
-        (let ((previous clutch-er--entry))
-          (clutch-er--show entry model)
-          (when (and previous (not (equal previous entry)))
-            (push previous clutch-er--history)))))))
+    (let* ((name (clutch-er--buffer-name conn))
+           (existing (get-buffer name))
+           (buffer (get-buffer-create name))
+           shown)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (unless (derived-mode-p 'clutch-er-mode) (clutch-er-mode))
+              (clutch--bind-connection-context conn params (plist-get context :product))
+              (let ((previous clutch-er--entry))
+                (clutch-er--show entry)
+                (when (and previous (not (equal previous entry)))
+                  (push previous clutch-er--history))))
+            (setq shown t)
+            (pop-to-buffer buffer))
+        (unless (or shown existing)
+          (kill-buffer buffer))))))
 
 (provide 'clutch-er)
 

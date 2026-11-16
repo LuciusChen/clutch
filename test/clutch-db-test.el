@@ -1840,20 +1840,38 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                           (nth 1 case)))
                        ((string-match-p "KEY_COLUMN_USAGE" sql)
                         '(("other" "child" "parent_id" "id" "fk_parent")))
-                       (t (ert-fail sql)))))))
-          (should (equal (clutch-db-referencing-keys conn "parent" "target")
-                         (when (nth 2 case)
-                           '((:table "child" :schema "other" :column "parent_id"
-                              :ref-column "id" :constraint "fk_parent")))))
-          (let ((key-queries (seq-filter
-                              (lambda (sql) (string-match-p "KEY_COLUMN_USAGE" sql))
-                              queries)))
-            (should (= (length key-queries) (if (nth 2 case) 1 0)))
-            (when key-queries
-              (should (eq (and (string-match-p
-                                "TABLE_SCHEMA = 'other' AND TABLE_NAME = 'child'"
-                                (car key-queries)) t)
-                          (eq (nth 2 case) 'scoped))))))))))
+                       (t (ert-fail sql))))))
+                  ((symbol-function 'mysql-query-async)
+                   (lambda (connection sql callback)
+                     (condition-case err
+                         (funcall callback (mysql-query connection sql) nil)
+                       (mysql-error (funcall callback nil err))))))
+          (dolist (mode '(sync async))
+            (ert-info ((symbol-name mode))
+              (setq queries nil)
+              (let (actual error replied)
+                (if (eq mode 'sync)
+                    (setq actual (clutch-db-referencing-keys conn "parent" "target"))
+                  (should (clutch-db-referencing-keys-async
+                           conn "parent"
+                           (lambda (value) (setq actual value replied t))
+                           (lambda (err) (setq error err replied t))
+                           "target"))
+                  (should replied)
+                  (should-not error))
+                (should (equal actual
+                               (when (nth 2 case)
+                                 '((:table "child" :schema "other" :column "parent_id"
+                                    :ref-column "id" :constraint "fk_parent"))))))
+              (let ((key-queries (seq-filter
+                                  (lambda (sql) (string-match-p "KEY_COLUMN_USAGE" sql))
+                                  queries)))
+                (should (= (length key-queries) (if (nth 2 case) 1 0)))
+                (when key-queries
+                  (should (eq (and (string-match-p
+                                    "TABLE_SCHEMA = 'other' AND TABLE_NAME = 'child'"
+                                    (car key-queries)) t)
+                              (eq (nth 2 case) 'scoped))))))))))))
 
 (ert-deftest clutch-db-test-mysql-column-details-honor-schema ()
   "Column type, comment, primary key and foreign key share the explicit schema."

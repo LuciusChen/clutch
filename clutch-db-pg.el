@@ -1338,13 +1338,9 @@ WHERE schemaname = current_schema()
       (when (and comment (not (string-empty-p comment)))
         comment))))
 
-(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-pg--connection) table
-                                             &optional schema _catalog)
-  "Return primary key column names for TABLE in SCHEMA on PostgreSQL CONN."
-  (clutch-db--translate-library-error pgsql-error
-    (let ((result (clutch-db-pg--exec
-                   conn
-                   (format "SELECT a.attname
+(defun clutch-db-pg--primary-key-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SELECT a.attname
 FROM (SELECT i.indrelid, i.indkey::smallint[] AS key_array,
              generate_subscripts(i.indkey::smallint[], 1) AS ord
       FROM pg_index i
@@ -1352,7 +1348,99 @@ FROM (SELECT i.indrelid, i.indkey::smallint[] AS key_array,
 JOIN pg_attribute a
   ON a.attrelid = pk.indrelid AND a.attnum = pk.key_array[pk.ord]
 ORDER BY pk.ord"
-                           (clutch-db-pg--relation table schema)))))
+          (clutch-db-pg--relation table schema)))
+
+(defun clutch-db-pg--foreign-key-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SELECT
+    a.attname,
+    rc.relname AS referenced_table,
+    ra.attname AS referenced_column,
+    rn.nspname AS referenced_schema,
+    con.conname
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_class rc ON rc.oid = con.confrelid
+JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conrelid = %s
+ORDER BY con.conname, k.ord"
+          (clutch-db-pg--relation table schema)))
+
+(defun clutch-db-pg--referencing-key-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SELECT
+    c.relname,
+    n.nspname,
+    a.attname,
+    ra.attname AS referenced_column,
+    con.conname
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conparentid = 0
+    AND con.confrelid = %s
+ORDER BY n.nspname, c.relname, con.conname, k.ord"
+          (clutch-db-pg--relation table schema)))
+
+(defun clutch-db-pg--column-details-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
+c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
+c.column_default, \
+CASE WHEN c.is_generated = 'ALWAYS' OR c.identity_generation = 'ALWAYS' THEN 'ALWAYS' \
+WHEN c.is_identity = 'YES' THEN 'YES' END, \
+col_description(pc.oid, a.attnum) \
+FROM information_schema.columns c \
+JOIN pg_class pc ON pc.relname = c.table_name \
+JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
+  AND pn.nspname = c.table_schema \
+JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name \
+WHERE pc.oid = %s \
+ORDER BY c.ordinal_position"
+          (clutch-db-pg--relation table schema)))
+
+(defun clutch-db-pg--foreign-key-values (rows)
+  "Decode metadata ROWS into key columns."
+  (mapcar
+   (lambda (row)
+     (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema
+                              ,constraint)
+                  row))
+       (cons col-name
+             (list :ref-table ref-table :ref-column ref-column
+                   :ref-schema ref-schema :constraint constraint))))
+   rows))
+
+(defun clutch-db-pg--referencing-key-values (rows)
+  "Decode metadata ROWS into key columns."
+  (mapcar
+   (lambda (row)
+     (pcase-let ((`(,ref-table ,ref-schema ,column ,ref-column ,constraint)
+                  row))
+       (list :table ref-table :schema ref-schema :column column
+             :ref-column ref-column :constraint constraint)))
+   rows))
+
+(cl-defmethod clutch-db-primary-key-columns ((conn clutch-db-pg--connection) table
+                                             &optional schema _catalog)
+  "Return primary key column names for TABLE in SCHEMA on PostgreSQL CONN."
+  (clutch-db--translate-library-error pgsql-error
+    (let ((result (clutch-db-pg--exec
+                   conn
+                   (clutch-db-pg--primary-key-sql table schema))))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-pg--connection) table
@@ -1381,35 +1469,9 @@ its constraint, and :ref-schema names the referenced table's schema.
 The catalogs, unlike the information schema, show every key to a user
 who can read TABLE, whoever owns the tables it references."
   (clutch-db--translate-library-error pgsql-error
-    (let* ((sql (format "SELECT
-    a.attname,
-    rc.relname AS referenced_table,
-    ra.attname AS referenced_column,
-    rn.nspname AS referenced_schema,
-    con.conname
-FROM pg_constraint con
-CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
-    WITH ORDINALITY AS k(attnum, refattnum, ord)
-JOIN pg_attribute a
-    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
-JOIN pg_class rc ON rc.oid = con.confrelid
-JOIN pg_namespace rn ON rn.oid = rc.relnamespace
-JOIN pg_attribute ra
-    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
-WHERE con.contype = 'f'
-    AND con.conrelid = %s
-ORDER BY con.conname, k.ord"
-                          (clutch-db-pg--relation table schema)))
-             (result (clutch-db-pg--exec conn sql)))
-        (mapcar
-         (lambda (row)
-           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema
-                                    ,constraint)
-                        row))
-             (cons col-name
-                   (list :ref-table ref-table :ref-column ref-column
-                         :ref-schema ref-schema :constraint constraint))))
-         (clutch-db-pg--metadata-rows result)))))
+    (let* ((sql (clutch-db-pg--foreign-key-sql table schema))
+           (result (clutch-db-pg--exec conn sql)))
+      (clutch-db-pg--foreign-key-values (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-referencing-keys ((conn clutch-db-pg--connection) table
                                           &optional schema _catalog)
@@ -1417,62 +1479,69 @@ ORDER BY con.conname, k.ord"
 A key declared on a partitioned table is reported once, not again for
 each partition that inherits it."
   (clutch-db--translate-library-error pgsql-error
-    (let* ((sql (format "SELECT
-    c.relname,
-    n.nspname,
-    a.attname,
-    ra.attname AS referenced_column,
-    con.conname
-FROM pg_constraint con
-CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
-    WITH ORDINALITY AS k(attnum, refattnum, ord)
-JOIN pg_class c ON c.oid = con.conrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN pg_attribute a
-    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
-JOIN pg_attribute ra
-    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
-WHERE con.contype = 'f'
-    AND con.conparentid = 0
-    AND con.confrelid = %s
-ORDER BY n.nspname, c.relname, con.conname, k.ord"
-                        (clutch-db-pg--relation table schema)))
+    (let* ((sql (clutch-db-pg--referencing-key-sql table schema))
            (result (clutch-db-pg--exec conn sql)))
-      (mapcar
-       (lambda (row)
-         (pcase-let ((`(,ref-table ,ref-schema ,column ,ref-column ,constraint)
-                      row))
-           (list :table ref-table :schema ref-schema :column column
-                 :ref-column ref-column :constraint constraint)))
-       (clutch-db-pg--metadata-rows result)))))
+      (clutch-db-pg--referencing-key-values (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
                                         &optional schema _catalog)
   "Return detailed column info for TABLE in SCHEMA on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
     (let* ((col-result
-              (clutch-db-pg--exec
-               conn
-               (format "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
-c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
-c.column_default, \
-CASE WHEN c.is_generated = 'ALWAYS' OR c.identity_generation = 'ALWAYS' THEN 'ALWAYS' \
-WHEN c.is_identity = 'YES' THEN 'YES' END, \
-col_description(pc.oid, a.attnum) \
-FROM information_schema.columns c \
-JOIN pg_class pc ON pc.relname = c.table_name \
-JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
-  AND pn.nspname = c.table_schema \
-JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name \
-WHERE pc.oid = %s \
-ORDER BY c.ordinal_position"
-                       (clutch-db-pg--relation table schema))))
-             (col-rows (clutch-db-pg--metadata-rows col-result))
-             (namespace (clutch-db--namespace-arguments schema nil))
-             (pk-cols  (apply #'clutch-db-primary-key-columns conn table namespace))
-             (fks      (apply #'clutch-db-foreign-keys conn table namespace)))
+            (clutch-db-pg--exec
+             conn
+             (clutch-db-pg--column-details-sql table schema)))
+           (col-rows (clutch-db-pg--metadata-rows col-result))
+           (namespace (clutch-db--namespace-arguments schema nil))
+           (pk-cols  (apply #'clutch-db-primary-key-columns conn table namespace))
+           (fks      (apply #'clutch-db-foreign-keys conn table namespace)))
       (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
               col-rows))))
+
+(cl-defmethod clutch-db-referencing-keys-async
+  ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog continue)
+  "Read PostgreSQL TABLE's incoming keys on CONN without blocking."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     conn
+     (lambda (sql outcome)
+       (pgsql-exec-async
+        (clutch-db-pg--connection-client conn) sql
+        (lambda (result error)
+          (funcall outcome (and result (clutch-db-pg--metadata-rows result)) error))))
+     (list (clutch-db-pg--referencing-key-sql table schema))
+     (lambda (rows) (clutch-db-pg--referencing-key-values (car rows)))
+     (clutch-db--metadata-outcome callback errback) continue)
+    t))
+
+(cl-defmethod clutch-db-table-relations-async
+  ((conn clutch-db-pg--connection) table callback
+   &optional errback schema _catalog continue)
+  "Read PostgreSQL TABLE metadata on CONN through asynchronous wire requests."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     conn
+     (lambda (sql outcome)
+       (pgsql-exec-async
+        (clutch-db-pg--connection-client conn) sql
+        (lambda (result error)
+          (funcall outcome
+                   (and result (clutch-db-pg--metadata-rows result)) error))))
+     (list (clutch-db-pg--primary-key-sql table schema)
+           (clutch-db-pg--foreign-key-sql table schema)
+           (clutch-db-pg--column-details-sql table schema)
+           (clutch-db-pg--referencing-key-sql table schema))
+     (pcase-lambda (`(,primary ,foreign ,columns ,incoming))
+       (let ((primary (mapcar #'car primary))
+             (foreign (clutch-db-pg--foreign-key-values foreign)))
+         (list :columns
+               (mapcar (lambda (row)
+                         (clutch-db-pg--column-details-row row primary foreign))
+                       columns)
+               :foreign-keys foreign
+               :referencing-keys (clutch-db-pg--referencing-key-values incoming))))
+     (clutch-db--metadata-outcome callback errback) continue)
+    t))
 
 ;;;; Re-entrancy guard
 
@@ -1728,6 +1797,18 @@ XTDB has no table comments."
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-db-pg--xtdb-connection) _table
                                       &optional _schema _catalog)
   "Return nil, since XTDB has no foreign keys."
+  nil)
+
+(cl-defmethod clutch-db-table-relations-async
+  ((_conn clutch-db-pg--xtdb-connection) _table _callback
+   &optional _errback _schema _catalog _continue)
+  "Use XTDB's existing metadata methods instead of PostgreSQL catalogs."
+  nil)
+
+(cl-defmethod clutch-db-referencing-keys-async
+  ((_conn clutch-db-pg--xtdb-connection) _table _callback
+   &optional _errback _schema _catalog _continue)
+  "Use XTDB's existing metadata methods instead of PostgreSQL catalogs."
   nil)
 
 (cl-defmethod clutch-db-referencing-keys ((_conn clutch-db-pg--xtdb-connection)

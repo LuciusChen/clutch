@@ -26,6 +26,7 @@
 
 ;;;; Live integration tests
 
+
 (defun clutch-test--live-connect-params ()
   "Return connection params for `clutch-test--with-conn'."
   (let ((params (if clutch-test-url
@@ -153,6 +154,50 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
          (unwind-protect
              (progn ,@body)
            (clutch-db-disconnect ,var))))))
+
+(ert-deftest clutch-test-live-er-loads-cold-and-warm-metadata ()
+  "The public ER command loads whole keys asynchronously and reuses warm columns."
+  :tags '(:clutch-live)
+  (skip-unless (memq clutch-test-backend '(pg mysql)))
+  (clutch-test--with-conn conn
+    (let* ((parent (format "clutch_er_parent_%d" (emacs-pid)))
+           (child (format "clutch_er_child_%d" (emacs-pid)))
+           (clutch-er-relations-directory (make-temp-file "clutch-er-live-" t))
+           source view)
+      (unwind-protect
+          (progn
+            (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, a INT, b INT, UNIQUE(a,b))" parent))
+            (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, p INT, a INT, b INT, FOREIGN KEY(p) REFERENCES %s(id), FOREIGN KEY(a,b) REFERENCES %s(a,b))" child parent parent))
+            (setq source (generate-new-buffer " *clutch-er-live*"))
+            (with-current-buffer source
+              (clutch-mode)
+              (clutch--bind-connection-context
+               conn (clutch-test--live-connect-params)
+               (clutch-backend-sql-product clutch-test-backend))
+              (clutch-er-diagram (list :name parent :type "TABLE")))
+            (setq view (get-buffer (clutch-er--buffer-name conn)))
+            (should (gethash conn clutch--running-queries))
+            (clutch-test--await-queries)
+            (with-current-buffer view
+              (should (= 3 (length (plist-get clutch-er--model :columns))))
+              (should (plist-get (car (plist-get clutch-er--model :columns)) :primary-key))
+              (should (equal (sort (mapcar (lambda (relation)
+                                            (length (plist-get relation :pairs)))
+                                          (plist-get clutch-er--model :relations)) #'<)
+                             '(1 2)))
+              (cl-letf (((symbol-function 'clutch-db-table-relations-async)
+                         (lambda (&rest _) (ert-fail "Warm columns were fetched again"))))
+                (clutch-er-diagram (list :name parent :type "TABLE"))
+                (should (gethash conn clutch--running-queries))
+                (clutch-test--await-queries))
+              (should clutch-er--model))
+            (should-not (clutch-db-in-use-p conn)))
+        (when (buffer-live-p view) (kill-buffer view))
+        (when (buffer-live-p source) (kill-buffer source))
+        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" child)))
+        (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" parent)))
+        (delete-directory clutch-er-relations-directory t)))))
+
 
 (defmacro clutch-test--with-live-result-buffer (name &rest body)
   "Run BODY with live SELECT results isolated to result buffer NAME."

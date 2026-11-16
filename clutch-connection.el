@@ -42,6 +42,10 @@
 (declare-function auth-source-pass-parse-entry "auth-source-pass" (entry))
 (declare-function sql-set-product "sql" (product))
 (declare-function tramp-rpc-controlmaster-options "tramp-rpc" (vec))
+(defvar clutch--source-window nil
+  "Window showing the buffer whose finished query is being presented.
+Bound while the outcome is presented so result buffers open next to
+that window.")
 (defvar sql-product)
 (defvar tramp-rpc-use-controlmaster)
 
@@ -686,6 +690,85 @@ enclosing atomic-batch workflow."
       (clutch--record-tx-state-after-query conn sql))
     result))
 
+(defun clutch--begin-query-activity (connection &optional markers on-end)
+  "Start a foreground query activity on CONNECTION in the current buffer.
+MARKERS locate its statements in the buffer; ending the activity releases
+them.  ON-END, when non-nil, is a function the activity calls once as it
+ends, however it ends.  Return the activity, which
+`clutch--finish-query-activity' ends."
+  (clutch-db--reserve-connection connection)
+  (let ((start (float-time)))
+    (setq clutch--execution-start-time start)
+    (clutch--execution-refresh-start)
+    (clutch--update-mode-line)
+    (redisplay t)
+    (list :connection connection :buffer (current-buffer) :markers markers
+          :on-end on-end :start start :ended nil)))
+
+(defun clutch--end-query-activity (activity)
+  "End ACTIVITY once, releasing its connection, markers and execution display.
+A later activity in ACTIVITY's buffer keeps its own display."
+  (unless (plist-get activity :ended)
+    (plist-put activity :ended t)
+    (when-let* ((on-end (plist-get activity :on-end)))
+      (funcall on-end))
+    (clutch-db--release-connection (plist-get activity :connection))
+    (dolist (marker (plist-get activity :markers))
+      (set-marker marker nil))
+    (let ((buffer (plist-get activity :buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (eql clutch--execution-start-time (plist-get activity :start))
+            (setq clutch--execution-start-time nil)
+            (clutch--update-mode-line)))))))
+
+(defun clutch--dispatch-query-activity (activity dispatch)
+  "Call DISPATCH to start ACTIVITY's work, ending ACTIVITY on a nonlocal exit."
+  (let (dispatched)
+    (unwind-protect
+        (progn
+          (funcall dispatch)
+          (setq dispatched t))
+      (unless dispatched
+        (clutch--end-query-activity activity)))))
+
+(cl-defun clutch--query-activity-reply
+	  (activity connection handle &key moved killed)
+	  "Call HANDLE for a reply to ACTIVITY that came from CONNECTION.
+The reply counts while ACTIVITY's buffer is live and holds CONNECTION.
+After an idle reconnect that is the new connection, not ACTIVITY's own
+:connection, the one it reserved.  Otherwise MOVED or KILLED is called,
+while ACTIVITY's markers still place its statements, and then ACTIVITY
+ends; without KILLED, a killed buffer's reply is dropped with a message.
+A nonlocal exit from HANDLE ends ACTIVITY."
+	  (let ((buffer (plist-get activity :buffer)))
+	    (cond
+	     ((not (buffer-live-p buffer))
+	      (unwind-protect
+		  (if killed
+		      (funcall killed)
+		    (message "Query finished after its buffer was killed"))
+		(clutch--end-query-activity activity)))
+	     ((not (eq (buffer-local-value 'clutch-connection buffer) connection))
+	      (unwind-protect
+		  (when moved
+		    (funcall moved))
+		(clutch--end-query-activity activity)))
+	     (t
+	      (clutch--dispatch-query-activity activity handle)))))
+
+(defun clutch--finish-query-activity (activity present)
+  "Call PRESENT in ACTIVITY's buffer, then end ACTIVITY.
+PRESENT keeps the selected window.  A reply reaches this through
+`clutch--query-activity-reply', which has made sure the buffer is live."
+  (unwind-protect
+      (let ((buffer (plist-get activity :buffer)))
+        (save-selected-window
+          (with-current-buffer buffer
+            (let ((clutch--source-window (get-buffer-window buffer)))
+              (funcall present)))))
+    (clutch--end-query-activity activity)))
+
 (defun clutch--run-db-query-async (conn sql region callback &optional start)
   "Run SQL on CONN like `clutch--run-db-query' and call CALLBACK once.
 CALLBACK receives RESULT and ERROR: a `clutch-db-result' and nil, or nil
@@ -703,7 +786,8 @@ server may still finish it.
 START, when non-nil, starts SQL in place of `clutch-db-query-async': it
 is called with the function that takes the outcome and returns non-nil
 once SQL runs.  When START declines, return nil and run nothing; otherwise
-return non-nil."
+return non-nil.  START may deliver workflow-specific RESULT data; the
+default query operation delivers a `clutch-db-result'."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error

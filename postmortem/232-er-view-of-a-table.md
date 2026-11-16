@@ -12,7 +12,7 @@ Reading the keys again showed three defects, each fixed with its own regression.
 
 ## Loading and drawing
 
-The view loads synchronously, as describe does: native PostgreSQL and MySQL metadata already runs on the main thread when idle, so an asynchronous path would have added state without freeing Emacs. It refuses while a statement runs and waits for a background metadata request, as foreground SQL does. Columns and foreign keys come from the schema cache (`clutch--ensure-foreign-keys` is the synchronous twin of the async loader and runs the same update hook); the referencing keys are read each time the view loads, since only the view uses them. The model lives in the view's buffer, which binds the connection like any attached buffer, so `clutch--replace-connection` moves it.
+The initial view loaded synchronously, as describe does: the available native metadata callbacks deferred synchronous reads to idle time. The later wire-asynchronous prototype is recorded in [233](233-er-metadata-wire-async.md). It refuses while a statement runs and waits for a background metadata request, as foreground SQL does. Columns and foreign keys come from the schema cache (`clutch--ensure-foreign-keys` is the synchronous twin of the async loader and runs the same update hook); the referencing keys are read each time the view loads, since only the view uses them. The model lives in the view's buffer, which binds the connection like any attached buffer, so `clutch--replace-connection` moves it.
 
 Moving point only moves overlays: each highlightable line records the relations it belongs to, and the post-command hook acts only when that set changes. The buffer is drawn again only for a new table, a column toggle or a refresh.
 
