@@ -121,6 +121,18 @@ with TABLE.  Return the column lists offered first, in order."
                             (overlays-in (point-min) (point-max))))
         #'string<))
 
+(ert-deftest clutch-test-er-keeps-unnamed-keys-separate ()
+  "Missing constraint names cannot group independent key columns."
+  (let ((relations
+         (clutch-er--relations
+          '(("x" :ref-table "parent" :ref-column "id")
+            ("y" :ref-table "parent" :ref-column "other"))
+          '((:table "child" :column "x" :ref-column "id")
+            (:table "child" :column "y" :ref-column "other")))))
+    (should (equal (mapcar (lambda (relation) (plist-get relation :pairs)) relations)
+                   '((("x" . "id")) (("y" . "other"))
+                     (("id" . "x")) (("other" . "y")))))))
+
 (ert-deftest clutch-test-er-shows-key-columns-and-relations ()
   "Each column shows the relations it ends beside it, a key over two
 adjacent columns as one bracket, and only key columns show until all

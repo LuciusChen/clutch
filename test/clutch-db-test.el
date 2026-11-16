@@ -3808,35 +3808,46 @@ old database, while Clutch showed and listed the new one."
   "ClickHouse column metadata should map foreign keys without adding scope."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver clickhouse
-                                               :database "default")))
+                                                       :database "default")))
         calls)
-    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_conn op params &optional _timeout)
-                 (push (cons op params) calls)
-                 (pcase op
-                   ("get-primary-keys" '(:primary-keys ("id")))
-                   ("get-foreign-keys"
-                    '(:foreign-keys ((:fk-column "user_id"
-                                      :pk-table "users" :pk-column "id"))))
-                   ("get-columns" `(:columns ((:name "id" :type "UInt64"
-                                               :nullable ,clutch-jdbc--json-false)
-                                              (:name "user_id" :type "UInt64"
-                                               :nullable t
-                                               :default "0"))))
-                   (_ (ert-fail (format "unexpected op: %s" op)))))))
-      (should
-       (equal (clutch-db-column-details conn "events")
-              '((:name "id" :type "UInt64" :backend-type "UInt64"
-                 :nullable nil
-                 :primary-key t :foreign-key nil :comment nil :default nil)
-                (:name "user_id" :type "UInt64" :backend-type "UInt64"
-                 :nullable t
-                 :primary-key nil
-                 :foreign-key (:ref-table "users" :ref-column "id")
-                 :comment nil :default "0"))))
-      (dolist (call calls)
-        (should-not (alist-get 'catalog (cdr call)))
-        (should-not (alist-get 'schema (cdr call)))))))
+    (cl-labels ((reply (op params)
+                  (push (cons op params) calls)
+                  (pcase op
+                    ("get-primary-keys" '(:primary-keys ("id")))
+                    ("get-foreign-keys"
+                     '(:foreign-keys ((:fk-column "user_id"
+                                                  :pk-table "users" :pk-column "id"))))
+                    ("get-columns" `(:columns ((:name "id" :type "UInt64"
+                                                      :nullable ,clutch-jdbc--json-false)
+                                               (:name "user_id" :type "UInt64"
+                                                      :nullable t :default "0"))))
+                    (_ (ert-fail (format "unexpected op: %s" op))))))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op params &optional _timeout) (reply op params)))
+                ((symbol-function 'clutch-jdbc--rpc-async)
+                 (lambda (op params callback &rest _)
+                   (funcall callback (reply op params))
+                   t)))
+        (dolist (async '(nil t))
+          (let ((actual (if async
+                            (let (value)
+                              (clutch-db-column-details-async
+                               conn "events" (lambda (columns) (setq value columns)))
+                              value)
+                          (clutch-db-column-details conn "events"))))
+            (should
+             (equal actual
+                    '((:name "id" :type "UInt64" :backend-type "UInt64"
+                             :nullable nil
+                             :primary-key t :foreign-key nil :comment nil :default nil)
+                      (:name "user_id" :type "UInt64" :backend-type "UInt64"
+                             :nullable t
+                             :primary-key nil
+                             :foreign-key (:ref-table "users" :ref-column "id")
+                             :comment nil :default "0"))))))
+        (dolist (call calls)
+          (should-not (alist-get 'catalog (cdr call)))
+          (should-not (alist-get 'schema (cdr call))))))))
 
 (ert-deftest clutch-db-test-jdbc-table-metadata-asks-about-the-table-s-scope ()
   "JDBC metadata for a qualified table should ask about that table's scope.
@@ -3873,6 +3884,8 @@ table of the same name in the connection's own scope answered for it."
                    '(("get-primary-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
+                     ("get-primary-keys" "peo_ple" "alt_%\\scope" "other")
+                     ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
                      ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
@@ -3894,6 +3907,58 @@ connection's own schema.  A driver without schemas reports an empty one."
                      '(("parent_id" :ref-table "parents" :ref-column "id"
                         :ref-schema "alt")
                        ("kind_id" :ref-table "kinds" :ref-column "id")))))))
+
+(ert-deftest clutch-db-test-jdbc-er-metadata-keeps-scope-and-cancellation ()
+  "ER metadata preserves key groups and never cancels the primary SQL lane."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 5 :busy t
+                                     :params '(:driver sqlserver :schema "dbo")))
+        (clutch-jdbc-agent-version "0.2.28"))
+    (dolist (cancel '(nil t))
+      (let ((continue t) calls pending metadata failure)
+        (cl-letf (((symbol-function 'clutch-jdbc--rpc-async)
+                   (lambda (op params callback &rest _)
+                     (should (equal (alist-get 'schema params)
+                                    (if (equal op "get-columns") "side\\_1" "side_1")))
+                     (should (equal (alist-get 'catalog params) "other"))
+                     (push op calls)
+                     (setq pending callback)
+                     42))
+                  ((symbol-function 'clutch-db-interrupt-query)
+                   (lambda (_) (ert-fail "Metadata cancelled foreground SQL"))))
+          (should (clutch-db-table-relations-async
+                   conn "people" (lambda (value) (setq metadata value))
+                   (lambda (error) (setq failure error)) "side_1" "other"
+                   (lambda () continue)))
+          (should (equal calls '("get-primary-keys")))
+          (when cancel
+            (should-not (clutch-db-interrupt-metadata conn))
+            (setq continue nil))
+          (while pending
+            (let ((reply pending) (op (car calls)))
+              (setq pending nil)
+              (funcall reply
+                       (pcase op
+                         ("get-primary-keys" '(:primary-keys ("id")))
+                         ("get-columns" '(:columns ((:name "id" :type "INT"))))
+                         ("get-foreign-keys" '(:foreign-keys nil))
+                         ("get-referencing-keys"
+                          '(:keys ((:fk-table "child" :fk-schema "side_1"
+                                              :fk-column "a" :pk-column "id" :fk-name "fk")
+                                   (:fk-table "child" :fk-schema "side_1"
+                                              :fk-column "b" :pk-column "other" :fk-name "fk"))))))))
+          (if cancel
+              (progn (should failure) (should-not metadata)
+                     (should (= 1 (length calls))))
+            (should-not failure)
+            (should (plist-get (car (plist-get metadata :columns)) :primary-key))
+            (should (equal (plist-get metadata :referencing-keys)
+                           '((:table "child" :column "a" :ref-column "id"
+                                     :schema "side_1" :constraint "fk")
+                             (:table "child" :column "b" :ref-column "other"
+                                     :schema "side_1" :constraint "fk"))))
+            (should (equal (nreverse calls)
+                           '("get-primary-keys" "get-foreign-keys"
+                             "get-columns" "get-referencing-keys")))))))))
 
 ;;;; Unit tests — clutch-db-complete-tables (Oracle)
 
@@ -8714,6 +8779,7 @@ key into another schema lost that schema."
     (let* ((schema (clutch-db-test--live-name "cc_alt"))
            (table (clutch-db-test--live-name "cc_people"))
            (parents (clutch-db-test--live-name "cc_parents"))
+           (key (clutch-db-test--live-name "cc_fk"))
            (drops (list (format "DROP TABLE IF EXISTS %s.%s" schema table)
                         (format "DROP TABLE IF EXISTS %s.%s" schema parents)
                         (format "DROP TABLE IF EXISTS dbo.%s" table)
@@ -8727,14 +8793,14 @@ key into another schema lost that schema."
             (clutch-db-query
              conn (format "CREATE TABLE %s.%s (id INT PRIMARY KEY)" schema parents))
             (clutch-db-query
-             conn (format "CREATE TABLE %s.%s (id INT PRIMARY KEY, parent_id INT REFERENCES %s.%s (id))"
-                          schema table schema parents))
+             conn (format "CREATE TABLE %s.%s (id INT PRIMARY KEY, parent_id INT, CONSTRAINT %s FOREIGN KEY(parent_id) REFERENCES %s.%s (id))"
+                          schema table key schema parents))
             (should (equal (mapcar (lambda (column) (plist-get column :name))
                                    (clutch-db-column-details conn table schema))
                            '("id" "parent_id")))
             (should (equal (clutch-db-foreign-keys conn table schema)
                            `(("parent_id" :ref-table ,parents :ref-column "id"
-                              :ref-schema ,schema)))))
+                              :ref-schema ,schema :constraint ,key)))))
         (dolist (sql drops)
           (ignore-errors (clutch-db-query conn sql)))))))
 

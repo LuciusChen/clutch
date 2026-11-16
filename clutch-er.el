@@ -121,10 +121,11 @@ property does.")
 ;; :stored, its form in the relations file.
 
 (defun clutch-er--runs (items key)
-  "Split ITEMS into lists of consecutive items with `equal' KEY values."
+  "Split ITEMS into consecutive groups with equal, non-nil KEY values."
   (let (runs)
     (dolist (item items)
-      (if (and runs (equal (funcall key item) (funcall key (caar runs))))
+      (if (and runs (funcall key item)
+               (equal (funcall key item) (funcall key (caar runs))))
           (push item (car runs))
         (push (list item) runs)))
     (nreverse (mapcar #'reverse runs))))
@@ -148,11 +149,10 @@ OUTGOING is the table's `clutch-db-foreign-keys', INCOMING its
            (clutch-er--runs outgoing
                             (lambda (fk)
                               (let ((ref (cdr fk)))
-                                (if (plist-get ref :constraint)
-                                    (list (plist-get ref :constraint)
-                                          (plist-get ref :ref-schema)
-                                          (plist-get ref :ref-table))
-                                  fk)))))
+                                (when (plist-get ref :constraint)
+                                  (list (plist-get ref :constraint)
+                                        (plist-get ref :ref-schema)
+                                        (plist-get ref :ref-table)))))))
    (mapcar (lambda (run)
              (list :direction 'in
                    :table (plist-get (car run) :table)
@@ -163,9 +163,10 @@ OUTGOING is the table's `clutch-db-foreign-keys', INCOMING its
                                   run)))
            (clutch-er--runs incoming
                             (lambda (key)
-                              (list (plist-get key :schema)
-                                    (plist-get key :table)
-                                    (plist-get key :constraint)))))))
+                              (when (plist-get key :constraint)
+                                (list (plist-get key :schema)
+                                      (plist-get key :table)
+                                      (plist-get key :constraint))))))))
 
 (defun clutch-er--same-relation-p (a b current)
   "Return non-nil when relations A and B join the same columns.
@@ -768,7 +769,8 @@ Warm columns and outgoing keys are reused; incoming keys are always fresh."
                    (and (buffer-live-p buffer)
                         (eq (buffer-local-value 'clutch-connection buffer) conn)
                         (not (plist-get (gethash conn clutch--running-queries)
-                                        :cancelling))))))))))
+                                        :cancelling))))))
+              (lambda () (clutch-db-interrupt-metadata conn))))))
     (if started
         (let ((inhibit-read-only t))
           (setq clutch-er--entry entry clutch-er--model nil)
