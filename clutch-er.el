@@ -173,6 +173,7 @@ OUTGOING is the table's `clutch-db-foreign-keys', INCOMING its
 A relation without a schema is in CURRENT, the connection's schema."
   (and (eq (plist-get a :direction) (plist-get b :direction))
        (equal (plist-get a :table) (plist-get b :table))
+       (equal (plist-get a :catalog) (plist-get b :catalog))
        (equal (or (plist-get a :schema) current)
               (or (plist-get b :schema) current))
        (= (length (plist-get a :pairs)) (length (plist-get b :pairs)))
@@ -317,11 +318,13 @@ incoming.  CURRENT is the connection's current schema."
            collect (list :direction 'out
                          :table (alist-get 'table to)
                          :schema (alist-get 'schema to)
+                         :catalog (alist-get 'catalog to)
                          :pairs pairs :stored relation)
            when (clutch-er--end-p to entry current)
            collect (list :direction 'in
                          :table (alist-get 'table from)
                          :schema (alist-get 'schema from)
+                         :catalog (alist-get 'catalog from)
                          :pairs (mapcar (lambda (pair)
                                           (cons (cdr pair) (car pair)))
                                         pairs)
@@ -371,8 +374,7 @@ loaded now when missing."
                  (clutch-er--relations-file conn params))))
     (if (null stored)
         database
-      ;; Resolving unqualified stored ends needs the live namespace.
-      ;; DuckDB queries it synchronously, so skip it without stored relations.
+      ;; Only stored relations need the namespace to resolve unqualified ends.
       (let ((current (clutch-db-current-schema conn)))
         (clutch-er--add-stored
          database
@@ -401,11 +403,12 @@ read each time."
   (clutch--await-background-request conn)
   (let* ((table (plist-get entry :name))
          (schema (plist-get entry :schema))
-         (key (clutch--table-key table schema))
+         (catalog (plist-get entry :catalog))
+         (key (clutch--table-key table schema catalog))
          ;; Asked first, so a connection that cannot answer refuses
          ;; before anything else is loaded.
          (incoming (apply #'clutch-db-referencing-keys conn table
-                          (and schema (list schema))))
+                          (clutch-db--namespace-arguments schema catalog)))
          (columns (clutch--ensure-column-details conn key t))
          (outgoing (clutch--ensure-foreign-keys conn key)))
     (clutch-er--metadata-model conn params entry columns outgoing incoming)))
@@ -424,9 +427,11 @@ See `clutch-er-charset'."
       (clutch-viz-charset '(?◆ ?● ?○ ?→ ?← ?⇢ ?⇠ ?┐ ?┤ ?┴ ?┄ ?· ?…))
     clutch-er-charset))
 
-(defun clutch-er--name (table schema shown-schema)
-  "Return TABLE, qualified by a muted SCHEMA unless it is SHOWN-SCHEMA."
-  (concat (if (and schema (not (equal schema shown-schema)))
+(defun clutch-er--name (table schema shown-schema &optional catalog)
+  "Return TABLE with muted CATALOG and SCHEMA qualifications.
+A schema in SHOWN-SCHEMA is omitted when CATALOG is absent."
+  (concat (when catalog (propertize (concat catalog ".") 'face 'shadow))
+          (if (and schema (or catalog (not (equal schema shown-schema))))
               (propertize (concat schema ".") 'face 'shadow)
             "")
           (propertize table 'face 'clutch-er-table)))
@@ -458,7 +463,8 @@ characters when UNICODE, else ASCII."
 Names in SHOWN-SCHEMA are not qualified."
   (let ((columns (mapcar #'cdr (plist-get relation :pairs))))
     (concat (clutch-er--name (plist-get relation :table)
-                             (plist-get relation :schema) shown-schema)
+                             (plist-get relation :schema) shown-schema
+                             (plist-get relation :catalog))
             (propertize (if (cdr columns)
                             (format " (%s)" (string-join columns ", "))
                           (concat "." (car columns)))
@@ -836,7 +842,8 @@ Signal unless that relation was added by hand."
          (current clutch-er--entry))
     (clutch-er--show (list :name (plist-get relation :table)
                            :type "TABLE"
-                           :schema (plist-get relation :schema)))
+                           :schema (plist-get relation :schema)
+                           :catalog (plist-get relation :catalog)))
     (push current clutch-er--history)))
 
 (defun clutch-er-back ()

@@ -20,7 +20,7 @@ The public live cancellation check caught three synchronous primary `execute` ca
 
 ## Verification and local measurement
 
-Emacs 32.0.50 passed the full non-live gate (734 main, 295 backend and 13 architecture tests), byte compilation, package-lint and checkdoc. The complete native/JDBC live run passed 267 applicable tests across 15 suites, including Oracle Free, SQL Server 2022, DuckDB, PostgreSQL 16 and MySQL 8.0; backend-specific capability skips remain explicit. ClickHouse used 24.8. Test containers were removed, and the volume names and count matched before and after (30). The isolated agent jar was built from PR #8 at d401e4e, SHA-256 4edca64e3d569041ab9e04e0afa15343afb768dfeb3f95da57e68a54829aa8ab.
+Emacs 32.0.50 passed the full non-live gate (734 main, 295 backend and 13 architecture tests), byte compilation, package-lint and checkdoc. The complete native/JDBC live run passed 267 applicable tests across 15 suites, including Oracle Free, SQL Server 2022, DuckDB, PostgreSQL 16 and MySQL 8.0; backend-specific capability skips remain explicit. ClickHouse used 24.8. Test containers were removed, and the volume names and count matched before and after (30). The isolated agent jar was built from PR #8 at 54f6762, SHA-256 0ab869021e85957b89dbb3f4fbd119d7da0e2e84bdca087ec92869cbc4124d29.
 
 A separate real DuckDB probe ran a long primary query concurrently with ER metadata, cancelled ER, observed its activity settle while primary remained busy, and then verified that the primary query completed successfully and SELECT 1 still worked. Local batch measurements used compiled code and a three-column parent/four-column child with single and composite keys. Five sequential runs per mode gave the following means. The synchronous comparison uses the same public ER command with asynchronous metadata declined, after connection context initialization; these are local fixture measurements without artificial network delay, not GUI frame-time or remote-server measurements.
 
@@ -30,3 +30,5 @@ A separate real DuckDB probe ran a long primary query concurrently with ER metad
 | Warm | 3.936 ms | 0.089 ms | 3.943 ms | 5.950 ms |
 
 As on native connections, responsiveness improves while total loading can remain similar or increase with asynchronous dispatch. Cold standalone JDBC column details now use three RPCs for complete key information; warm ER remains one RPC. Remote latency and graphical frame timing remain unmeasured for JDBC.
+
+The navigation-scope convergence from PR #223 is carried through both asynchronous branches. Regression cases extend the existing source-movement, object qualification and manual-relation tests. The final agent build also preserves the exact Oracle table name for incoming keys; uppercase, mixed-case and lowercase names are distinct protocol inputs.

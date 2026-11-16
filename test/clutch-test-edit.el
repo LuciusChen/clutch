@@ -1102,6 +1102,11 @@ the current catalog."
                      (error-message-string
                       (should-error (clutch-result-submit) :type 'user-error))))
             (should (equal (table-rows) '((1 "a"))))
+            (should (string-match-p
+                     "run the query again"
+                     (error-message-string
+                      (should-error (clutch-record--follow-column result 1 0)
+                                    :type 'user-error))))
             (should-error (clutch-edit--require-sql-staged-mutation "Stage delete")
                           :type 'user-error)
             (setq-local clutch--result-source-schema "main")
