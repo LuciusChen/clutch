@@ -242,6 +242,16 @@ key of the database."
 of the database shows only as that key.  A missing schema means the
 connection's current one."
   (clutch-test-er--with-view (clutch-test-er--conn)
+    ;; Database-only navigation must not resolve the namespace over the wire.
+    (cl-letf (((symbol-function 'clutch-db-current-schema)
+               (lambda (&rest _) (ert-fail "Unexpected namespace lookup"))))
+      (dolist (empty-file '(nil t))
+        (ert-info ((if empty-file "empty relations file" "no relations file"))
+          (when empty-file
+            (clutch-er--write-relations (clutch-test-er--file) nil))
+          (should (= 2 (length (clutch-er-outgoing-relations
+                                clutch-connection clutch--connection-params
+                                clutch-er--entry)))))))
     (make-directory clutch-er-relations-directory t)
     (with-temp-file (clutch-test-er--file)
       (insert "{\"version\": 1, \"relations\": [
@@ -249,6 +259,9 @@ connection's current one."
   \"columns\": [[\"customer_id\", \"id\"]]},
  {\"from\": {\"table\": \"orders\"}, \"to\": {\"table\": \"customers\"},
   \"columns\": [[\"note\", \"name\"]]}]}"))
+    (should (= 3 (length (clutch-er-outgoing-relations
+                          clutch-connection clutch--connection-params
+                          clutch-er--entry))))
     (clutch-er-refresh)
     (should (string-match-p "^ ● customer_id +int +→   customers.id$"
                             (clutch-test-er--text)))

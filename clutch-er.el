@@ -359,20 +359,26 @@ stored by hand from it that repeat none of them; see
 :schema and :pairs, a list of (COLUMN . REFERENCED-COLUMN); one stored
 by hand also has :stored.  Foreign keys come from the metadata cache,
 loaded now when missing."
-  (let ((current (clutch-db-current-schema conn)))
-    (clutch-er--add-stored
-     (clutch-er--relations
-      (clutch--ensure-foreign-keys
-       conn (clutch--table-key (plist-get entry :name)
-                               (plist-get entry :schema)
-                               (plist-get entry :catalog)))
-      nil)
-     (cl-remove-if-not
-      (lambda (relation) (eq (plist-get relation :direction) 'out))
-      (clutch-er--stored-relations
-       (clutch-er--read-relations (clutch-er--relations-file conn params))
-       entry current))
-     current)))
+  (let ((database
+         (clutch-er--relations
+          (clutch--ensure-foreign-keys
+           conn (clutch--table-key (plist-get entry :name)
+                                   (plist-get entry :schema)
+                                   (plist-get entry :catalog)))
+          nil))
+        (stored (clutch-er--read-relations
+                 (clutch-er--relations-file conn params))))
+    (if (null stored)
+        database
+      ;; Resolving unqualified stored ends needs the live namespace.
+      ;; DuckDB queries it synchronously, so skip it without stored relations.
+      (let ((current (clutch-db-current-schema conn)))
+        (clutch-er--add-stored
+         database
+         (cl-remove-if-not
+          (lambda (relation) (eq (plist-get relation :direction) 'out))
+          (clutch-er--stored-relations stored entry current))
+         current)))))
 
 (defun clutch-er--load (conn params entry)
   "Return the ER model of the table of ENTRY on CONN, opened with PARAMS.

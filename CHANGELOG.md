@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Follow FK skips current-schema lookup when no manual relations are stored, avoiding an additional synchronous query on DuckDB.
+
 - MySQL 5.6/5.7 reverse foreign-key lookups use the InnoDB dictionary when available to avoid opening unrelated table metadata. Unsupported names, engines or dictionary privileges retain the standard lookup.
 - A timed-out MySQL metadata read, including an ER view's foreign-key lookup, now interrupts and drains the response or closes the connection when recovery fails. It left a pending response that prevented subsequent queries.
 
