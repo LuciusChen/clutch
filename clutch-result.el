@@ -4358,8 +4358,8 @@ there are several."
          (relations
           (with-current-buffer result-buf
             (clutch-result--require-connection)
-            (clutch-result--refuse-if-moved)
             (clutch--refuse-while-running clutch-connection)
+            (clutch-result--refuse-if-moved)
             (let ((column (nth cidx source-columns)))
               (cl-remove-if-not
                (lambda (relation) (assoc column (plist-get relation :pairs)))
