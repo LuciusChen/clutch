@@ -345,6 +345,8 @@ Each end names its =table= and, when needed, its =schema= and =catalog=, as the 
 4. Press RET on an FK field → automatically runs SELECT * FROM users WHERE id = <value>
 #+end_src
 
+Following a relation from a result checks that its connection still resolves names as when the query ran. After a schema or database switch, switch back or rerun the query before following. Relations retain their catalog and schema in both the ER view and generated SQL.
+
 A key over several columns names all of them, as in =SELECT * FROM regions WHERE code = 'n' AND country = 'b'=, so it finds the one row the record references; each of its columns must be in the result with a value, and columns shown under aliases use their source names, and the query uses the values the database holds, not staged edits.  =RET= follows the first foreign key through the field.  =r= also offers the relations added by hand from the result's table (see [[*Relations added by hand][Relations added by hand]]) and asks when several start at the field.
 
 ** Editing Data

@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Following a relation from an old result refuses once its connection has moved to another namespace. Manual relations preserve catalog qualification through rendering, navigation and SQL generation.
+
 - Follow FK skips current-schema lookup when no manual relations are stored, avoiding an additional synchronous query on DuckDB.
 
 - MySQL 5.6/5.7 reverse foreign-key lookups use the InnoDB dictionary when available to avoid opening unrelated table metadata. Unsupported names, engines or dictionary privileges retain the standard lookup.

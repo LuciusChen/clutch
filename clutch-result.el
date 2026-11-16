@@ -4313,15 +4313,16 @@ the label column width."
 The query names every column of RELATION, so a key over several columns
 finds one row; each must be in the result with a value.  COLUMNS are its
 source column names, in result order, with nil for expressions.  The referenced
-table is qualified by RELATION's :schema when it has one."
+table retains its catalog and schema qualification."
   (with-current-buffer result-buf
     (let* ((conn clutch-connection)
-           (row (nth ridx (clutch--result-display-rows)))
-           (schema (plist-get relation :schema)))
+           (row (nth ridx (clutch--result-display-rows))))
       (clutch--execute
-       (format "SELECT * FROM %s%s WHERE %s"
-               (if schema (concat (clutch-db-escape-identifier conn schema) ".") "")
-               (clutch-db-escape-identifier conn (plist-get relation :table))
+       (format "SELECT * FROM %s WHERE %s"
+               (clutch--object-sql-name
+                conn (list :name (plist-get relation :table)
+                           :schema (plist-get relation :schema)
+                           :catalog (plist-get relation :catalog)))
                (mapconcat
                 (pcase-lambda (`(,column . ,referenced))
                   (let* ((cidx (or (cl-position column columns
@@ -4357,6 +4358,7 @@ there are several."
          (relations
           (with-current-buffer result-buf
             (clutch-result--require-connection)
+            (clutch-result--refuse-if-moved)
             (clutch--refuse-while-running clutch-connection)
             (let ((column (nth cidx source-columns)))
               (cl-remove-if-not
