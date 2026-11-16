@@ -418,9 +418,13 @@ draws with ASCII."
                 ('cancelled
                  ;; The backend declines cancellation; later workflow steps
                  ;; and presentation must still stop on the user's request.
-                 (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                            (lambda (_) nil)))
-                   (clutch-cancel-query-or-quit)))
+                 (let (metadata-cancelled)
+                   (cl-letf (((symbol-function 'clutch-db-interrupt-metadata)
+                              (lambda (_) (setq metadata-cancelled t) nil))
+                             ((symbol-function 'clutch-db-interrupt-query)
+                              (lambda (_) (ert-fail "ER cancelled foreground SQL"))))
+                     (clutch-cancel-query-or-quit))
+                   (should metadata-cancelled)))
                 ('moved (setq-local clutch-connection (clutch-test-er--conn)))
                 ('killed (kill-buffer (current-buffer))))
               (should (eq (and (funcall active) t)

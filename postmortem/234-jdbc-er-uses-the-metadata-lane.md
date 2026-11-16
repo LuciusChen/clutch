@@ -12,7 +12,7 @@ Incoming keys require the protocol addition in agent PR #8, version 0.2.28. The 
 
 The existing asynchronous JDBC column detail reader returned only columns while its synchronous counterpart also read primary and foreign keys. Reusing that incomplete warm cache would lose key markers in ER. Both paths now share the three request definitions and decoder. Asynchronous details cost three RPCs instead of one; ER cold loads use these same three responses plus incoming keys without repeating them. Warm ER loads still issue one incoming-key request. Key names are retained when present, and unnamed rows remain independent instead of inventing a composite relation.
 
-The existing column metadata regression was extended to both modes and failed before the fix. A focused incoming-key test covers scope, ordering, dispatch while primary is busy and logical cancellation. The unnamed-key regression also failed before its fix. Public live coverage exercises cold/warm loading, both key directions, composite grouping and cancellation without an agent cancel request.
+The existing column metadata regression was extended to both modes and failed before the fix. A focused incoming-key test covers scope, ordering, dispatch while primary is busy and logical cancellation. The unnamed-key regression also failed before its fix. The existing ER activity regression requires metadata-specific cancellation and rejects foreground cancellation; removing the operation-specific cancel hook makes that test fail. Public live coverage exercises cold/warm loading, both key directions, composite grouping and cancellation without an agent cancel request.
 
 ## Namespace reads on DuckDB
 
