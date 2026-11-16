@@ -164,7 +164,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
     (let* ((parent (clutch-test--live-column-name (format "clutch_er_parent_%d" (emacs-pid))))
            (child (clutch-test--live-column-name (format "clutch_er_child_%d" (emacs-pid))))
            (clutch-er-relations-directory (make-temp-file "clutch-er-live-" t))
-           source view background-done)
+           source view rows-buffer background-done)
       (unwind-protect
           (progn
             (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, a INT, b INT, UNIQUE(a,b))" parent))
@@ -219,7 +219,33 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (clutch-test--await-queries))
                   (should (equal calls '("get-primary-keys")))
                   (should (string-match-p "ER load cancelled" (buffer-string))))))
+            (when (eq (plist-get (clutch-test-live-backend-descriptor) :id) 'duckdb)
+              (dolist (sql (list (format "INSERT INTO %s VALUES (1,1,2)" parent)
+                                (format "INSERT INTO %s VALUES (1,1,1,2)" child)
+                                "ATTACH ':memory:' AS att"
+                                (format "CREATE TABLE att.main.%s(id INT, a INT, b INT)" parent)
+                                (format "INSERT INTO att.main.%s VALUES (1,999,999)" parent)))
+                (clutch-db-query conn sql))
+              (clutch-er--write-relations
+               (clutch-er--relations-file conn (clutch-test--live-connect-params))
+               `(((from . ((table . ,child)))
+                  (to . ((catalog . "att") (schema . "main") (table . ,parent)))
+                  (columns . [["id" "id"]]))))
+              (let ((result-name (format " *clutch-er-catalog-%d*" (emacs-pid))))
+                (cl-letf (((symbol-function 'clutch-result--buffer-name)
+                           (lambda () result-name)))
+                  (with-current-buffer source
+                    (clutch-test--execute-and-present (format "SELECT * FROM %s" child) conn))
+                  (clutch-test--await-queries)
+                  (setq rows-buffer (get-buffer result-name))
+                  (with-current-buffer rows-buffer
+                    (clutch-record--follow-column rows-buffer 0 0)
+                    (clutch-test--await-queries)
+                    (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
+                                           clutch--result-rows)
+                                   '((1 999 999))))))))
             (should-not (clutch-db-in-use-p conn)))
+        (when (buffer-live-p rows-buffer) (kill-buffer rows-buffer))
         (when (buffer-live-p view) (kill-buffer view))
         (when (buffer-live-p source) (kill-buffer source))
         (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" child)))

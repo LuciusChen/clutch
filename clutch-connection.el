@@ -1149,6 +1149,8 @@ caused it."
                    ((clutch--query-buffer-p)
                     (clutch--update-console-buffer-name)
                     (clutch--update-mode-line))
+                   ((derived-mode-p 'clutch-er-mode)
+                    (clutch--update-mode-line t))
                    ((derived-mode-p 'clutch-repl-mode)
                     (clutch--update-mode-line))
                    ;; Newer Emacs versions give every buffer the inherited

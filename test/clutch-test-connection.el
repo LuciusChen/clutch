@@ -2580,9 +2580,10 @@ the status hook, and the refresh was never queued, with the state still
   (clutch-test--with-sqlite-connection conn
     (let ((stale (generate-new-buffer " *clutch-stale-record*"))
           (healthy (generate-new-buffer " *clutch-healthy-attached*"))
+          (er (generate-new-buffer " *clutch-status-er*"))
           (clutch--schema-status-cache (make-hash-table :test 'eq))
           (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
-          healthy-reverted
+          er-reverted healthy-reverted
           queued)
       (unwind-protect
           (progn
@@ -2596,14 +2597,21 @@ the status hook, and the refresh was never queued, with the state still
                           revert-buffer-function
                           (lambda (&rest _args)
                             (setq healthy-reverted t))))
+            (with-current-buffer er
+              (clutch-er-mode)
+              (setq-local clutch-connection conn
+                          revert-buffer-function
+                          (lambda (&rest _) (setq er-reverted t))))
             (cl-letf (((symbol-function 'message) #'ignore)
                       ((symbol-function 'clutch-db-refresh-schema-async)
                        (lambda (&rest _args) (setq queued t))))
               (should (clutch--refresh-schema-cache-async conn)))
             (should queued)
-            (should healthy-reverted))
+            (should healthy-reverted)
+            (should-not er-reverted))
         (kill-buffer stale)
-        (kill-buffer healthy)))))
+        (kill-buffer healthy)
+        (kill-buffer er)))))
 
 (ert-deftest clutch-test-kill-buffer-ends-the-session-only-from-its-owner ()
   "Killing a buffer should end its session only when the buffer owns it.
