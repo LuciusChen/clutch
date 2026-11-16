@@ -390,9 +390,11 @@ Return schema/table pairs, or `unsupported' for the standard lookup."
 
 (defun clutch-db-mysql--send-metadata (conn sql callback)
   "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK."
-  (mysql-query-async conn sql
-                     (lambda (result error)
-                       (funcall callback (and result (mysql-result-rows result)) error))))
+  (unless (mysql-busy-p conn)
+    (mysql-query-async conn sql
+                       (lambda (result error)
+                         (funcall callback (and result (mysql-result-rows result)) error)))
+    t))
 
 (defun clutch-db-mysql--referencing-keys-async (conn table schema callback continue)
   "Read incoming keys of TABLE in SCHEMA on CONN, observing CONTINUE."
@@ -405,7 +407,6 @@ Return schema/table pairs, or `unsupported' for the standard lookup."
     (cl-labels
         ((read-keys (tables)
            (clutch-db--metadata-request-series
-            conn
             send
             (if (eq tables 'unsupported)
                 (list (clutch-db-mysql--key-column-sql columns where))
@@ -419,7 +420,6 @@ Return schema/table pairs, or `unsupported' for the standard lookup."
             callback continue)))
       (if (string-match-p "\\`5\\.[67]\\." (or (mysql-conn-server-version conn) ""))
           (clutch-db--metadata-request-series
-           conn
            send (list (clutch-db-mysql--legacy-target-sql table schema))
            (lambda (results) (clutch-db-mysql--dictionary-sql (car results)))
            (lambda (sql error)
@@ -428,7 +428,6 @@ Return schema/table pairs, or `unsupported' for the standard lookup."
               ((null sql) (read-keys 'unsupported))
               (t
                (clutch-db--metadata-request-series
-                conn
                 send (list sql)
                 (lambda (results) (clutch-db-mysql--dictionary-tables (car results)))
                 (lambda (tables error)
@@ -1092,7 +1091,6 @@ Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
   (when (fboundp 'mysql-query-async)
     (let ((callback (clutch-db--metadata-outcome callback errback)))
       (clutch-db--metadata-request-series
-       conn
        (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome))
        (list (clutch-db-mysql--primary-key-sql table schema)
              (clutch-db-mysql--key-column-sql

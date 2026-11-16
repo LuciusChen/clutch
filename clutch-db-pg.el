@@ -1498,17 +1498,22 @@ each partition that inherits it."
       (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
               col-rows))))
 
+(defun clutch-db-pg--send-metadata (conn sql callback)
+  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK."
+  (let ((client (clutch-db-pg--connection-client conn)))
+    (unless (pgsql-busy-p client)
+      (pgsql-exec-async
+       client sql
+       (lambda (result error)
+         (funcall callback (and result (clutch-db-pg--metadata-rows result)) error)))
+      t)))
+
 (cl-defmethod clutch-db-referencing-keys-async
   ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog continue)
   "Read PostgreSQL TABLE's incoming keys on CONN without blocking."
   (when (fboundp 'pgsql-exec-async)
     (clutch-db--metadata-request-series
-     conn
-     (lambda (sql outcome)
-       (pgsql-exec-async
-        (clutch-db-pg--connection-client conn) sql
-        (lambda (result error)
-          (funcall outcome (and result (clutch-db-pg--metadata-rows result)) error))))
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome))
      (list (clutch-db-pg--referencing-key-sql table schema))
      (lambda (rows) (clutch-db-pg--referencing-key-values (car rows)))
      (clutch-db--metadata-outcome callback errback) continue)
@@ -1520,13 +1525,7 @@ each partition that inherits it."
   "Read PostgreSQL TABLE metadata on CONN through asynchronous wire requests."
   (when (fboundp 'pgsql-exec-async)
     (clutch-db--metadata-request-series
-     conn
-     (lambda (sql outcome)
-       (pgsql-exec-async
-        (clutch-db-pg--connection-client conn) sql
-        (lambda (result error)
-          (funcall outcome
-                   (and result (clutch-db-pg--metadata-rows result)) error))))
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome))
      (list (clutch-db-pg--primary-key-sql table schema)
            (clutch-db-pg--foreign-key-sql table schema)
            (clutch-db-pg--column-details-sql table schema)

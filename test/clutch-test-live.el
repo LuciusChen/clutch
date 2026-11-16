@@ -163,7 +163,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
     (let* ((parent (format "clutch_er_parent_%d" (emacs-pid)))
            (child (format "clutch_er_child_%d" (emacs-pid)))
            (clutch-er-relations-directory (make-temp-file "clutch-er-live-" t))
-           source view)
+           source view background-done)
       (unwind-protect
           (progn
             (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, a INT, b INT, UNIQUE(a,b))" parent))
@@ -174,7 +174,15 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch--bind-connection-context
                conn (clutch-test--live-connect-params)
                (clutch-backend-sql-product clutch-test-backend))
-              (clutch-er-diagram (list :name parent :type "TABLE")))
+              (should
+               (clutch-db-query-async
+                conn (if (eq clutch-test-backend 'pg)
+                         "SELECT pg_sleep(1)" "SELECT SLEEP(1)")
+                (lambda (_result error)
+                  (should-not error)
+                  (setq background-done t))))
+              (clutch-er-diagram (list :name parent :type "TABLE"))
+              (should-not background-done))
             (setq view (get-buffer (clutch-er--buffer-name conn)))
             (should (gethash conn clutch--running-queries))
             (clutch-test--await-queries)

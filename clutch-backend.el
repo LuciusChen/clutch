@@ -1680,10 +1680,11 @@ Return non-nil when started, nil without calling CALLBACK when unsupported.")
         (when errback (funcall errback (clutch-db--error-message error)))
       (funcall callback data))))
 
-(defun clutch-db--metadata-request-series (conn send requests decode callback continue)
-  "Run metadata REQUESTS on CONN through asynchronous SEND, then DECODE.
+(defun clutch-db--metadata-request-series (send requests decode callback continue)
+  "Run metadata REQUESTS through asynchronous SEND, then DECODE.
 SEND takes a request and an outcome function receiving its result and an
-error.
+error.  Return non-nil after dispatch, or nil while the transport is busy
+without calling the outcome function.
 CALLBACK receives decoded data and nil, or nil and an error condition.
 CONTINUE, when supplied, decides whether another request may be sent."
   (let (results settled)
@@ -1703,15 +1704,16 @@ CONTINUE, when supplied, decides whether another request may be sent."
                                 (error (cons nil err)))))
                  (setq settled t)
                  (funcall callback (car outcome) (cdr outcome))))
-              ((clutch-db-request-in-flight-p conn)
-               (run-with-timer 0.02 nil #'next))
               (t
                (condition-case err
-                   (funcall send (pop requests)
-                            (lambda (result error)
-                              (if error (fail error)
-                                (push result results)
-                                (next))))
+                   (let ((request (pop requests)))
+                     (unless (funcall send request
+                                      (lambda (result error)
+                                        (if error (fail error)
+                                          (push result results)
+                                          (next))))
+                       (push request requests)
+                       (run-with-timer 0.02 nil #'next)))
                  (error
                   (if settled (signal (car err) (cdr err))
                     (fail err)))))))))
