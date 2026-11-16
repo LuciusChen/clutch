@@ -128,13 +128,13 @@ columns are asked for."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (should (equal (clutch-test-er--text)
                    "
- orders                                   5 columns
- ──────────────────────────────────────────────────
- ◆ id            int    ◂── items.order_id
-                        ◂── refunds.order_id
- ● customer_id   int    ──▸ customers.id
+ orders                                    5 columns
+ ───────────────────────────────────────────────────
+ ◆ id            int     ←   items.order_id
+                         ←   refunds.order_id
+ ● customer_id   int     →   customers.id
  ● region        text   ─┐
- ● country       text   ─┴▸ regions (code, country)
+ ● country       text   ─┴ → regions (code, country)
    … 1 more column
 "))
     (clutch-er-toggle-columns)
@@ -149,11 +149,11 @@ highlights its relations.  Neither changes the text."
       (clutch-test-er--goto "regions")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("● country       text   ─┴▸ regions (code, country)" "● region        text   ─┐")))
+                     '("● country       text   ─┴ → regions (code, country)" "● region        text   ─┐")))
       (clutch-test-er--goto "◆")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("◂── refunds.order_id" "◆ id            int    ◂── items.order_id")))
+                     '("←   refunds.order_id" "◆ id            int     ←   items.order_id")))
       (goto-char (point-min))
       (run-hooks 'post-command-hook)
       (should-not (clutch-test-er--highlighted))
@@ -165,7 +165,7 @@ highlights its relations.  Neither changes the text."
     (clutch-test-er--goto "customers.id")
     (clutch-er-follow)
     (should (string-match-p "\\`\n customers " (clutch-test-er--text)))
-    (should (string-match-p "◂── orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
     (clutch-er-back)
     (should (string-match-p "\\`\n orders " (clutch-test-er--text)))
     (should-error (clutch-er-back) :type 'user-error)))
@@ -206,7 +206,7 @@ key of the database."
   ]
 }
 "))
-    (should (string-match-p "^ ○ note +text +┄┄▸ customers.name  manual$"
+    (should (string-match-p "^ ○ note +text +⇢   customers.name  manual$"
                             (clutch-test-er--text)))
     (clutch-test-er--goto "customers.name")
     (should (equal (clutch-test-er--answering '(("note") ("id")) "customers"
@@ -244,14 +244,14 @@ connection's current one."
  {\"from\": {\"table\": \"orders\"}, \"to\": {\"table\": \"customers\"},
   \"columns\": [[\"note\", \"name\"]]}]}"))
     (clutch-er-refresh)
-    (should (string-match-p "^ ● customer_id +int +──▸ customers.id$"
+    (should (string-match-p "^ ● customer_id +int +→   customers.id$"
                             (clutch-test-er--text)))
     (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
     (clutch-test-er--goto "customers.name")
     (clutch-er-follow)
-    (should (string-match-p "◂── orders.customer_id$" (clutch-test-er--text)))
-    (should (string-match-p "◂┄┄ orders.note  manual$" (clutch-test-er--text)))))
+    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-refuses-a-relations-file-it-cannot-read ()
   "A file that is not JSON, or is of another version, is reported by name

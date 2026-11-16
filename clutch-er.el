@@ -409,7 +409,7 @@ read each time."
   "Return the characters the ER view draws with: `unicode' or `ascii'.
 See `clutch-er-charset'."
   (if (eq clutch-er-charset 'auto)
-      (clutch-viz-charset '(?◆ ?● ?○ ?▸ ?◂ ?┐ ?┤ ?┴ ?┄ ?▌ ?· ?…))
+      (clutch-viz-charset '(?◆ ?● ?○ ?→ ?← ?⇢ ?⇠ ?┐ ?┤ ?┴ ?┄ ?▌ ?· ?…))
     clutch-er-charset))
 
 (defun clutch-er--name (table schema shown-schema)
@@ -455,21 +455,25 @@ Names in SHOWN-SCHEMA are not qualified."
 (defun clutch-er--link (relation part unicode)
   "Return the link drawn for RELATION on one of its lines.
 PART is `only' for a relation over one column, else `first', `middle'
-or `last' down the bracket of its columns.  The link is three columns
-wide and points from the key to what it references; a relation added
-by hand is dotted.  Use box characters when UNICODE, else ASCII."
+or `last' down the bracket of its columns.  The link points from the
+key to what it references; a relation added by hand is dotted.  When
+UNICODE is non-nil, arrows are complete glyphs, separated from a bracket
+so font fallback does not have to join them to box characters.  Otherwise
+use ASCII."
   (let* ((in (eq (plist-get relation :direction) 'in))
          (dot (plist-get relation :stored))
          (line (if unicode (if dot "┄" "─") (if dot "." "-")))
+         (arrow (if in (if dot "⇠" "←") (if dot "⇢" "→")))
          (text (pcase part
-                 ('first (concat line (if unicode "┐" "+") " "))
-                 ('middle (concat line (if unicode "┤" "+") " "))
-                 ('last (if in
-                            (concat (if unicode "◂┴" "<+") line)
-                          (concat line (if unicode "┴▸" "+>"))))
-                 (_ (if in
-                        (concat (if unicode "◂" "<") line line)
-                      (concat line line (if unicode "▸" ">")))))))
+                 ('first (concat line (if unicode "┐  " "+ ")))
+                 ('middle (concat line (if unicode "┤  " "+ ")))
+                 ('last (if unicode
+                            (concat line "┴ " arrow)
+                          (if in (concat "<+" line) (concat line "+>"))))
+                 (_ (if unicode
+                        (concat " " arrow "  ")
+                      (if in (concat "<" line line)
+                        (concat line line ">")))))))
     (propertize text 'face (if dot 'clutch-er-manual 'shadow))))
 
 (defun clutch-er--lines (columns relations shown-schema unicode)
