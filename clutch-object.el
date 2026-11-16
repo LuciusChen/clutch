@@ -911,16 +911,21 @@ an insert that creates a MongoDB collection."
 
 (defun clutch--object-sql-name (conn entry)
   "Return SQL-ready object name for ENTRY on CONN.
-Preserve object schema qualification, falling back to source schema only
-when the real object schema is unavailable."
-  (let* ((schema (or (plist-get entry :schema)
-                     (plist-get entry :source-schema)))
+Preserve catalog and schema qualification, falling back to source schema.
+A catalog without a schema uses CONN's current schema when known, or the
+server's default-schema position between two dots."
+  (let* ((catalog (plist-get entry :catalog))
+         (schema (or (plist-get entry :schema)
+                     (plist-get entry :source-schema)
+                     (and catalog (clutch-db-current-schema conn))))
          (name (or (plist-get entry :name) "")))
     (mapconcat
-     (lambda (part) (clutch-db-escape-identifier conn part))
-     (if (and schema (not (string-empty-p schema)))
-         (list schema name)
-       (list name))
+     (lambda (part) (if (string-empty-p part) ""
+                      (clutch-db-escape-identifier conn part)))
+     (if catalog (list catalog (or schema "") name)
+       (if (and schema (not (string-empty-p schema)))
+           (list schema name)
+         (list name)))
      ".")))
 
 (defun clutch--use-object-action-keymap ()

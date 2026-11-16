@@ -270,7 +270,20 @@ connection's current one."
     (clutch-test-er--goto "customers.name")
     (clutch-er-follow)
     (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
-    (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))))
+    (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))
+    (clutch-er-back)
+    (clutch-er--write-relations
+     (clutch-test-er--file)
+     '(((from . ((table . "orders")))
+        (to . ((catalog . "archive") (schema . "public") (table . "customers")))
+        (columns . [["note" "name"]]))))
+    (push (list (clutch--table-key "customers" "public" "archive")
+                :columns '((:name "name" :type "text")))
+          (clutch-test-conn-tables clutch-connection))
+    (clutch-er-refresh)
+    (clutch-test-er--goto "archive.public.customers.name")
+    (clutch-er-follow)
+    (should (equal (plist-get clutch-er--entry :catalog) "archive"))))
 
 (ert-deftest clutch-test-er-refuses-a-relations-file-it-cannot-read ()
   "A file that is not JSON, or is of another version, is reported by name
