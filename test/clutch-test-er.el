@@ -134,7 +134,7 @@ columns are asked for."
                          ←   refunds.order_id
  ● customer_id   int     →   customers.id
  ● region        text   ─┐
- ● country       text   ─┴ → regions (code, country)
+ ● country       text   ─┴→  regions (code, country)
    … 1 more column
 "))
     (clutch-er-toggle-columns)
@@ -149,7 +149,7 @@ highlights its relations.  Neither changes the text."
       (clutch-test-er--goto "regions")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("● country       text   ─┴ → regions (code, country)" "● region        text   ─┐")))
+                     '("● country       text   ─┴→  regions (code, country)" "● region        text   ─┐")))
       (clutch-test-er--goto "◆")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)

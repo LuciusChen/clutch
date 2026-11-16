@@ -1638,6 +1638,7 @@ name it captured, not a stale index."
           (clutch-mode)
           (setq-local clutch-connection conn)
           (should (eq (key-binding (kbd "C-c C-n")) #'undefined))
+          (should (eq (key-binding (kbd "C-c C-v")) #'clutch-er-diagram))
           (should-error (call-interactively (key-binding (kbd "C-c C-z")))
                         :type 'user-error)
           (dolist (sql '("CREATE TABLE probe (id INTEGER)" "SELECT 1"))

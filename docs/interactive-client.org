@@ -12,6 +12,7 @@
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions for the current object, or prompt |
+| =C-c C-v=   | Show the ER view of the table at point, or prompt |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-l=   | Switch current schema/database on the active connection |
 | =C-c C-s=   | Refresh schema for current connection now |
@@ -261,7 +262,7 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 
 * ER View (clutch-er-mode) Key Bindings
 
-=r= in the object actions (=C-c C-o=) or =M-x clutch-er-diagram= opens the ER view of a table: its name over a rule, then its primary-key columns and the columns of its relations, each with its type and, beside it, the relation it ends.  =→ customers.id= is a foreign key of the column to another table, =← refunds.order_id= a foreign key of another table to the column, and a column that ends several relations takes a line for each.  A key over adjacent columns brackets them and names the other end once, as =─┐= beside =region= and =─┴ → regions (code, country)= beside =country=.  =◆= marks a primary-key column, =●= a column with a foreign key and =○= one with only relations added by hand.  Names in the table's own schema are not qualified.  Moving point onto a line highlights its relations and the columns they join, with a bar at the left edge; moving point never redraws the view.
+=C-c C-v=, =v= under Objects in the main menu (=C-c ?=), =r= in the object actions (=C-c C-o=), or =M-x clutch-er-diagram= opens the ER view of a table: its name over a rule, then its primary-key columns and the columns of its relations, each with its type and, beside it, the relation it ends.  =→ customers.id= is a foreign key of the column to another table, =← refunds.order_id= a foreign key of another table to the column, and a column that ends several relations takes a line for each.  A key over adjacent columns brackets them and names the other end once, as =─┐= beside =region= and =─┴→ regions (code, country)= beside =country=.  =◆= marks a primary-key column, =●= a column with a foreign key and =○= one with only relations added by hand.  Names in the table's own schema are not qualified.  Moving point onto a line highlights its relations and the columns they join, with a bar at the left edge; moving point never redraws the view.
 
 The view is available on native PostgreSQL, MySQL and SQLite connections; other connections refuse it, as they cannot list the keys that reference a table.  Columns and foreign keys come from the metadata cache, loaded when missing; the keys that reference the table are read each time the view loads.  SQLite keeps no index of them, so the view reads the keys of every table in the table's database.  The view draws the same characters in a graphical frame and a terminal, and takes its colors from faces that inherit the theme's (=clutch-er-title=, =clutch-er-table=, =clutch-er-key=, =clutch-er-reference=, =clutch-er-manual=, =clutch-er-highlight=).
 
@@ -278,6 +279,8 @@ The view is available on native PostgreSQL, MySQL and SQLite connections; other 
 | =d=         | Describe the table                             |
 | =g=         | Load the table's columns and relations again   |
 | =C-c C-o=   | Show object actions                            |
+
+In graphical frames, the arrow that joins a composite-key bracket is aligned using the displayed fonts' glyph metrics. After changing the font or text scale, press =g= to reload and recalculate the alignment.
 
 Where its symbols are two columns wide, as in CJK language environments that make ambiguous characters wide, it draws with ASCII instead (=*=, =o=, =-->=, =<--=); set =clutch-er-charset= to =unicode= or =ascii= to choose, for a terminal whose widths differ from those Emacs assumes.
 
@@ -537,7 +540,7 @@ Embark only exposes secondary object actions.  Default actions such as =C-c C-j=
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.  The main menu is headed by the connection it acts on.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, =Switch schema/db=, and =Refresh schema=.
+Press =C-c ?= to open the transient menu.  The main menu is headed by the connection it acts on.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, =ER view= (=v=), =Switch schema/db=, and =Refresh schema=.
 
 Finite state is displayed as parenthesized choices, with the active choice highlighted.  For example, the connection menu shows =Auto-commit (manual|auto)=, and the result menu shows current filter, sort, copy-refinement, and layout states.
 

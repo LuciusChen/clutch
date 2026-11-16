@@ -19,6 +19,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'text-property-search)
 (require 'clutch-object)
 (require 'clutch-connection)
 (require 'clutch-viz)
@@ -452,14 +453,35 @@ Names in SHOWN-SCHEMA are not qualified."
                           (concat "." (car columns)))
                         'face 'shadow))))
 
+(defun clutch-er--join-arrow (position)
+  "Align the arrow at POSITION with the box-drawing stroke before it.
+Read the actual displayed fonts, including buffer-local scaling and
+fallback fonts, since their ink centers can have different baselines."
+  (when-let* (((display-graphic-p))
+              (start (- position 2))
+              (stroke-font (font-at start))
+              (arrow-font (font-at position))
+              (stroke (aref (font-get-glyphs stroke-font start (1+ start)) 0))
+              (arrow (aref (font-get-glyphs arrow-font position (1+ position)) 0)))
+    (let* ((stroke-info (font-info (font-xlfd-name stroke-font)))
+           (arrow-info (font-info (font-xlfd-name arrow-font)))
+           (offset (+ (/ (- (- (aref stroke 7) (aref stroke 8))
+                            (- (aref arrow 7) (aref arrow 8)))
+                         2.0)
+                      (- (aref stroke-info 4) (aref arrow-info 4))))
+           (height (aref arrow-info 3)))
+      (unless (zerop offset)
+        (put-text-property position (1+ position)
+                           'display `(raise ,(/ offset height)))))))
+
 (defun clutch-er--link (relation part unicode)
   "Return the link drawn for RELATION on one of its lines.
 PART is `only' for a relation over one column, else `first', `middle'
 or `last' down the bracket of its columns.  The link points from the
 key to what it references; a relation added by hand is dotted.  When
-UNICODE is non-nil, arrows are complete glyphs, separated from a bracket
-so font fallback does not have to join them to box characters.  Otherwise
-use ASCII."
+UNICODE is non-nil, arrows are complete glyphs, aligned to the bracket
+by their ink centers.
+Otherwise use ASCII."
   (let* ((in (eq (plist-get relation :direction) 'in))
          (dot (plist-get relation :stored))
          (line (if unicode (if dot "┄" "─") (if dot "." "-")))
@@ -468,13 +490,16 @@ use ASCII."
                  ('first (concat line (if unicode "┐  " "+ ")))
                  ('middle (concat line (if unicode "┤  " "+ ")))
                  ('last (if unicode
-                            (concat line "┴ " arrow)
+                            (concat line "┴" arrow " ")
                           (if in (concat "<+" line) (concat line "+>"))))
                  (_ (if unicode
                         (concat " " arrow "  ")
                       (if in (concat "<" line line)
                         (concat line line ">")))))))
-    (propertize text 'face (if dot 'clutch-er-manual 'shadow))))
+    (setq text (propertize text 'face (if dot 'clutch-er-manual 'shadow)))
+    (if (and unicode (eq part 'last))
+        (propertize text 'clutch-er-join-arrow 2)
+      text)))
 
 (defun clutch-er--lines (columns relations shown-schema unicode)
   "Return the lines of COLUMNS with RELATIONS beside them, as cell lists.
@@ -621,6 +646,11 @@ qualified; box characters are used when UNICODE, else ASCII."
                   (push (list position next ids) spans))
                 (setq position next)))
             (nreverse spans)))
+    (save-excursion
+      (goto-char (point-min))
+      (while-let ((span (text-property-search-forward 'clutch-er-join-arrow)))
+        (clutch-er--join-arrow (+ (prop-match-beginning span)
+                                  (prop-match-value span)))))
     (goto-char (point-min))
     (forward-line (1- point-line))
     (setq clutch-er--highlighted 'none)

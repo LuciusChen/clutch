@@ -2380,6 +2380,7 @@ It appears where a query shows its result."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
     (clutch--install-query-keybindings map)
+    (define-key map (kbd "C-c C-v") 'clutch-er-diagram)
     (define-key map (kbd "C-c C-z") #'clutch-show-result)
     (define-key map (kbd "C-c C-n") #'undefined)
     (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
@@ -2479,6 +2480,7 @@ server nothing."
     ("j" "Jump to object" clutch-jump)
     ("D" "Describe object" clutch-describe-dwim)
     ("o" "Object actions" clutch-act-dwim)
+    ("v" "ER view" clutch-er-diagram)
     ("l" "Switch schema/db" clutch-switch-schema)
     ("s" "Refresh schema" clutch-refresh-schema)]
    ["Tools"
