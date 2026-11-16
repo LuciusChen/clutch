@@ -1816,6 +1816,45 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should-not unique-called)
       (should-not locator-called))))
 
+(ert-deftest clutch-db-test-mysql-legacy-referencing-keys ()
+  "Legacy reverse lookups scope candidates and retain the standard fallback."
+  (require 'clutch-db-mysql)
+  (dolist (case '(("empty dictionary" nil nil)
+                  ("duplicate child tables" (("other/child") ("other/child")) scoped)
+                  ("encoded child name" (("other/child@002dname")) fallback)
+                  ("missing dictionary privilege" denied fallback)))
+    (ert-info ((car case))
+      (let ((conn (make-mysql-conn :server-version "5.6.26-log"))
+            queries)
+        (cl-letf (((symbol-function 'mysql-query)
+                   (lambda (_conn sql)
+                     (push sql queries)
+                     (make-mysql-result
+                      :rows
+                      (cond
+                       ((string-match-p "FROM INFORMATION_SCHEMA.TABLES" sql)
+                        '(("target" "parent" "InnoDB")))
+                       ((string-match-p "INNODB_SYS_FOREIGN" sql)
+                        (if (eq (nth 1 case) 'denied)
+                            (signal 'mysql-query-error '("[1227] Access denied"))
+                          (nth 1 case)))
+                       ((string-match-p "KEY_COLUMN_USAGE" sql)
+                        '(("other" "child" "parent_id" "id" "fk_parent")))
+                       (t (ert-fail sql)))))))
+          (should (equal (clutch-db-referencing-keys conn "parent" "target")
+                         (when (nth 2 case)
+                           '((:table "child" :schema "other" :column "parent_id"
+                              :ref-column "id" :constraint "fk_parent")))))
+          (let ((key-queries (seq-filter
+                              (lambda (sql) (string-match-p "KEY_COLUMN_USAGE" sql))
+                              queries)))
+            (should (= (length key-queries) (if (nth 2 case) 1 0)))
+            (when key-queries
+              (should (eq (and (string-match-p
+                                "TABLE_SCHEMA = 'other' AND TABLE_NAME = 'child'"
+                                (car key-queries)) t)
+                          (eq (nth 2 case) 'scoped))))))))))
+
 (ert-deftest clutch-db-test-mysql-column-details-honor-schema ()
   "Column type, comment, primary key and foreign key share the explicit schema."
   (require 'mysql)
@@ -6825,22 +6864,35 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-db-test-mysql-live-timeout-recovers-connection ()
-  "MySQL read timeout should resynchronize the session before reuse."
+  "Query and fault-delayed metadata timeouts resynchronize before reuse."
   :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let ((clutch-db-mysql-cancel-timeout-seconds 2)
           (old-timeout (mysql-conn-read-idle-timeout conn))
-          message)
+          (query (symbol-function 'mysql-query)))
       (unwind-protect
           (progn
             (setf (mysql-conn-read-idle-timeout conn) 0.2)
-            (condition-case err
-                (clutch-db-query conn "SELECT SLEEP(5)")
-              (clutch-db-error
-               (setq message (error-message-string err))))
-            (should (string-match-p "restored MySQL connection" message))
-            (let ((result (clutch-db-query conn "SELECT 1 AS n")))
-              (should (= (caar (clutch-db-result-rows result)) 1))))
+            (dolist (entry '(query metadata))
+              (ert-info ((format "timeout entry: %s" entry))
+                (let (message)
+                  ;; Delay the metadata read on the real server.  The killer
+                  ;; connection still sends its original KILL QUERY command.
+                  (cl-letf (((symbol-function 'mysql-query)
+                             (lambda (connection sql)
+                               (funcall query connection
+                                        (if (and (eq entry 'metadata)
+                                                 (eq connection conn))
+                                            "SELECT SLEEP(5)" sql)))))
+                    (condition-case err
+                        (if (eq entry 'metadata)
+                            (clutch-db-referencing-keys conn "probe")
+                          (clutch-db-query conn "SELECT SLEEP(5)"))
+                      (clutch-db-error
+                       (setq message (error-message-string err)))))
+                  (should (string-match-p "restored MySQL connection" message))
+                  (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+                    (should (= (caar (clutch-db-result-rows result)) 1)))))))
         (setf (mysql-conn-read-idle-timeout conn) old-timeout)))))
 
 (ert-deftest clutch-db-test-mysql-live-scoped-column-details ()
@@ -10196,13 +10248,19 @@ that file, or in a new, empty in-memory database, without a word."
          :params '(:driver jdbc :url "jdbc:duckdb:")))))))
 
 (ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
-  "MySQL timeout recovery should cover query and prepared execution paths."
+  "MySQL query, prepared execution and ER metadata timeouts recover or close."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (dolist (case '((query   t   "restored MySQL connection")
                   (query   nil "timeout recovery failed")
                   (execute t   "restored MySQL connection")
-                  (execute nil "timeout recovery failed")))
+                  (execute nil "timeout recovery failed")
+                  (foreign-keys t "restored MySQL connection")
+                  (foreign-keys nil "timeout recovery failed")
+                  (referencing-keys t "restored MySQL connection")
+                  (referencing-keys nil "timeout recovery failed")
+                  (column-details t "restored MySQL connection")
+                  (column-details nil "timeout recovery failed")))
     (pcase-let ((`(,entry ,recovers ,expected-message) case))
       (ert-info ((format "entry: %s recovers: %s" entry recovers))
         (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
@@ -10234,7 +10292,10 @@ that file, or in a new, empty in-memory database, without a word."
                 (pcase entry
                   ('query (clutch-db-query conn "SELECT SLEEP(60)"))
                   ('execute (clutch-db-execute-params
-                             conn "UPDATE t SET a = ?" '("v"))))
+                             conn "UPDATE t SET a = ?" '("v")))
+                  ('foreign-keys (clutch-db-foreign-keys conn "t"))
+                  ('referencing-keys (clutch-db-referencing-keys conn "t"))
+                  ('column-details (clutch-db-column-details conn "t")))
               (clutch-db-error
                (setq message (error-message-string err)))))
           (should interrupted)

@@ -188,11 +188,17 @@ not a table are refused before a view opens."
 link; it can change and go, and it cannot repeat a stored relation or a
 key of the database."
   (clutch-test-er--with-view (clutch-test-er--conn)
+    (dolist (columns '(("note") ("id" "note")))
+      (should (equal (clutch-test-er--answering (list columns columns) "orders"
+                       (clutch-er--read-relation clutch-connection
+                                                 clutch-er--entry columns))
+                     (list (string-join columns ",")
+                           (string-join columns ",")))))
     (clutch-er-toggle-columns)
     (clutch-test-er--goto "note")
     (should (equal (clutch-test-er--answering '(("note") ("name")) "customers"
                      (clutch-er-add-relation))
-                   '("note" "id")))
+                   '("note" nil)))
     (should (equal (clutch-test-er--file-text)
                    "\
 {
@@ -346,7 +352,7 @@ not the name the result shows it under."
           (should (equal (clutch-test-er--answering '(("note") ("name"))
                              "customers"
                            (clutch-result-add-relation))
-                         '("note" "id")))
+                         '("note" nil)))
           (should (string-match-p (regexp-quote "[[\"note\",\"name\"]]")
                                   (clutch-test-er--file-text))))
       (delete-directory clutch-er-relations-directory t))))

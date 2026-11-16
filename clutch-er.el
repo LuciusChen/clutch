@@ -412,7 +412,7 @@ read each time."
   "Return the characters the ER view draws with: `unicode' or `ascii'.
 See `clutch-er-charset'."
   (if (eq clutch-er-charset 'auto)
-      (clutch-viz-charset '(?◆ ?● ?○ ?→ ?← ?⇢ ?⇠ ?┐ ?┤ ?┴ ?┄ ?▌ ?· ?…))
+      (clutch-viz-charset '(?◆ ?● ?○ ?→ ?← ?⇢ ?⇠ ?┐ ?┤ ?┴ ?┄ ?· ?…))
     clutch-er-charset))
 
 (defun clutch-er--name (table schema shown-schema)
@@ -659,11 +659,8 @@ qualified; box characters are used when UNICODE, else ASCII."
     (clutch-er--update-highlight)))
 
 (defun clutch-er--update-highlight ()
-  "Highlight the relations of the line at point, if they changed.
-A highlighted line also shows a bar in its first column."
-  (let ((ids (get-text-property (point) 'clutch-er-ids))
-        (bar (propertize (if (eq (clutch-er--charset) 'unicode) "▌" "|")
-                         'face 'clutch-er-highlight)))
+  "Highlight the relations of the line at point, if they changed."
+  (let ((ids (get-text-property (point) 'clutch-er-ids)))
     (unless (equal ids clutch-er--highlighted)
       (setq clutch-er--highlighted ids)
       (mapc #'delete-overlay clutch-er--overlays)
@@ -672,9 +669,6 @@ A highlighted line also shows a bar in its first column."
         (when (cl-intersection ids span-ids)
           (let ((overlay (make-overlay beg end)))
             (overlay-put overlay 'face 'clutch-er-highlight)
-            (push overlay clutch-er--overlays))
-          (let ((overlay (make-overlay beg (1+ beg))))
-            (overlay-put overlay 'display bar)
             (push overlay clutch-er--overlays)))))))
 
 ;;;; Buffer
@@ -807,8 +801,8 @@ Signal unless that relation was added by hand."
   "Read a relation from the table of entry FROM on CONN, in stored form.
 COLUMNS are the columns of FROM offered first; TO and TO-COLUMNS, the
 referenced table and its columns, when an existing relation is edited.
-The referenced columns default to the primary key when it has as many
-columns."
+The referenced columns default to the source names when all exist in
+the referenced table."
   (let* ((names (lambda (entry)
                   (mapcar (lambda (column) (plist-get column :name))
                           (clutch--ensure-column-details
@@ -817,23 +811,26 @@ columns."
                                                    (plist-get entry :catalog))
                            t))))
          (from-columns (clutch-er--read-columns
-                        (format "Columns of %s: " (plist-get from :name))
+                        (format "Referencing columns of %s: " (plist-get from :name))
                         (funcall names from) columns))
-         (to (clutch-object-read "Referenced table: " (plist-get to :name)
-                                 '("TABLE")))
+         (source (format "%s (%s)" (plist-get from :name)
+                         (string-join from-columns ", ")))
+         (to (clutch-object-read (format "%s -> referenced table: " source)
+                                (plist-get to :name) '("TABLE")))
          (details (clutch--ensure-column-details
                    conn (clutch--table-key (plist-get to :name)
                                            (plist-get to :schema)
                                            (plist-get to :catalog))
                    t))
-         (key (cl-loop for column in details
-                       when (plist-get column :primary-key)
-                       collect (plist-get column :name)))
+         (target-names (mapcar (lambda (column) (plist-get column :name)) details))
          (to-columns (clutch-er--read-columns
-                      (format "Columns of %s: " (plist-get to :name))
-                      (mapcar (lambda (column) (plist-get column :name)) details)
+                      (format "%s -> %s: referenced columns (same order): "
+                              source (plist-get to :name))
+                      target-names
                       (or to-columns
-                          (and (= (length key) (length from-columns)) key)))))
+                          (and (cl-every (lambda (column) (member column target-names))
+                                         from-columns)
+                               from-columns)))))
     (unless (= (length from-columns) (length to-columns))
       (user-error "%d columns cannot reference %d"
                   (length from-columns) (length to-columns)))
