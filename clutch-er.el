@@ -113,7 +113,7 @@ property does.")
   "Overlays of the current highlight.")
 
 (defvar-local clutch-er--header-base nil
-  "Header line of the ER view, before the disconnected badge.")
+  "Overview and field-area header strings, before the disconnected badge.")
 
 ;;;; Relations
 
@@ -1362,23 +1362,23 @@ Only a relation added by hand can change."
 
 (define-derived-mode clutch-er-mode special-mode "Clutch-ER"
   "Mode for the ER view of a table.
+In the overview, arrow keys move between nearby table nodes.
 \\{clutch-er-mode-map}"
   (setq-local truncate-lines t
               line-spacing 0
               revert-buffer-function (lambda (&rest _) (clutch-er-refresh))
               clutch-er--header-base
-              (concat " ["
-                      (clutch--key-hints '(("↑↓←→" "Move")
-                                           ("RET" "Open")
-                                           ("o" "Map")
-                                           ("+" "Expand")
-                                           ("TAB" "Columns")
-                                           ("a" "Add link")
-                                           ("g" "Refresh")))
-                      "]")
+              (mapcar (lambda (destination)
+                        (concat " ["
+                                (clutch--key-hints
+                                 `(("RET" "Open") ("o" ,destination)
+                                   ("TAB" "Columns") ("a" "Add link")))
+                                "]"))
+                      '("Fields" "Overview"))
               header-line-format
-              (list :eval (list #'clutch--header-with-disconnect-badge
-                                'clutch-er--header-base)))
+              '(:eval (clutch--header-with-disconnect-badge
+                       (nth (if (get-text-property (point) 'clutch-er-overview) 0 1)
+                            clutch-er--header-base))))
   (add-hook 'post-command-hook #'clutch-er--update-highlight nil t))
 
 ;;;###autoload
