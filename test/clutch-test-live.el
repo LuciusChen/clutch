@@ -874,10 +874,9 @@ though the server had rolled it back with the transaction."
             (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
 
 (ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
-  "A rollback after a failed PostgreSQL commit should show the server's path.
-A COMMIT that fails rolls back the transaction, and a SET made in it, but
-clutch-rollback then found nothing to end, and the console went on
-showing the schema that SET had chosen."
+  "Transaction commands should show and reconnect to PostgreSQL's kept path.
+Rollback, commit and returning to Auto check SET and SET LOCAL.  A rollback
+after a failed commit also refreshes the path when no transaction remains."
   :tags '(:clutch-live)
   (unless (eq clutch-test-backend 'pg)
     (ert-skip "This regression covers the PostgreSQL search_path"))
@@ -898,7 +897,47 @@ showing the schema that SET had chosen."
               (let ((default-path (caar (clutch-db-result-rows
                                          (clutch-db-query clutch-connection
                                                           "SHOW search_path")))))
-                (clutch-toggle-auto-commit)
+                (pcase-dolist (`(,command ,setting ,keep)
+                               '((clutch-rollback "SET LOCAL" nil)
+                                 (clutch-commit "SET LOCAL" nil)
+                                 (clutch-toggle-auto-commit "SET LOCAL" nil)
+                                 (clutch-rollback "SET" nil)
+                                 (clutch-commit "SET" t)
+                                 (clutch-toggle-auto-commit "SET" t)))
+                  (ert-info ((format "%s after %s" command setting))
+                    (when (clutch-db-manual-commit-p clutch-connection)
+                      (clutch-toggle-auto-commit))
+                    (clutch-test--run-in-console (concat "SET search_path TO " default-path))
+                    (clutch-toggle-auto-commit)
+                    (clutch-test--run-in-console
+                     (format "%s search_path TO %s, public" setting schema))
+                    (should (equal (clutch--shown-namespace) schema))
+                    (clutch-test--await (lambda () (gethash clutch-connection clutch--schema-cache)))
+                    (should (eq (gethash parent (gethash clutch-connection clutch--schema-cache) 'missing)
+                                'missing))
+                    (call-interactively command)
+                    (let ((expected (if keep (concat schema ", public") default-path))
+                          (namespace (if keep schema "public")))
+                      (should (equal (clutch--shown-namespace) namespace))
+                      (clutch-test--await (lambda () (gethash clutch-connection clutch--schema-cache)))
+                      (should (eq (gethash parent (gethash clutch-connection clutch--schema-cache) 'missing)
+                                  (if keep 'missing nil)))
+                      (should (equal (plist-get clutch--connection-params :search-path) expected))
+                      (should (equal (caar (clutch-db-result-rows
+                                            (clutch-db-query clutch-connection "SHOW search_path")))
+                                     expected))
+                      (let ((lost (clutch-test--end-console-session admin)))
+                        (clutch-test--run-in-console "SELECT 1")
+                        (should-not (eq clutch-connection lost))
+                        (should (equal (clutch--shown-namespace) namespace))
+                        (should (equal (caar (clutch-db-result-rows
+                                              (clutch-db-query clutch-connection "SHOW search_path")))
+                                       expected))))))
+                (when (clutch-db-manual-commit-p clutch-connection)
+                  (clutch-toggle-auto-commit))
+                (clutch-test--run-in-console (concat "SET search_path TO " default-path))
+                (unless (clutch-db-manual-commit-p clutch-connection)
+                  (clutch-toggle-auto-commit))
                 (clutch-test--run-in-console
                  (format "SET search_path TO %s, public" schema)
                  (format "INSERT INTO public.%s VALUES (1)" child))
