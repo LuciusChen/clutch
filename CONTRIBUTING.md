@@ -42,6 +42,8 @@ CLUTCH_TEST_SELECTOR='"^clutch-test-completion-"' ./test/run-ci.sh main
 
 Backend targets such as `db-jdbc`, `db-mysql`, `db-pg`, `db-mongodb`, `db-redis`, and `db-sqlite` remain available.
 
+Async statement tests use `clutch-test-conn` for connection identity and liveness. The callback fixture scripts result classification and async dispatch, while normal activity, transaction and execution-display hooks run. Keep fault injection local to the behavior being exercised. Before replacing a call-order test with a database workflow, run the same relevant mutations against both versions and assert server state, displayed state and recovery behavior.
+
 Default ERT runs intentionally skip live tests when database credentials are not set. Treat those runs as unit/regression coverage, not proof that real database workflows still work. External protocol packages and the Org-Babel bridge live in separate repositories and carry their own focused test suites.
 
 ## Dependency and surface checks

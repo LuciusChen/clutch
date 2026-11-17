@@ -244,7 +244,7 @@ From agent 0.2.28, `get-foreign-keys` retains its `foreign-keys` array with `fk-
 
 Clutch's ER adapter requires agent 0.2.28 or later for incoming keys. Cold loads sequence primary keys, outgoing keys, columns and incoming keys through the existing asynchronous RPC transport. Warm loads reuse cached columns and outgoing keys. Synchronous and asynchronous column details decode the same complete metadata, including primary-key and foreign-key flags; a cold asynchronous detail fetch therefore makes three RPCs. Column requests escape literal patterns while key requests retain exact schema/table names.
 
-ER cancellation is logical on JDBC. It stops the sequence after the current metadata response and ignores the result, retaining the connection reservation until that response or its existing RPC deadline. It sends no agent `cancel`, which targets foreground statements and could interrupt unrelated primary SQL. The agent's metadata session retains its network/query limits and existing per-session serialization. This adds no agent threads or session lanes. The published Clutch agent pin remains 0.2.27 pending the 0.2.28 release.
+ER cancellation is logical on JDBC. It stops the sequence after the current metadata response and ignores the result, retaining the connection reservation until that response or its existing RPC deadline. It sends no agent `cancel`, which targets foreground statements and could interrupt unrelated primary SQL. The agent's metadata session retains its network/query limits and existing per-session serialization. This adds no agent threads or session lanes. Clutch pins the published 0.2.28 jar and its verified SHA-256.
 
 ## Error semantics
 
