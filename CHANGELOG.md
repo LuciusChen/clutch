@@ -4,7 +4,7 @@
 
 ### Added
 
-- JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The published agent pin awaits the 0.2.28 release.
+- JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The default agent version and verified release checksum are updated to 0.2.28.
 
 - ER metadata loads asynchronously on native PostgreSQL and MySQL when their query APIs support it, with elapsed-time feedback and cancellation. Cached columns and outgoing keys are reused, and an existing background request is awaited without blocking the command.
 
