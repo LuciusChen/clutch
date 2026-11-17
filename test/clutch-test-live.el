@@ -1081,13 +1081,19 @@ starts in, and its results keep the old connection, or none."
     (let ((table (format "clutch_result_recover_%d" (emacs-pid)))
           (params (append (list :backend clutch-test-backend)
                           (clutch-test--live-connect-params)))
-          (result-name (format " *clutch-result-recover-%d*" (emacs-pid))))
+          (result-name (format " *clutch-result-recover-%d*" (emacs-pid)))
+          (clutch-er-relations-directory (make-temp-file "clutch-recover-relations-" t)))
       (unwind-protect
           (progn
             (clutch-db-query admin
                              (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20))"
                                      table))
             (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'orig')" table))
+            (when (eq action 'follow)
+              (clutch-er--write-relations
+               (clutch-er--relations-file admin params)
+               `(((from . ((table . ,table))) (to . ((table . ,table)))
+                  (columns . [["id" "id"]])))))
             (dolist (manual '(nil t))
               (ert-info ((format "%s, %s" action (if manual "Manual" "Auto")))
                 (clutch-test--with-live-console params
@@ -1112,6 +1118,15 @@ starts in, and its results keep the old connection, or none."
                                (erase-buffer)
                                (insert "edited")
                                (clutch-result-edit-finish)))
+                            ('follow
+                             (clutch-record--follow-column (current-buffer) 0 0)
+                             (clutch-test--await-queries)
+                             (should (equal clutch--last-query
+                                            (format "SELECT * FROM %s WHERE %s = 1"
+                                                    (clutch-db-escape-identifier clutch-connection table)
+                                                    (clutch-db-escape-identifier clutch-connection "id"))))
+                             (should (equal (cl-subseq (car clutch--result-rows) 0 2)
+                                            '(1 "orig"))))
                             ('copy
                              (let (kill-ring kill-ring-yank-pointer)
                                (clutch-result-copy 'update '((0) 1))
@@ -1137,17 +1152,19 @@ starts in, and its results keep the old connection, or none."
                 (clutch-db-query admin (format "DELETE FROM %s" table))
                 (clutch-db-query admin (format "INSERT INTO %s VALUES (1, 'orig')" table)))))
         (ignore-errors
-          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))))))
+          (clutch-db-query admin (format "DROP TABLE IF EXISTS %s" table)))
+        (delete-directory clutch-er-relations-directory t)))))
 
 (ert-deftest clutch-test-live-result-edit-recovers-a-lost-session ()
   "The first cell edit after session loss should recover its connection."
   :tags '(:clutch-live)
   (clutch-test--result-action-after-session-loss 'edit))
 
-(ert-deftest clutch-test-live-result-copy-update-recovers-a-lost-session ()
-  "The first UPDATE copy after session loss should recover its connection."
+(ert-deftest clutch-test-live-result-read-actions-recover-a-lost-session ()
+  "Read-only result actions recover before loading metadata after session loss."
   :tags '(:clutch-live)
-  (clutch-test--result-action-after-session-loss 'copy))
+  (dolist (action '(copy follow))
+    (clutch-test--result-action-after-session-loss action)))
 
 (ert-deftest clutch-test-live-result-submit-recovers-a-lost-session ()
   "Submitting staged edits after session loss should recover before its batch."

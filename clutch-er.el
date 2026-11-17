@@ -167,12 +167,13 @@ OUTGOING is the table's `clutch-db-foreign-keys', INCOMING its
                                     (plist-get key :table)
                                     (plist-get key :constraint)))))))
 
-(defun clutch-er--same-relation-p (a b current)
+(defun clutch-er--same-relation-p (a b current &optional catalog)
   "Return non-nil when relations A and B join the same columns.
-A relation without a schema is in CURRENT, the connection's schema."
+A missing schema or catalog means CURRENT or CATALOG of the connection."
   (and (eq (plist-get a :direction) (plist-get b :direction))
        (equal (plist-get a :table) (plist-get b :table))
-       (equal (plist-get a :catalog) (plist-get b :catalog))
+       (equal (or (plist-get a :catalog) catalog)
+              (or (plist-get b :catalog) catalog))
        (equal (or (plist-get a :schema) current)
               (or (plist-get b :schema) current))
        (= (length (plist-get a :pairs)) (length (plist-get b :pairs)))
@@ -296,30 +297,31 @@ Its schema is left out when it is CONN's current schema."
   (list :name (alist-get 'table end) :type "TABLE"
         :schema (alist-get 'schema end) :catalog (alist-get 'catalog end)))
 
-(defun clutch-er--end-p (end entry current)
+(defun clutch-er--end-p (end entry current &optional catalog)
   "Return non-nil when stored END names the table of ENTRY.
-CURRENT is the connection's current schema, which a missing one means."
+CURRENT and CATALOG are the connection's defaults for omitted qualifiers."
   (and (equal (alist-get 'table end) (plist-get entry :name))
        (equal (or (alist-get 'schema end) current)
               (or (plist-get entry :schema) current))
-       (equal (alist-get 'catalog end) (plist-get entry :catalog))))
+       (equal (or (alist-get 'catalog end) catalog)
+              (or (plist-get entry :catalog) catalog))))
 
-(defun clutch-er--stored-relations (stored entry current)
+(defun clutch-er--stored-relations (stored entry current &optional catalog)
   "Return the relations of the table of ENTRY among STORED ones.
 A relation stored from the table to itself is both outgoing and
-incoming.  CURRENT is the connection's current schema."
+incoming.  CURRENT and CATALOG are the connection's default qualifiers."
   (cl-loop for relation in stored
            for from = (alist-get 'from relation)
            for to = (alist-get 'to relation)
            for pairs = (mapcar (lambda (pair) (cons (aref pair 0) (aref pair 1)))
                                (alist-get 'columns relation))
-           when (clutch-er--end-p from entry current)
+           when (clutch-er--end-p from entry current catalog)
            collect (list :direction 'out
                          :table (alist-get 'table to)
                          :schema (alist-get 'schema to)
                          :catalog (alist-get 'catalog to)
                          :pairs pairs :stored relation)
-           when (clutch-er--end-p to entry current)
+           when (clutch-er--end-p to entry current catalog)
            collect (list :direction 'in
                          :table (alist-get 'table from)
                          :schema (alist-get 'schema from)
@@ -329,21 +331,22 @@ incoming.  CURRENT is the connection's current schema."
                                         pairs)
                          :stored relation)))
 
-(defun clutch-er--add-stored (database stored current)
+(defun clutch-er--add-stored (database stored current &optional catalog)
   "Return DATABASE relations, then the STORED ones that repeat none of them.
 A stored relation that joins the same columns as a key of the database
-is left out.  CURRENT is the connection's current schema."
+is left out.  CURRENT and CATALOG are the connection's default qualifiers."
   (append database
           (cl-remove-if (lambda (relation)
                           (cl-some (lambda (key)
                                      (clutch-er--same-relation-p
-                                      relation key current))
+                                      relation key current catalog))
                                    database))
                         stored)))
 
 (defun clutch-er--with-manual (model manual entry)
   "Return MODEL of the table of ENTRY with MANUAL, the stored relations."
   (let* ((current (plist-get model :current))
+         (catalog (plist-get model :current-catalog))
          (id -1)
          (model (copy-sequence model)))
     (plist-put model :relations
@@ -351,8 +354,8 @@ is left out.  CURRENT is the connection's current schema."
                          (append (list :id (cl-incf id)) relation))
                        (clutch-er--add-stored
                         (plist-get model :database)
-                        (clutch-er--stored-relations manual entry current)
-                        current)))))
+                        (clutch-er--stored-relations manual entry current catalog)
+                        current catalog)))))
 
 (defun clutch-er-outgoing-relations (conn params entry)
   "Return the relations from the table of ENTRY on CONN, opened with PARAMS.
@@ -375,13 +378,14 @@ loaded now when missing."
         database
       ;; Resolving unqualified stored ends needs the live namespace.
       ;; DuckDB queries it synchronously, so skip it without stored relations.
-      (let ((current (clutch-db-current-schema conn)))
+      (let ((current (clutch-db-current-schema conn))
+            (catalog (alist-get 'catalog (clutch-db-metadata-scope conn))))
         (clutch-er--add-stored
          database
          (cl-remove-if-not
           (lambda (relation) (eq (plist-get relation :direction) 'out))
-          (clutch-er--stored-relations stored entry current))
-         current)))))
+          (clutch-er--stored-relations stored entry current catalog))
+         current catalog)))))
 
 (defun clutch-er--load (conn params entry)
   "Return the ER model of the table of ENTRY on CONN, opened with PARAMS.
@@ -407,7 +411,8 @@ read each time."
      (list :columns columns
            :database (clutch-er--relations outgoing incoming)
            :schema (or schema current)
-           :current current)
+           :current current
+           :current-catalog (alist-get 'catalog (clutch-db-metadata-scope conn)))
      (clutch-er--read-relations (clutch-er--relations-file conn params))
      entry)))
 
@@ -857,9 +862,10 @@ the referenced table."
 It must not join the same columns as a foreign key of the database or
 as one of OTHERS, the relations stored already."
   (let* ((current (clutch-db-current-schema conn))
+         (catalog (alist-get 'catalog (clutch-db-metadata-scope conn)))
          (from (clutch-er--end-entry (alist-get 'from relation)))
-         (new (car (clutch-er--stored-relations (list relation) from current))))
-    (when (cl-some (lambda (key) (clutch-er--same-relation-p new key current))
+         (new (car (clutch-er--stored-relations (list relation) from current catalog))))
+    (when (cl-some (lambda (key) (clutch-er--same-relation-p new key current catalog))
                    (clutch-er--relations
                     (clutch--ensure-foreign-keys
                      conn (clutch--table-key (plist-get from :name)
@@ -867,8 +873,8 @@ as one of OTHERS, the relations stored already."
                                              (plist-get from :catalog)))
                     nil))
       (user-error "The database already has this foreign key"))
-    (when (cl-some (lambda (other) (clutch-er--same-relation-p new other current))
-                   (clutch-er--stored-relations others from current))
+    (when (cl-some (lambda (other) (clutch-er--same-relation-p new other current catalog))
+                   (clutch-er--stored-relations others from current catalog))
       (user-error "This relation is stored already"))))
 
 (defun clutch-er--save (function)
