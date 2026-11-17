@@ -1019,15 +1019,13 @@ after a failed commit also refreshes the path when no transaction remains."
                       (should (eq (gethash parent (gethash clutch-connection clutch--schema-cache) 'missing)
                                   (if keep 'missing nil)))
                       (should (equal (plist-get clutch--connection-params :search-path) expected))
-                      (should (equal (caar (clutch-db-result-rows
-                                            (clutch-db-query clutch-connection "SHOW search_path")))
+                      (should (equal (caar (clutch-test--server-rows clutch-connection "SHOW search_path"))
                                      expected))
                       (let ((lost (clutch-test--end-console-session admin)))
                         (clutch-test--run-in-console "SELECT 1")
                         (should-not (eq clutch-connection lost))
                         (should (equal (clutch--shown-namespace) namespace))
-                        (should (equal (caar (clutch-db-result-rows
-                                              (clutch-db-query clutch-connection "SHOW search_path")))
+                        (should (equal (caar (clutch-test--server-rows clutch-connection "SHOW search_path"))
                                        expected))))))
                 (when (clutch-db-manual-commit-p clutch-connection)
                   (clutch-toggle-auto-commit))

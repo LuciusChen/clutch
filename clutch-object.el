@@ -1351,6 +1351,7 @@ or starting another schema refresh."
     (user-error "No object is associated with this buffer"))
   (unless ignore-auto
     (clutch--refresh-current-schema (not (called-interactively-p 'interactive)))
+    (clutch--await-background-request clutch-connection)
     (clutch--refresh-object-describe-metadata clutch-connection
                                              clutch--describe-object-entry))
   (clutch--with-object-error-capture
