@@ -4,17 +4,21 @@
 
 ### Added
 
+- The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Arrow keys move one overview node, and click or RET opens its table. Field details serve as a display. `+` expands a node, `o` moves between overview and fields, and `C-u g` recenters. Direction keys move between visually adjacent overview nodes across branches; in the field area they retain ordinary cursor movement for selecting columns and managing manual links.
+
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 
 - JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The default agent version and verified release checksum are updated to 0.2.28.
 
 - ER metadata loads asynchronously on native PostgreSQL and MySQL when their query APIs support it, with elapsed-time feedback and cancellation. Cached columns and outgoing keys are reused, and an existing background request is awaited without blocking the command.
 
-- `clutch-er-diagram`, `C-c C-v` in a SQL buffer, `v` under Objects in the main menu (`C-c ?`) or `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, each beside the table its foreign key references or the tables whose foreign keys reference it. A key over several adjacent columns is one bracketed relation. `RET` follows a relation to the table at its other end and `l` returns; moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it, as do JDBC connections with incoming-key metadata and agent 0.2.28 or later. It draws the same characters in graphical frames and terminals, with colors from the theme, and with ASCII where its symbols are two columns wide; `clutch-er-charset` chooses.
+- `clutch-er-diagram`, `C-c C-v` in a SQL buffer, `v` under Objects in the main menu (`C-c ?`) or `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, each beside the table its foreign key references or the tables whose foreign keys reference it. A key over several adjacent columns is one bracketed relation. Moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it, as do JDBC connections with incoming-key metadata and agent 0.2.28 or later. It draws the same characters in graphical frames and terminals, with colors from the theme, and with ASCII where its symbols are two columns wide; `clutch-er-charset` chooses.
 - `r` in the record view follows a relation from the field at point, a foreign key or one added by hand, and asks when several start there.
 - Relations the database does not declare can be added by hand, for browsing only: `a` in the ER view and `R` in a result buffer start one from the column at point, `e` changes one and `k` deletes it. The prompts show the referencing columns and the direction toward the referenced table; columns in a composite relation pair in input order. Target columns default to matching source names when all exist, otherwise start empty. The ER view shows them at both of their tables with a dashed arrow. They are kept in a versioned JSON file for each connection in `clutch-er-relations-directory`, written in a stable order for Git with a non-secret connection-identity hash as its filename, or in the file a connection's `:relations-file` names, such as one shared in a project.
 
 ### Fixed
+
+- Manually refreshing a table description waits for the schema request it starts before reloading table metadata, avoiding a busy-connection error on asynchronous native backends.
 
 - Native PostgreSQL and MySQL schema refresh, column metadata, comments, outgoing keys and object warmup use asynchronous wire requests. Background requests respect foreground reservations, and commands that need the session await existing metadata. Commands with a known table skip a redundant schema-wide lookup.
 

@@ -105,9 +105,18 @@ with TABLE.  Return the column lists offered first, in order."
 
 (defun clutch-test-er--goto (text)
   "Move point to the line containing TEXT."
-  (goto-char (point-min))
+  (goto-char (or (text-property-not-all (point-min) (point-max)
+                                        'clutch-er-column nil)
+                 (point-min)))
   (search-forward text)
   (beginning-of-line))
+
+(defun clutch-test-er--goto-table (name &optional schema catalog)
+  "Move to the overview button for NAME in SCHEMA and CATALOG."
+  (goto-char (or (clutch-er--overview-position
+                 (clutch-er--overview-entry
+                  (list :name name :schema schema :catalog catalog) clutch-er--model))
+                (ert-fail (format "No overview node for %s" name)))))
 
 (defun clutch-test-er--highlighted ()
   "Return the highlighted lines, without properties, in buffer order."
@@ -140,11 +149,16 @@ columns are asked for."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (should (equal (clutch-test-er--text)
                    "
+ orders ─┬─→ customers +
+         ├─→ regions +
+         ├─← items +
+         └─← refunds +
+
  orders                                    5 columns
  ───────────────────────────────────────────────────
- ◆ id            int     ←   items.order_id
-                         ←   refunds.order_id
- ● customer_id   int     →   customers.id
+ ◆ id            int      ←  items.order_id
+                          ←  refunds.order_id
+ ● customer_id   int      →  customers.id
  ● region        text   ─┐
  ● country       text   ─┴→  regions (code, country)
    … 1 more column
@@ -165,22 +179,69 @@ highlights its relations.  Neither changes the text."
       (clutch-test-er--goto "◆")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("←   refunds.order_id" "◆ id            int     ←   items.order_id")))
+                     '("←  refunds.order_id" "◆ id            int      ←  items.order_id")))
       (goto-char (point-min))
       (run-hooks 'post-command-hook)
       (should-not (clutch-test-er--highlighted))
       (should (= tick (buffer-chars-modified-tick))))))
 
-(ert-deftest clutch-test-er-follows-relations-and-returns ()
-  "Following a relation centers its other table; back returns."
+(ert-deftest clutch-test-er-navigates-only-through-overview-nodes ()
+  "Direction keys move one node, and field details do not switch tables."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (clutch-test-er--goto "customers.id")
+    (should-error (clutch-er-follow) :type 'user-error)
+    (should (equal (plist-get clutch-er--entry :name) "orders"))
+    (clutch-test-er--goto "● country")
+    (should (string-match-p "o Overview" (eval (cadr header-line-format))))
+    (dolist (key '([left] [right] [up] [down]))
+      (should (eq (key-binding key) (lookup-key (current-global-map) key))))
+    (clutch-er-toggle-columns)
+    (should (equal (get-text-property (point) 'clutch-er-column) "country"))
+    (clutch-er-overview)
+    (should (looking-at "orders"))
+    (should (string-match-p "o Fields" (eval (cadr header-line-format))))
+    (clutch-er-overview)
+    (should (equal (get-text-property (point) 'clutch-er-column) "country"))
+    (clutch-er-overview)
+    (dolist (binding '(([left] . clutch-er-left) ([right] . clutch-er-right)
+                       ([up] . clutch-er-up) ([down] . clutch-er-down)))
+      (should (eq (key-binding (car binding)) (cdr binding))))
+    (let ((tick (buffer-chars-modified-tick)))
+      (clutch-er-right)
+      (should (looking-at "customers"))
+      (clutch-er-down)
+      (should (looking-at "regions"))
+      (clutch-er-up)
+      (should (looking-at "customers"))
+      (clutch-er-left)
+      (should (looking-at "orders"))
+      (should-error (clutch-er-left) :type 'user-error)
+      (should (= tick (buffer-chars-modified-tick))))
+    (clutch-er-right)
     (clutch-er-follow)
-    (should (string-match-p "\\`\n customers " (clutch-test-er--text)))
-    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
-    (clutch-er-back)
-    (should (string-match-p "\\`\n orders " (clutch-test-er--text)))
-    (should-error (clutch-er-back) :type 'user-error)))
+    (should (string-match-p "^ customers " (clutch-test-er--text)))
+    (should (string-match-p " ←  orders.customer_id$" (clutch-test-er--text)))
+    (clutch-er-left)
+    (clutch-er-follow)
+    (should (string-match-p "^ orders " (clutch-test-er--text))))
+  ;; A node below another branch can be reached without returning to its root.
+  (with-temp-buffer
+    (insert-text-button "root" 'clutch-er-entry '(:name "root"))
+    (insert " --- ")
+    (insert-text-button "a" 'clutch-er-entry '(:name "a"))
+    (insert " --- ")
+    (insert-text-button "b" 'clutch-er-entry '(:name "b"))
+    (insert "\n         ")
+    (insert-text-button "c" 'clutch-er-entry '(:name "c"))
+    (goto-char (point-min))
+    (clutch-er-right)
+    (should (looking-at "a"))
+    (clutch-er-right)
+    (should (looking-at "b"))
+    (clutch-er-down)
+    (should (looking-at "c"))
+    (clutch-er-up)
+    (should (looking-at "a"))))
 
 (ert-deftest clutch-test-er-refuses-what-it-cannot-show ()
   "A connection that cannot list referencing keys and an object that is
@@ -224,7 +285,7 @@ key of the database."
   ]
 }
 "))
-    (should (string-match-p "^ ○ note +text +⇢   customers.name  manual$"
+    (should (string-match-p "^ ○ note +text + ⇢  customers.name  manual$"
                             (clutch-test-er--text)))
     (clutch-test-er--goto "customers.name")
     (should (equal (clutch-test-er--answering '(("note") ("id")) "customers"
@@ -275,15 +336,16 @@ connection's current one."
                           clutch-connection clutch--connection-params
                           clutch-er--entry))))
     (clutch-er-refresh)
-    (should (string-match-p "^ ● customer_id +int +→   customers.id$"
+    (should (string-match-p "^ ● customer_id +int + →  customers.id$"
                             (clutch-test-er--text)))
     (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
-    (clutch-test-er--goto "customers.name")
+    (clutch-test-er--goto-table "customers")
     (clutch-er-follow)
-    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
-    (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))
-    (clutch-er-back)
+    (should (string-match-p " ←  orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p " ⇠  orders.note  manual$" (clutch-test-er--text)))
+    (clutch-er-left)
+    (clutch-er-follow)
     (clutch-er--write-relations
      (clutch-test-er--file)
      '(((from . ((table . "orders")))
@@ -293,7 +355,7 @@ connection's current one."
                 :columns '((:name "name" :type "text")))
           (clutch-test-conn-tables clutch-connection))
     (clutch-er-refresh)
-    (clutch-test-er--goto "archive.public.customers.name")
+    (clutch-test-er--goto-table "customers" "public" "archive")
     (clutch-er-follow)
     (should (equal (plist-get clutch-er--entry :catalog) "archive"))
     (setf (clutch-test-conn-params clutch-connection)
@@ -431,7 +493,17 @@ draws with ASCII."
                               (clutch-test-er--text)))))
   (let ((clutch-er-charset 'ascii))
     (clutch-test-er--with-view (clutch-test-er--conn)
-      (should (string-match-p "--> customers.id$" (clutch-test-er--text))))))
+      (should (string-match-p "--> customers.id$" (clutch-test-er--text)))))
+  (let ((clutch-er-charset 'unicode) aligned)
+    (clutch-test-er--with-view (clutch-test-er--conn)
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'visible))
+                ((symbol-function 'clutch-er--join-arrow)
+                 (lambda (position)
+                   (should (memq (char-after position) '(?→ ?← ?⇢ ?⇠)))
+                   (push position aligned))))
+        (clutch-er--align-arrows)
+        (should aligned)))))
 
 (ert-deftest clutch-test-er-async-load-owns-its-reply ()
   "ER loads defer rendering and release their activity on every outcome."
@@ -483,6 +555,71 @@ draws with ASCII."
                 ('cancelled (should (string-match-p "cancelled" (buffer-string))))))
           (should-not (gethash conn clutch--running-queries))
           (should-not (clutch-db-in-use-p conn))))))))
+
+(ert-deftest clutch-test-er-overview-follows-tables-without-extra-queries ()
+  "Overview nodes share navigation and remember loaded neighbours."
+  (clutch-test-er--with-view (clutch-test-er--conn)
+    (let ((before (buffer-chars-modified-tick)))
+      (goto-char (point-min))
+      (clutch-er-overview)
+      (should (equal (plist-get (get-text-property (point) 'clutch-er-entry) :name) "orders"))
+      (should (eq (key-binding (kbd "TAB")) #'clutch-er-toggle-columns))
+      (should (eq (key-binding [mouse-1]) #'push-button))
+      (let* ((start (text-property-any (point-min) (point-max) 'clutch-er-overview t))
+             (end (next-single-property-change start 'clutch-er-overview nil (point-max)))
+             (overview (buffer-substring-no-properties start end)))
+        (clutch-er-next 1)
+        (clutch-er-follow)
+        (let* ((start (text-property-any (point-min) (point-max) 'clutch-er-overview t))
+               (end (next-single-property-change start 'clutch-er-overview nil (point-max))))
+          (should (equal overview (buffer-substring-no-properties start end))))
+        (should (equal (plist-get (get-text-property (point) 'clutch-er-entry) :name)
+                       "customers"))
+        (should (eq (button-get (button-at (point)) 'face) 'clutch-er-highlight))
+        (should (equal (plist-get clutch-er--entry :name) "customers")))
+      (clutch-er-expand)
+      (should-not (string-match-p (regexp-quote "customers +") (buffer-string)))
+      (should (string-match-p (regexp-quote "regions +") (buffer-string)))
+      (clutch-er-refresh t)
+      (should (looking-at "customers"))
+      (should (string-prefix-p "\n customers" (buffer-string)))
+      (clutch-er-right)
+      (clutch-er-follow)
+      (should (equal (plist-get clutch-er--entry :name) "orders"))
+      (let ((tick (buffer-chars-modified-tick)))
+        (goto-char (point-min))
+        (clutch-er-overview)
+        (forward-button 1 t)
+        (run-hooks 'post-command-hook)
+        (should (= tick (buffer-chars-modified-tick))))
+      (should (> (buffer-chars-modified-tick) before)))))
+
+(ert-deftest clutch-test-er-overview-bounds-cycles-and-keeps-namespace-identity ()
+  "Cycles, same-named tables and many neighbours stay bounded and navigable."
+  (with-temp-buffer
+    (clutch-er-mode)
+    (setq clutch-connection 'conn
+          clutch-er--entry '(:name "people" :schema "a")
+          clutch-er--model
+          (list :schema "a" :current "public" :relations
+                (append '((:table "people" :schema "b" :direction out)
+                          (:table "people" :schema "a" :direction out)
+                          (:table "people" :direction out :stored t))
+                        (cl-loop for i below 1000 collect
+                                 (list :table (format "t%d" i) :schema "a" :direction 'in)))))
+    (clutch-er--remember-overview)
+    (let ((inhibit-read-only t)) (clutch-er--insert-overview))
+    (should (< (count-lines (point-min) (point-max)) 16))
+    (should (string-match-p (regexp-quote "b.people +") (buffer-string)))
+    (should (string-match-p (regexp-quote "public.people +") (buffer-string)))
+    (should (string-match-p "people (shown)" (buffer-string)))
+    (should (string-match-p "more relations" (buffer-string)))
+    (should (equal (mapcar (lambda (node) (plist-get (car node) :name))
+                          (cdr clutch-er--overview)) '("people")))
+    (setq clutch-connection 'replacement)
+    (clutch-er--remember-overview)
+    (should (eq (car clutch-er--overview) 'replacement))
+    (should (= (length (cdr clutch-er--overview)) 1))))
 
 (provide 'clutch-test-er)
 
