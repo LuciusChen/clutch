@@ -121,6 +121,18 @@ with TABLE.  Return the column lists offered first, in order."
                             (overlays-in (point-min) (point-max))))
         #'string<))
 
+(ert-deftest clutch-test-er-keeps-unnamed-keys-separate ()
+  "Missing constraint names cannot group independent key columns."
+  (let ((relations
+         (clutch-er--relations
+          '(("x" :ref-table "parent" :ref-column "id")
+            ("y" :ref-table "parent" :ref-column "other"))
+          '((:table "child" :column "x" :ref-column "id")
+            (:table "child" :column "y" :ref-column "other")))))
+    (should (equal (mapcar (lambda (relation) (plist-get relation :pairs)) relations)
+                   '((("x" . "id")) (("y" . "other"))
+                     (("id" . "x")) (("other" . "y")))))))
+
 (ert-deftest clutch-test-er-shows-key-columns-and-relations ()
   "Each column shows the relations it ends beside it, a key over two
 adjacent columns as one bracket, and only key columns show until all
@@ -296,7 +308,11 @@ connection's current one."
                           (lambda (relation) (plist-get relation :stored))
                           (clutch-er-outgoing-relations
                            clutch-connection clutch--connection-params
-                           (list :name "orders" :catalog catalog)))))))
+                           (list :name "orders" :catalog catalog))))))
+      (clutch-er-diagram (list :name "orders" :type "TABLE" :catalog catalog))
+      (should (= (if (equal catalog "shop") 1 0)
+                 (length (seq-filter (lambda (relation) (plist-get relation :stored))
+                                     (plist-get clutch-er--model :relations))))))
     (let ((stored (clutch-er--read-relations (clutch-test-er--file))))
       (push '(catalog . "shop") (alist-get 'from (car stored)))
       (clutch-er--write-relations (clutch-test-er--file) stored))
@@ -440,9 +456,13 @@ draws with ASCII."
                 ('cancelled
                  ;; The backend declines cancellation; later workflow steps
                  ;; and presentation must still stop on the user's request.
-                 (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                            (lambda (_) nil)))
-                   (clutch-cancel-query-or-quit)))
+                 (let (metadata-cancelled)
+                   (cl-letf (((symbol-function 'clutch-db-interrupt-metadata)
+                              (lambda (_) (setq metadata-cancelled t) nil))
+                             ((symbol-function 'clutch-db-interrupt-query)
+                              (lambda (_) (ert-fail "ER cancelled foreground SQL"))))
+                     (clutch-cancel-query-or-quit))
+                   (should metadata-cancelled)))
                 ('moved (setq-local clutch-connection (clutch-test-er--conn)))
                 ('killed (kill-buffer (current-buffer))))
               (should (eq (and (funcall active) t)

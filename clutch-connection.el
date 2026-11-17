@@ -769,7 +769,7 @@ PRESENT keeps the selected window.  A reply reaches this through
               (funcall present)))))
     (clutch--end-query-activity activity)))
 
-(defun clutch--run-db-query-async (conn sql region callback &optional start)
+(defun clutch--run-db-query-async (conn sql region callback &optional start cancel)
   "Run SQL on CONN like `clutch--run-db-query' and call CALLBACK once.
 CALLBACK receives RESULT and ERROR: a `clutch-db-result' and nil, or nil
 and a `clutch-db-error' condition.  When CONN's backend can run SQL
@@ -787,13 +787,15 @@ START, when non-nil, starts SQL in place of `clutch-db-query-async': it
 is called with the function that takes the outcome and returns non-nil
 once SQL runs.  When START declines, return nil and run nothing; otherwise
 return non-nil.  START may deliver workflow-specific RESULT data; the
-default query operation delivers a `clutch-db-result'."
+default query operation delivers a `clutch-db-result'.
+CANCEL, when non-nil, is a zero-argument function used in place of
+`clutch-db-interrupt-query' for this operation."
   (clutch--refuse-while-running conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before running another query"))
   (let ((entry (list :buffer (current-buffer) :region region :cancelling nil
-                     :disconnected nil))
+                     :disconnected nil :cancel cancel))
         started)
     (puthash conn entry clutch--running-queries)
     (unwind-protect
@@ -861,7 +863,9 @@ Even if the backend cannot cancel it, stop subsequent workflow steps."
       (plist-put entry :cancelling t)
       (clutch--show-statement-status clutch-connection 'cancelling)
       (unless (condition-case err
-                  (clutch-db-interrupt-query clutch-connection)
+                  (if-let* ((cancel (plist-get entry :cancel)))
+                      (funcall cancel)
+                    (clutch-db-interrupt-query clutch-connection))
                 (clutch-db-error
                  (message "Cancel failed: %s" (clutch-db--error-message err))
                  nil))

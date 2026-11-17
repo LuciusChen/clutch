@@ -55,13 +55,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.27"
+(defcustom clutch-jdbc-agent-version "0.2.28"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "d16e1c84d4eb184148514a0755734f1433582985ef20ae66c9f5587ac54d5759"
+  "0ab869021e85957b89dbb3f4fbd119d7da0e2e84bdca087ec92869cbc4124d29"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -1664,7 +1664,7 @@ still arrive."
   (when (clutch-jdbc--namespace-statement-p conn sql)
     (condition-case err
         (if (clutch-jdbc--duckdb-conn-p conn)
-            (clutch-db-current-schema conn)
+            (clutch-jdbc--refresh-duckdb-namespace conn)
           (let ((schema (caar (clutch-db-result-rows
                                (clutch-db-query
                                 conn
@@ -2133,26 +2133,32 @@ JDBC drivers use backslash-escaped LIKE patterns."
                    `((conn-id . ,(clutch-jdbc-conn-conn-id conn))))))
       (clutch-jdbc--visible-schemas conn (plist-get result :schemas))))))
 
+(defun clutch-jdbc--refresh-duckdb-namespace (conn)
+  "Read and remember DuckDB CONN's current catalog, schema and file."
+  (pcase (clutch-db-result-rows
+          (clutch-db-query
+           conn
+           (concat "SELECT current_catalog(), current_schema(), "
+                   "(SELECT path FROM duckdb_databases() "
+                   "WHERE database_name = current_catalog())")))
+    (`((,catalog ,schema . ,rest) . ,_)
+     (unless (and (stringp catalog) (not (string-empty-p catalog))
+                  (stringp schema) (not (string-empty-p schema)))
+       (signal 'clutch-db-error
+               '("DuckDB returned an invalid current namespace")))
+     (clutch-jdbc--remember-duckdb-namespace conn catalog schema (car rest)))
+    (_ (signal 'clutch-db-error
+               '("DuckDB did not return a current namespace")))))
+
 (cl-defmethod clutch-db-current-schema ((conn clutch-jdbc-conn))
-  "Return the effective schema for JDBC CONN."
+  "Return the effective schema for JDBC CONN.
+DuckDB reads it once and refreshes after namespace-changing statements."
   (cond
    ((clutch-jdbc--clickhouse-conn-p conn)
     (clutch-db-database conn))
    ((clutch-jdbc--duckdb-conn-p conn)
-    (pcase (clutch-db-result-rows
-            (clutch-db-query
-             conn
-             (concat "SELECT current_catalog(), current_schema(), "
-                     "(SELECT path FROM duckdb_databases() "
-                     "WHERE database_name = current_catalog())")))
-      (`((,catalog ,schema . ,rest) . ,_)
-       (unless (and (stringp catalog) (not (string-empty-p catalog))
-                    (stringp schema) (not (string-empty-p schema)))
-         (signal 'clutch-db-error
-                 '("DuckDB returned an invalid current namespace")))
-       (clutch-jdbc--remember-duckdb-namespace conn catalog schema (car rest)))
-      (_ (signal 'clutch-db-error
-                 '("DuckDB did not return a current namespace")))))
+    (or (and (clutch-jdbc--conn-catalog conn) (clutch-jdbc--conn-schema conn))
+        (clutch-jdbc--refresh-duckdb-namespace conn)))
    (t
     (clutch-jdbc--conn-schema conn))))
 
@@ -2356,20 +2362,46 @@ the metadata request."
       (start))
     t))
 
+(defun clutch-jdbc--column-detail-requests (conn table schema catalog)
+  "Build the JDBC column metadata requests for TABLE on CONN.
+SCHEMA and CATALOG qualify the table."
+  (let ((params (clutch-jdbc--table-metadata-params conn table schema catalog)))
+    (list (cons "get-primary-keys" params)
+          (cons "get-foreign-keys" params)
+          (cons "get-columns"
+                (clutch-jdbc--table-metadata-params conn table schema catalog t)))))
+
+(defun clutch-jdbc--send-metadata (conn request callback)
+  "Send metadata REQUEST on CONN, reporting result and error to CALLBACK."
+  (clutch-jdbc--rpc-async
+   (car request) (cdr request)
+   (lambda (result) (funcall callback result nil))
+   (lambda (error) (funcall callback nil (list 'clutch-db-error error)))
+   nil conn))
+
+(defun clutch-jdbc--column-details-from-results (results)
+  "Decode JDBC column metadata RESULTS, including primary and foreign keys."
+  (let ((primary (plist-get (nth 0 results) :primary-keys))
+        (foreign (clutch-jdbc--foreign-keys-from-result (nth 1 results))))
+    (mapcar
+     (lambda (col)
+       (let ((name (plist-get col :name)))
+         (list :name name :type (plist-get col :type)
+               :backend-type (plist-get col :backend-type)
+               :nullable (clutch-jdbc--json-bool (plist-get col :nullable))
+               :primary-key (and (member name primary) t)
+               :foreign-key (cdr (assoc name foreign))
+               :comment nil :default (plist-get col :default))))
+     (clutch-jdbc--normalize-column-details (plist-get (nth 2 results) :columns)))))
+
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
                                               &optional errback schema catalog)
   "Fetch JDBC column details for TABLE on CONN asynchronously."
-  (clutch-jdbc--rpc-async
-   "get-columns"
-   (clutch-jdbc--table-metadata-params conn table schema catalog t)
-   (lambda (result)
-     (when callback
-       (funcall callback
-                (clutch-jdbc--normalize-column-details
-                 (plist-get result :columns)))))
-   errback
-   nil
-   conn)
+  (clutch-db--metadata-request-series
+   (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
+   (clutch-jdbc--column-detail-requests conn table schema catalog)
+   #'clutch-jdbc--column-details-from-results
+   (clutch-db--metadata-outcome callback errback) nil)
   t)
 
 (cl-defmethod clutch-db-list-columns-async ((conn clutch-jdbc-conn) table callback
@@ -2393,12 +2425,15 @@ the metadata request."
 A referenced table names its schema as :ref-schema; a driver without
 schemas reports an empty one, which is left out."
   (mapcar (lambda (fk)
-            (let ((schema (plist-get fk :pk-schema)))
+            (let ((schema (plist-get fk :pk-schema))
+                  (constraint (plist-get fk :fk-name)))
               (cons (plist-get fk :fk-column)
                     `(:ref-table ,(plist-get fk :pk-table)
-                      :ref-column ,(plist-get fk :pk-column)
-                      ,@(and (stringp schema) (not (string-empty-p schema))
-                             (list :ref-schema schema))))))
+                                 :ref-column ,(plist-get fk :pk-column)
+                                 ,@(and (stringp schema) (not (string-empty-p schema))
+                                        (list :ref-schema schema))
+                                 ,@(and (stringp constraint) (not (string-empty-p constraint))
+                                        (list :constraint constraint))))))
           (plist-get result :foreign-keys)))
 
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
@@ -2731,25 +2766,69 @@ Only PostgreSQL and MySQL URLs have plans."
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table
                                         &optional schema catalog)
   "Return detailed column info for TABLE on JDBC CONN."
-  (let* ((pk-cols (clutch-db-primary-key-columns conn table schema catalog))
-         (fks     (clutch-db-foreign-keys conn table schema catalog))
-         (result  (clutch-jdbc--rpc
-                   conn "get-columns"
-                   (clutch-jdbc--table-metadata-params
-                    conn table schema catalog t)))
-         (cols    (clutch-jdbc--normalize-column-details
-                   (plist-get result :columns))))
-    (mapcar (lambda (col)
-              (let ((name (plist-get col :name)))
-                (list :name        name
-                      :type        (plist-get col :type)
-                      :backend-type (plist-get col :backend-type)
-                      :nullable    (clutch-jdbc--json-bool (plist-get col :nullable))
-                      :primary-key (and (member name pk-cols) t)
-                      :foreign-key (cdr (assoc name fks))
-                      :comment     nil
-                      :default     (plist-get col :default))))
-            cols)))
+  (clutch-jdbc--column-details-from-results
+   (mapcar (lambda (request)
+             (clutch-jdbc--rpc conn (car request) (cdr request)))
+           (clutch-jdbc--column-detail-requests conn table schema catalog))))
+
+(defun clutch-jdbc--require-er-metadata ()
+  "Require the agent version that reports ordered incoming key columns."
+  (when (version< clutch-jdbc-agent-version "0.2.28")
+    (user-error "JDBC ER metadata requires clutch-jdbc-agent 0.2.28 or later")))
+
+(defun clutch-jdbc--referencing-keys-from-result (result)
+  "Decode ordered incoming JDBC keys from RESULT."
+  (mapcar (lambda (key)
+            (let ((schema (plist-get key :fk-schema))
+                  (constraint (plist-get key :fk-name)))
+              (append (list :table (plist-get key :fk-table)
+                            :column (plist-get key :fk-column)
+                            :ref-column (plist-get key :pk-column))
+                      (when (and (stringp schema) (not (string-empty-p schema)))
+                        (list :schema schema))
+                      (when (and (stringp constraint) (not (string-empty-p constraint)))
+                        (list :constraint constraint)))))
+          (plist-get result :keys)))
+
+(cl-defmethod clutch-db-referencing-keys ((conn clutch-jdbc-conn) table
+                                          &optional schema catalog)
+  "Read incoming keys of TABLE on JDBC CONN."
+  (clutch-jdbc--require-er-metadata)
+  (clutch-jdbc--referencing-keys-from-result
+   (clutch-jdbc--rpc conn "get-referencing-keys"
+                     (clutch-jdbc--table-metadata-params conn table schema catalog))))
+
+(cl-defmethod clutch-db-referencing-keys-async
+  ((conn clutch-jdbc-conn) table callback &optional errback schema catalog continue)
+  "Read incoming keys of TABLE on JDBC CONN without blocking."
+  (clutch-jdbc--require-er-metadata)
+  (clutch-db--metadata-request-series
+   (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
+   (list (cons "get-referencing-keys"
+               (clutch-jdbc--table-metadata-params conn table schema catalog)))
+   (lambda (results) (clutch-jdbc--referencing-keys-from-result (car results)))
+   (clutch-db--metadata-outcome callback errback) continue)
+  t)
+
+(cl-defmethod clutch-db-table-relations-async
+  ((conn clutch-jdbc-conn) table callback &optional errback schema catalog continue)
+  "Read TABLE's JDBC relation metadata on CONN without blocking."
+  (clutch-jdbc--require-er-metadata)
+  (clutch-db--metadata-request-series
+   (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
+   (append (clutch-jdbc--column-detail-requests conn table schema catalog)
+           (list (cons "get-referencing-keys"
+                       (clutch-jdbc--table-metadata-params conn table schema catalog))))
+   (lambda (results)
+     (list :columns (clutch-jdbc--column-details-from-results results)
+           :foreign-keys (clutch-jdbc--foreign-keys-from-result (nth 1 results))
+           :referencing-keys (clutch-jdbc--referencing-keys-from-result (nth 3 results))))
+   (clutch-db--metadata-outcome callback errback) continue)
+  t)
+
+(cl-defmethod clutch-db-interrupt-metadata ((_conn clutch-jdbc-conn))
+  "Let the current JDBC metadata request finish without cancelling primary SQL."
+  nil)
 
 ;;;; Re-entrancy guard
 

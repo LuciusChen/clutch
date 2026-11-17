@@ -1855,6 +1855,11 @@ interrupt path and the connection should remain usable.")
   "Backends without query interrupt support return nil."
   nil)
 
+(cl-defgeneric clutch-db-interrupt-metadata (conn)
+  "Interrupt the current metadata request on CONN when supported.
+Return non-nil if cancellation was requested, nil to wait for its reply."
+  (clutch-db-interrupt-query conn))
+
 (cl-defgeneric clutch-db-build-paged-sql (conn base-sql page-num page-size
                                           &optional order-by page-offset)
   "Build a paginated SQL query for CONN's dialect.
