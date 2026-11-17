@@ -26,8 +26,8 @@
   "Modules which adapt external database protocols.")
 
 (defconst clutch--architecture-workflow-modules
-  '("clutch-connection" "clutch-document" "clutch-edit" "clutch-object"
-    "clutch-query" "clutch-result" "clutch-schema" "clutch-ui")
+  '("clutch-connection" "clutch-document" "clutch-edit" "clutch-er"
+    "clutch-object" "clutch-query" "clutch-result" "clutch-schema" "clutch-ui")
   "Modules which own user-facing workflows.")
 
 (defconst clutch--architecture-foundation-allowlists

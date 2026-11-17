@@ -218,6 +218,10 @@ exact resolver under the internal `:clutch-resolver' key.")
   (member (upcase (or (plist-get entry :type) ""))
           '("TABLE" "VIEW" "SYNONYM" "COLLECTION" "KEY")))
 
+(defun clutch--table-entry-p (entry)
+  "Return non-nil when ENTRY is a table, which can have foreign keys."
+  (equal (clutch--object-type-string entry) "TABLE"))
+
 (defun clutch--normalize-object-type (type)
   "Return a normalized object TYPE string."
   (let ((type (upcase (or type ""))))
@@ -907,16 +911,21 @@ an insert that creates a MongoDB collection."
 
 (defun clutch--object-sql-name (conn entry)
   "Return SQL-ready object name for ENTRY on CONN.
-Preserve object schema qualification, falling back to source schema only
-when the real object schema is unavailable."
-  (let* ((schema (or (plist-get entry :schema)
-                     (plist-get entry :source-schema)))
+Preserve catalog and schema qualification, falling back to source schema.
+A catalog without a schema uses CONN's current schema when known, or the
+server's default-schema position between two dots."
+  (let* ((catalog (plist-get entry :catalog))
+         (schema (or (plist-get entry :schema)
+                     (plist-get entry :source-schema)
+                     (and catalog (clutch-db-current-schema conn))))
          (name (or (plist-get entry :name) "")))
     (mapconcat
-     (lambda (part) (clutch-db-escape-identifier conn part))
-     (if (and schema (not (string-empty-p schema)))
-         (list schema name)
-       (list name))
+     (lambda (part) (if (string-empty-p part) ""
+                      (clutch-db-escape-identifier conn part)))
+     (if catalog (list catalog (or schema "") name)
+       (if (and schema (not (string-empty-p schema)))
+           (list schema name)
+         (list name)))
      ".")))
 
 (defun clutch--use-object-action-keymap ()
@@ -1318,12 +1327,13 @@ OP names the object workflow, such as \"describe\" or \"show-definition\"."
          :entry-type (plist-get entry :type))))
 
 (defmacro clutch--with-object-error-capture (buffer conn entry op &rest body)
-  "Execute BODY; on clutch-db-error, record to BUFFER/CONN/ENTRY/OP and re-signal."
+  "Execute BODY and return its value.
+On clutch-db-error, record to BUFFER/CONN/ENTRY/OP and re-signal."
   (declare (indent 4) (debug (form form form form body)))
   (let ((err (make-symbol "err")))
     `(condition-case ,err
-         (progn
-           ,@body
+         (prog1
+             (progn ,@body)
            (clutch--clear-connection-problem-capture ,conn))
        (clutch-db-error
         (clutch--remember-object-operation-error ,buffer ,conn ,entry ,op ,err)
@@ -1629,6 +1639,11 @@ When ENTRY is nil, use the current table-like object."
      :label "Browse rows"
      :command clutch-object-browse
      :predicate clutch--table-like-entry-p)
+    (:id er-diagram
+     :key "r"
+     :label "ER diagram"
+     :command clutch-er-diagram
+     :predicate clutch--table-entry-p)
     (:id index-insight
      :key "i"
      :label "Show index insight"
@@ -1754,7 +1769,10 @@ When ENTRY is nil, use the current table-like object."
     ("d" (lambda () (clutch--object-action-label 'describe))
      clutch-object-describe)
     ("s" (lambda () (clutch--object-action-label 'show-definition))
-     clutch-object-show-ddl-or-source)]
+     clutch-object-show-ddl-or-source)
+    ("r" (lambda () (clutch--object-action-label 'er-diagram))
+     clutch-er-diagram
+     :if (lambda () (clutch--table-entry-p clutch--object-action-entry)))]
    ["Document"
     :if clutch--object-act-document-actions-p
     ("i" (lambda () (clutch--object-action-label 'index-insight))

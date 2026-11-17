@@ -1376,36 +1376,75 @@ ORDER BY pk.ord"
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-db-pg--connection) table
                                       &optional schema _catalog)
   "Return foreign key info for TABLE in SCHEMA on PostgreSQL CONN.
-The query keeps the keys that reference a table in TABLE's schema, and
-each carries that schema as :ref-schema, also when the search path found
-TABLE."
+Each column is paired with the column it references, in the order of
+its constraint, and :ref-schema names the referenced table's schema.
+The catalogs, unlike the information schema, show every key to a user
+who can read TABLE, whoever owns the tables it references."
   (clutch-db--translate-library-error pgsql-error
     (let* ((sql (format "SELECT
-    kcu.column_name,
-    ccu.table_name AS referenced_table,
-    ccu.column_name AS referenced_column,
-    n.nspname AS referenced_schema
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-    ON tc.constraint_name = kcu.constraint_name
-    AND tc.table_schema = kcu.table_schema
-JOIN information_schema.constraint_column_usage ccu
-    ON ccu.constraint_name = tc.constraint_name
-    AND ccu.table_schema = tc.table_schema
-JOIN pg_class c ON c.oid = %s
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE tc.constraint_type = 'FOREIGN KEY'
-    AND tc.table_name = c.relname
-    AND tc.table_schema = n.nspname"
+    a.attname,
+    rc.relname AS referenced_table,
+    ra.attname AS referenced_column,
+    rn.nspname AS referenced_schema,
+    con.conname
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_class rc ON rc.oid = con.confrelid
+JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conrelid = %s
+ORDER BY con.conname, k.ord"
                           (clutch-db-pg--relation table schema)))
              (result (clutch-db-pg--exec conn sql)))
         (mapcar
          (lambda (row)
-           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema) row))
+           (pcase-let ((`(,col-name ,ref-table ,ref-column ,ref-schema
+                                    ,constraint)
+                        row))
              (cons col-name
                    (list :ref-table ref-table :ref-column ref-column
-                         :ref-schema ref-schema))))
+                         :ref-schema ref-schema :constraint constraint))))
          (clutch-db-pg--metadata-rows result)))))
+
+(cl-defmethod clutch-db-referencing-keys ((conn clutch-db-pg--connection) table
+                                          &optional schema _catalog)
+  "Return the foreign keys that reference TABLE in SCHEMA on PostgreSQL CONN.
+A key declared on a partitioned table is reported once, not again for
+each partition that inherits it."
+  (clutch-db--translate-library-error pgsql-error
+    (let* ((sql (format "SELECT
+    c.relname,
+    n.nspname,
+    a.attname,
+    ra.attname AS referenced_column,
+    con.conname
+FROM pg_constraint con
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+    WITH ORDINALITY AS k(attnum, refattnum, ord)
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a
+    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+JOIN pg_attribute ra
+    ON ra.attrelid = con.confrelid AND ra.attnum = k.refattnum
+WHERE con.contype = 'f'
+    AND con.conparentid = 0
+    AND con.confrelid = %s
+ORDER BY n.nspname, c.relname, con.conname, k.ord"
+                        (clutch-db-pg--relation table schema)))
+           (result (clutch-db-pg--exec conn sql)))
+      (mapcar
+       (lambda (row)
+         (pcase-let ((`(,ref-table ,ref-schema ,column ,ref-column ,constraint)
+                      row))
+           (list :table ref-table :schema ref-schema :column column
+                 :ref-column ref-column :constraint constraint)))
+       (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-pg--connection) table
                                         &optional schema _catalog)
@@ -1688,6 +1727,11 @@ XTDB has no table comments."
 
 (cl-defmethod clutch-db-foreign-keys ((_conn clutch-db-pg--xtdb-connection) _table
                                       &optional _schema _catalog)
+  "Return nil, since XTDB has no foreign keys."
+  nil)
+
+(cl-defmethod clutch-db-referencing-keys ((_conn clutch-db-pg--xtdb-connection)
+                                          _table &optional _schema _catalog)
   "Return nil, since XTDB has no foreign keys."
   nil)
 

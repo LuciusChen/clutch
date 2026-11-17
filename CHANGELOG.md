@@ -2,9 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- `clutch-er-diagram`, `C-c C-v` in a SQL buffer, `v` under Objects in the main menu (`C-c ?`) or `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, each beside the table its foreign key references or the tables whose foreign keys reference it. A key over several adjacent columns is one bracketed relation. `RET` follows a relation to the table at its other end and `l` returns; moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it; other connections refuse it. It draws the same characters in graphical frames and terminals, with colors from the theme, and with ASCII where its symbols are two columns wide; `clutch-er-charset` chooses.
+- `r` in the record view follows a relation from the field at point, a foreign key or one added by hand, and asks when several start there.
+- Relations the database does not declare can be added by hand, for browsing only: `a` in the ER view and `R` in a result buffer start one from the column at point, `e` changes one and `k` deletes it. The prompts show the referencing columns and the direction toward the referenced table; columns in a composite relation pair in input order. Target columns default to matching source names when all exist, otherwise start empty. The ER view shows them at both of their tables with a dashed arrow. They are kept in a versioned JSON file for each connection in `clutch-er-relations-directory`, written in a stable order for Git with a non-secret connection-identity hash as its filename, or in the file a connection's `:relations-file` names, such as one shared in a project.
+
 ### Fixed
 
+- Relation navigation restores a lost connection before reading metadata, then verifies the result's original namespace. Explicit current-catalog names and omitted catalog names identify the same table when matching and deduplicating manual relations.
+
+- Following a relation from an old result refuses once its connection has moved to another namespace. Manual relations preserve catalog qualification through rendering, navigation and SQL generation.
+
+- Follow FK skips current-schema lookup when no manual relations are stored, avoiding an additional synchronous query on DuckDB.
+
+- MySQL 5.6/5.7 reverse foreign-key lookups use the InnoDB dictionary when available to avoid opening unrelated table metadata. Unsupported names, engines or dictionary privileges retain the standard lookup.
+- A timed-out MySQL metadata read, including an ER view's foreign-key lookup, now interrupts and drains the response or closes the connection when recovery fails. It left a pending response that prevented subsequent queries.
+
+- ER arrows use complete arrow glyphs. Composite-key brackets join their arrows using the displayed fonts' ink metrics, avoiding broken or vertically offset connectors.
+
 - A query console no longer shows `[schema...]` for good when another buffer of the same connection cannot refresh itself. A Record buffer whose row is gone, for example, signalled while the schema status changed, and the refresh behind that change was never queued. Such a buffer is now reported in the echo area and skipped.
+- PostgreSQL foreign keys are read from the system catalogs. A key whose columns reference a table in another schema is no longer missing; each column of a composite key is paired with the column it references instead of every referenced column; a key named like a key of another table in the same schema no longer adds that table's columns; and a user who can read a table sees its keys without owning the tables they reference. Foreign-key highlighting, Follow FK, describe buffers and column hints show these keys.
+- Follow FK on a key over several columns names all of them, so it opens the one row the record references instead of every row matching the column at point. Columns shown under aliases use their source names. For a key whose columns the backend cannot tell apart, as over JDBC, it still names the column at point.
+- A MySQL foreign key to a table in another database names that database, so Follow FK opens the referenced table there instead of a table of the same name in the current database.
+- A SQLite foreign key that names no referenced columns, such as `REFERENCES parent`, references the parent's primary key. Follow FK on such a column failed, as the key had no referenced column.
 
 ## 0.7.3 - 2026-11-03
 

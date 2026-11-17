@@ -19,11 +19,14 @@
 (defconst clutch-viz--eighths [nil ?▏ ?▎ ?▍ ?▌ ?▋ ?▊ ?▉]
   "Block characters filling one to seven eighths of a cell.")
 
-(defun clutch-viz-charset ()
+(defun clutch-viz-charset (&optional chars)
   "Return `unicode' when block and box characters fill one column.
 Otherwise return `ascii'.  CJK language environments can make them two
-columns wide, which would break the alignment of every chart."
-  (if (cl-every (lambda (char) (= (char-width char) 1)) '(?█ ?▏ ?├ ?─))
+columns wide, which would break the alignment of every chart.  CHARS
+lists other characters a caller draws with, which must fill one column
+too."
+  (if (cl-every (lambda (char) (= (char-width char) 1))
+                (append '(?█ ?▏ ?├ ?─) chars))
       'unicode
     'ascii))
 
@@ -107,6 +110,34 @@ CHARSET defaults to `clutch-viz-charset'."
         rows "\n")
        (when header
          (concat "\n" rule))))))
+
+(defun clutch-viz-columns (rows &optional indent gap)
+  "Return ROWS aligned in columns, one string for each row.
+A row is a list of cells, which are strings.  Each column is as wide as
+its widest cell, and GAP spaces, 2 by default, separate columns; the
+last cell of a row is not padded.  Rows start at column INDENT, 0 by
+default, from which the padding's `:align-to' counts."
+  (let* ((widths (cl-loop for index below (apply #'max 0 (mapcar #'length rows))
+                          collect (apply #'max 0
+                                         (mapcar (lambda (row)
+                                                   (string-width
+                                                    (or (nth index row) "")))
+                                                 rows)))))
+    (mapcar (lambda (row)
+              (let ((column (or indent 0))
+                    (widths widths)
+                    parts)
+                (while row
+                  (let ((cell (pop row))
+                        (width (pop widths)))
+                    (push cell parts)
+                    (when row
+                      (setq column (+ column width (or gap 2)))
+                      (when (< (string-width cell) (+ width (or gap 2)))
+                        (push (clutch-viz--pad cell (+ width (or gap 2)) column)
+                              parts)))))
+                (apply #'concat (nreverse parts))))
+            rows)))
 
 (defun clutch-viz-tree (roots children label &optional charset)
   "Return the lines of a tree of ROOTS, depth first, as (TEXT . NODE).

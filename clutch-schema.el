@@ -847,6 +847,18 @@ Returns a string or nil."
           (clutch--notify-metadata-state-changed conn)))
       t)))
 
+(defun clutch--ensure-foreign-keys (conn table)
+  "Return foreign-key metadata for TABLE on CONN, loading it now if needed.
+A failure signals `clutch-db-error' and leaves the cache as it was."
+  (if (clutch--foreign-keys-cached-p conn table)
+      (clutch--cached-foreign-keys conn table)
+    (let ((fks (apply #'clutch-db-foreign-keys
+                      conn (clutch--table-key-arguments table))))
+      (clutch--set-table-metadata conn table :foreign-keys fks)
+      (run-hook-with-args 'clutch--table-metadata-updated-hook
+                          conn table 'foreign-keys)
+      fks)))
+
 (defun clutch--ensure-foreign-keys-async (conn table)
   "Queue an async foreign-key fetch for TABLE on CONN when needed."
   (let ((state (plist-get

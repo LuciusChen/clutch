@@ -1816,6 +1816,45 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
       (should-not unique-called)
       (should-not locator-called))))
 
+(ert-deftest clutch-db-test-mysql-legacy-referencing-keys ()
+  "Legacy reverse lookups scope candidates and retain the standard fallback."
+  (require 'clutch-db-mysql)
+  (dolist (case '(("empty dictionary" nil nil)
+                  ("duplicate child tables" (("other/child") ("other/child")) scoped)
+                  ("encoded child name" (("other/child@002dname")) fallback)
+                  ("missing dictionary privilege" denied fallback)))
+    (ert-info ((car case))
+      (let ((conn (make-mysql-conn :server-version "5.6.26-log"))
+            queries)
+        (cl-letf (((symbol-function 'mysql-query)
+                   (lambda (_conn sql)
+                     (push sql queries)
+                     (make-mysql-result
+                      :rows
+                      (cond
+                       ((string-match-p "FROM INFORMATION_SCHEMA.TABLES" sql)
+                        '(("target" "parent" "InnoDB")))
+                       ((string-match-p "INNODB_SYS_FOREIGN" sql)
+                        (if (eq (nth 1 case) 'denied)
+                            (signal 'mysql-query-error '("[1227] Access denied"))
+                          (nth 1 case)))
+                       ((string-match-p "KEY_COLUMN_USAGE" sql)
+                        '(("other" "child" "parent_id" "id" "fk_parent")))
+                       (t (ert-fail sql)))))))
+          (should (equal (clutch-db-referencing-keys conn "parent" "target")
+                         (when (nth 2 case)
+                           '((:table "child" :schema "other" :column "parent_id"
+                              :ref-column "id" :constraint "fk_parent")))))
+          (let ((key-queries (seq-filter
+                              (lambda (sql) (string-match-p "KEY_COLUMN_USAGE" sql))
+                              queries)))
+            (should (= (length key-queries) (if (nth 2 case) 1 0)))
+            (when key-queries
+              (should (eq (and (string-match-p
+                                "TABLE_SCHEMA = 'other' AND TABLE_NAME = 'child'"
+                                (car key-queries)) t)
+                          (eq (nth 2 case) 'scoped))))))))))
+
 (ert-deftest clutch-db-test-mysql-column-details-honor-schema ()
   "Column type, comment, primary key and foreign key share the explicit schema."
   (require 'mysql)
@@ -1832,13 +1871,15 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                            ((string-match-p "SHOW KEYS" sql)
                             (when scoped '((nil nil nil nil "name"))))
                            ((string-match-p "KEY_COLUMN_USAGE" sql)
-                            (when scoped '(("name" "parent" "id"))))))))))
+                            (when scoped
+                              '(("name" "other" "parent" "id" "fk_parent"))))))))))
       (let ((column (car (clutch-db-column-details conn "people" "other"))))
         (should (equal (plist-get column :type) "varchar(17)"))
         (should (equal (plist-get column :comment) "other comment"))
         (should (plist-get column :primary-key))
         (should (equal (plist-get column :foreign-key)
-                       '(:ref-table "parent" :ref-column "id")))))))
+                       '(:ref-table "parent" :ref-column "id"
+                         :ref-schema "other" :constraint "fk_parent")))))))
 
 (ert-deftest clutch-db-test-mysql-row-identity-uses-unique-scan-without-primary-key ()
   "MySQL row identity should still use unique indexes when no primary key exists."
@@ -2037,7 +2078,28 @@ Filtering the category listing ran a schema-wide query per describe."
         (funcall timer-fn)
         (should (equal result
                        '(("account_id" :ref-table "accounts"
-                          :ref-column "id"))))))))
+                          :ref-column "id" :constraint 0))))))))
+
+(ert-deftest clutch-db-test-sqlite-keys-pair-columns-in-both-directions ()
+  "SQLite keys pair their columns, also with an implicit primary key.
+A key that names no referenced columns takes the primary key in its own
+order, and a table is found as referenced however its name is cased."
+  (skip-unless (sqlite-available-p))
+  (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-keys-"
+    (dolist (sql '("CREATE TABLE pair (a INT, b INT, PRIMARY KEY (b, a))"
+                   "CREATE TABLE other (id INTEGER PRIMARY KEY)"
+                   "CREATE TABLE child (x INT, y INT, o INT,
+ FOREIGN KEY (o) REFERENCES other, FOREIGN KEY (x, y) REFERENCES Pair)"
+                   "CREATE TABLE zed (z INT REFERENCES pair (a))"))
+      (clutch-db-query conn sql))
+    (should (equal (clutch-db-foreign-keys conn "child")
+                   '(("x" :ref-table "Pair" :ref-column "b" :constraint 0)
+                     ("y" :ref-table "Pair" :ref-column "a" :constraint 0)
+                     ("o" :ref-table "other" :ref-column "id" :constraint 1))))
+    (should (equal (clutch-db-referencing-keys conn "pair")
+                   '((:table "child" :column "x" :ref-column "b" :constraint 0)
+                     (:table "child" :column "y" :ref-column "a" :constraint 0)
+                     (:table "zed" :column "z" :ref-column "a" :constraint 0))))))
 
 (ert-deftest clutch-db-test-sqlite-memory-does-not-create-file ()
   "SQLite :memory: profiles should open an in-memory database."
@@ -6802,22 +6864,35 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table)))))))
 
 (ert-deftest clutch-db-test-mysql-live-timeout-recovers-connection ()
-  "MySQL read timeout should resynchronize the session before reuse."
+  "Query and fault-delayed metadata timeouts resynchronize before reuse."
   :tags '(:db-live :mysql-live)
   (clutch-db-test--with-mysql conn
     (let ((clutch-db-mysql-cancel-timeout-seconds 2)
           (old-timeout (mysql-conn-read-idle-timeout conn))
-          message)
+          (query (symbol-function 'mysql-query)))
       (unwind-protect
           (progn
             (setf (mysql-conn-read-idle-timeout conn) 0.2)
-            (condition-case err
-                (clutch-db-query conn "SELECT SLEEP(5)")
-              (clutch-db-error
-               (setq message (error-message-string err))))
-            (should (string-match-p "restored MySQL connection" message))
-            (let ((result (clutch-db-query conn "SELECT 1 AS n")))
-              (should (= (caar (clutch-db-result-rows result)) 1))))
+            (dolist (entry '(query metadata))
+              (ert-info ((format "timeout entry: %s" entry))
+                (let (message)
+                  ;; Delay the metadata read on the real server.  The killer
+                  ;; connection still sends its original KILL QUERY command.
+                  (cl-letf (((symbol-function 'mysql-query)
+                             (lambda (connection sql)
+                               (funcall query connection
+                                        (if (and (eq entry 'metadata)
+                                                 (eq connection conn))
+                                            "SELECT SLEEP(5)" sql)))))
+                    (condition-case err
+                        (if (eq entry 'metadata)
+                            (clutch-db-referencing-keys conn "probe")
+                          (clutch-db-query conn "SELECT SLEEP(5)"))
+                      (clutch-db-error
+                       (setq message (error-message-string err)))))
+                  (should (string-match-p "restored MySQL connection" message))
+                  (let ((result (clutch-db-query conn "SELECT 1 AS n")))
+                    (should (= (caar (clutch-db-result-rows result)) 1)))))))
         (setf (mysql-conn-read-idle-timeout conn) old-timeout)))))
 
 (ert-deftest clutch-db-test-mysql-live-scoped-column-details ()
@@ -6834,17 +6909,52 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
             (clutch-db-query conn (format "CREATE TABLE %s.people (name INTEGER COMMENT 'wrong')" local))
             (clutch-db-set-current-schema conn local)
             (clutch-db-query conn (format "CREATE TABLE %s.parent (id VARCHAR(17) PRIMARY KEY)" schema))
-            (clutch-db-query conn (format "CREATE TABLE %s.people (name VARCHAR(17) PRIMARY KEY COMMENT 'other comment', FOREIGN KEY (name) REFERENCES %s.parent(id))" schema schema))
+            (clutch-db-query conn (format "CREATE TABLE %s.people (name VARCHAR(17) PRIMARY KEY COMMENT 'other comment', CONSTRAINT fk_people FOREIGN KEY (name) REFERENCES %s.parent(id))" schema schema))
             (let ((column (car (clutch-db-column-details conn "people" schema))))
               (should (equal (plist-get column :type) "varchar(17)"))
               (should (equal (plist-get column :comment) "other comment"))
               (should (plist-get column :primary-key))
               (should (equal (plist-get column :foreign-key)
-                             '(:ref-table "parent" :ref-column "id"))))
+                             `(:ref-table "parent" :ref-column "id"
+                               :ref-schema ,schema :constraint "fk_people"))))
             (should (equal local (clutch-db-current-schema conn))))
         (clutch-db-set-current-schema conn current)
         (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" schema))
         (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" local))))))
+
+(ert-deftest clutch-db-test-mysql-live-keys-pair-columns-across-databases ()
+  "MySQL keys pair their columns and name the database they reference."
+  :tags '(:db-live :mysql-live)
+  (clutch-db-test--with-mysql conn
+    (let* ((parents (format "clutch_fk_parents_%d" (emacs-pid)))
+           (children (format "clutch_fk_children_%d" (emacs-pid))))
+      (unwind-protect
+          (progn
+            (dolist (sql
+                     (list
+                      (format "CREATE DATABASE %s" parents)
+                      (format "CREATE DATABASE %s" children)
+                      (format "CREATE TABLE %s.pair (a INT, b INT, PRIMARY KEY (a, b))" parents)
+                      (format "CREATE TABLE %s.local (id INT PRIMARY KEY)" children)
+                      (format "CREATE TABLE %s.child (x INT, y INT, l INT,
+ CONSTRAINT fk_a_local FOREIGN KEY (l) REFERENCES %s.local (id),
+ CONSTRAINT fk_b_pair FOREIGN KEY (x, y) REFERENCES %s.pair (a, b))"
+                              children children parents)))
+              (clutch-db-query conn sql))
+            (should (equal (clutch-db-foreign-keys conn "child" children)
+                           `(("l" :ref-table "local" :ref-column "id"
+                              :ref-schema ,children :constraint "fk_a_local")
+                             ("x" :ref-table "pair" :ref-column "a"
+                              :ref-schema ,parents :constraint "fk_b_pair")
+                             ("y" :ref-table "pair" :ref-column "b"
+                              :ref-schema ,parents :constraint "fk_b_pair"))))
+            (should (equal (clutch-db-referencing-keys conn "pair" parents)
+                           `((:table "child" :schema ,children :column "x"
+                              :ref-column "a" :constraint "fk_b_pair")
+                             (:table "child" :schema ,children :column "y"
+                              :ref-column "b" :constraint "fk_b_pair")))))
+        (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" children))
+        (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" parents))))))
 
 (ert-deftest clutch-db-test-mysql-live-schema ()
   "Test MySQL schema introspection."
@@ -7177,6 +7287,86 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                        (regexp-quote "\"id\" integer DEFAULT nextval(") ddl))
               (should-not (string-match-p "pgsql-null" ddl))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
+
+(ert-deftest clutch-db-test-pg-live-foreign-keys-pair-columns-across-schemas ()
+  "PostgreSQL keys pair columns, cross schemas and need no ownership.
+Each column of a composite key gets its own referenced column, a key to
+another schema is reported in both directions, a same-named key of
+another table stays out, and a user who reads only the child table sees
+every key."
+  :tags '(:db-live :pg-live)
+  (clutch-db-test--with-pg conn
+    (let* ((parents (clutch-db-test--live-name "clutch_fk_parents"))
+           (children (clutch-db-test--live-name "clutch_fk_children"))
+           (reader (clutch-db-test--live-name "clutch_fk_reader"))
+           (expected
+            `(("l" :ref-table "local" :ref-column "id" :ref-schema ,children
+               :constraint "fk_a_local")
+              ("o" :ref-table "other" :ref-column "id" :ref-schema ,parents
+               :constraint "fk_b_other")
+              ("x" :ref-table "pair" :ref-column "a" :ref-schema ,parents
+               :constraint "fk_c_pair")
+              ("y" :ref-table "pair" :ref-column "b" :ref-schema ,parents
+               :constraint "fk_c_pair")
+              ("p" :ref-table "local_pair" :ref-column "c" :ref-schema ,children
+               :constraint "fk_d_local_pair")
+              ("q" :ref-table "local_pair" :ref-column "d" :ref-schema ,children
+               :constraint "fk_d_local_pair")))
+           (cleanup
+            (list (format "DROP SCHEMA IF EXISTS %s CASCADE" children)
+                  (format "DROP SCHEMA IF EXISTS %s CASCADE" parents)
+                  (format "DROP ROLE IF EXISTS %s" reader))))
+      (unwind-protect
+          (progn
+            (dolist (sql cleanup) (clutch-db-query conn sql))
+            (dolist (sql
+                     (list
+                      (format "CREATE SCHEMA %s" parents)
+                      (format "CREATE SCHEMA %s" children)
+                      (format "CREATE TABLE %s.pair (a INT, b INT, PRIMARY KEY (a, b))" parents)
+                      (format "CREATE TABLE %s.other (id INT PRIMARY KEY)" parents)
+                      (format "CREATE TABLE %s.local (id INT PRIMARY KEY)" children)
+                      (format "CREATE TABLE %s.local_pair (c INT, d INT, PRIMARY KEY (c, d))" children)
+                      ;; Constraint names sort in the order EXPECTED lists them.
+                      (format "CREATE TABLE %s.child (x INT, y INT, o INT, l INT, p INT, q INT,
+ CONSTRAINT fk_a_local FOREIGN KEY (l) REFERENCES %s.local (id),
+ CONSTRAINT fk_b_other FOREIGN KEY (o) REFERENCES %s.other (id),
+ CONSTRAINT fk_c_pair FOREIGN KEY (x, y) REFERENCES %s.pair (a, b),
+ CONSTRAINT fk_d_local_pair FOREIGN KEY (p, q) REFERENCES %s.local_pair (c, d))"
+                              children children parents parents children)
+                      ;; A constraint of the same name on another table.
+                      (format "CREATE TABLE %s.sibling (z INT,
+ CONSTRAINT fk_a_local FOREIGN KEY (z) REFERENCES %s.local (id))"
+                              children children)
+                      (format "CREATE ROLE %s LOGIN PASSWORD 'test'" reader)
+                      (format "GRANT USAGE ON SCHEMA %s, %s TO %s"
+                              parents children reader)
+                      (format "GRANT SELECT ON %s.child TO %s" children reader)))
+              (clutch-db-query conn sql))
+            (should (equal (clutch-db-foreign-keys conn "child" children)
+                           expected))
+            (should (equal (clutch-db-referencing-keys conn "pair" parents)
+                           `((:table "child" :schema ,children :column "x"
+                              :ref-column "a" :constraint "fk_c_pair")
+                             (:table "child" :schema ,children :column "y"
+                              :ref-column "b" :constraint "fk_c_pair"))))
+            (should (equal (clutch-db-referencing-keys conn "local" children)
+                           `((:table "child" :schema ,children :column "l"
+                              :ref-column "id" :constraint "fk_a_local")
+                             (:table "sibling" :schema ,children :column "z"
+                              :ref-column "id" :constraint "fk_a_local"))))
+            (let ((reader-conn
+                   (clutch-db-connect
+                    'pg (plist-put (plist-put (clutch-db-test--pg-live-params)
+                                              :user reader)
+                                   :password "test"))))
+              (unwind-protect
+                  (should (equal (clutch-db-foreign-keys
+                                  reader-conn "child" children)
+                                 expected))
+                (clutch-db-disconnect reader-conn))))
+        (dolist (sql cleanup)
+          (ignore-errors (clutch-db-query conn sql)))))))
 
 (ert-deftest clutch-db-test-pg-live-stored-generated-columns-are-generated ()
   "A stored generated column should be generated, as an identity column is.
@@ -10058,13 +10248,19 @@ that file, or in a new, empty in-memory database, without a word."
          :params '(:driver jdbc :url "jdbc:duckdb:")))))))
 
 (ert-deftest clutch-db-test-mysql-timeout-recovery-matrix ()
-  "MySQL timeout recovery should cover query and prepared execution paths."
+  "MySQL query, prepared execution and ER metadata timeouts recover or close."
   (require 'clutch-db-mysql)
   (require 'mysql)
   (dolist (case '((query   t   "restored MySQL connection")
                   (query   nil "timeout recovery failed")
                   (execute t   "restored MySQL connection")
-                  (execute nil "timeout recovery failed")))
+                  (execute nil "timeout recovery failed")
+                  (foreign-keys t "restored MySQL connection")
+                  (foreign-keys nil "timeout recovery failed")
+                  (referencing-keys t "restored MySQL connection")
+                  (referencing-keys nil "timeout recovery failed")
+                  (column-details t "restored MySQL connection")
+                  (column-details nil "timeout recovery failed")))
     (pcase-let ((`(,entry ,recovers ,expected-message) case))
       (ert-info ((format "entry: %s recovers: %s" entry recovers))
         (let ((conn (make-mysql-conn :host "127.0.0.1" :port 3306
@@ -10096,7 +10292,10 @@ that file, or in a new, empty in-memory database, without a word."
                 (pcase entry
                   ('query (clutch-db-query conn "SELECT SLEEP(60)"))
                   ('execute (clutch-db-execute-params
-                             conn "UPDATE t SET a = ?" '("v"))))
+                             conn "UPDATE t SET a = ?" '("v")))
+                  ('foreign-keys (clutch-db-foreign-keys conn "t"))
+                  ('referencing-keys (clutch-db-referencing-keys conn "t"))
+                  ('column-details (clutch-db-column-details conn "t")))
               (clutch-db-error
                (setq message (error-message-string err)))))
           (should interrupted)

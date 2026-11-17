@@ -525,7 +525,11 @@ The exact-name match only needs entries under the name's prefix."
                ((:name "orders" :type "TABLE" :schema "public")
                 "\"public\".\"orders\"")
                ((:name "orders" :type "TABLE")
-                "\"orders\"")))
+                "\"orders\"")
+               ((:name "orders" :type "TABLE" :catalog "archive" :schema "main")
+                "\"archive\".\"main\".\"orders\"")
+               ((:name "orders" :type "TABLE" :catalog "archive")
+                "\"archive\"..\"orders\"")))
       (pcase-let ((`(,entry ,expected) case))
         (let ((sql-name (clutch--object-sql-name conn entry)))
           (should (equal sql-name expected))
@@ -1784,20 +1788,22 @@ alone does not bound how long completion blocks."
                          (clutch--embark-action-specs
                           (lambda (spec)
                             (not (eq (plist-get spec :id) 'jump-target)))))
-                 '(describe show-definition index-insight explain-sample
-                            show-validation show-stats copy-name
-                            copy-fqname)))
+                 '(describe show-definition er-diagram index-insight
+                            explain-sample show-validation show-stats
+                            copy-name copy-fqname)))
   (should (equal (mapcar (lambda (spec) (plist-get spec :id))
                          (clutch--embark-action-specs))
-                 '(describe show-definition index-insight explain-sample
-                            show-validation show-stats jump-target copy-name
-                            copy-fqname)))
+                 '(describe show-definition er-diagram index-insight
+                            explain-sample show-validation show-stats
+                            jump-target copy-name copy-fqname)))
   (let (bindings)
     (map-keymap (lambda (key binding)
                   (push (cons key binding) bindings))
                 (clutch--embark-actions-keymap))
     (should (equal (alist-get ?d bindings)
-                   '("Describe object" . clutch-object-describe)))))
+                   '("Describe object" . clutch-object-describe)))
+    (should (equal (alist-get ?r bindings)
+                   '("ER diagram" . clutch-er-diagram)))))
 
 (ert-deftest clutch-test-object-browseable-snapshot-listed-once-per-schema-generation ()
   "The browseable snapshot is listed once and reused until the schema cache changes.

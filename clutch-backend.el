@@ -2039,8 +2039,9 @@ CONN's current schema then names the namespace that CONN is in, and
 
 (cl-defgeneric clutch-db-metadata-scope (conn)
   "Return the scope of CONN's metadata when its current schema is not all of it.
-Return it as CONN last reported it, without asking the server: it is read
-before each statement, to tell whether the statement moved CONN.")
+Return an alist with catalog and schema entries when applicable, as CONN
+last reported them, without asking the server.  It is read before each
+statement to tell whether the statement moved CONN.")
 
 (cl-defmethod clutch-db-metadata-scope ((_conn t))
   "Return nil, as CONN's current schema is the scope of its metadata."
@@ -2447,7 +2448,22 @@ SCHEMA and CATALOG qualify TABLE."
   "Return foreign key info for TABLE on CONN.
 SCHEMA and CATALOG qualify TABLE as in `clutch-db-column-details'.
 Returns an alist of (COLUMN-NAME . (:ref-table T :ref-column C)), with
-:ref-schema S when the referenced table is known to be in schema S.")
+:ref-schema S when the referenced table is known to be in schema S.
+A backend that tells keys apart adds :constraint K, a value the columns
+of one key share, and lists those columns together in the key's order;
+a column in two keys then has two entries.")
+
+(cl-defgeneric clutch-db-referencing-keys (conn table &optional schema catalog)
+  "Return the foreign keys of other tables that reference TABLE on CONN.
+SCHEMA and CATALOG qualify TABLE as in `clutch-db-column-details'.
+Returns a list of plists (:table T :schema S :column C :ref-column R
+:constraint K), one per column of a referencing key: column C of table T
+in schema S references column R of TABLE.  The columns of one key share
+K and come together in the key's order.")
+
+(cl-defmethod clutch-db-referencing-keys ((_conn t) _table &optional _schema _catalog)
+  "Refuse, as this connection cannot list the keys that reference a table."
+  (user-error "This connection does not report which tables reference a table"))
 
 (cl-defgeneric clutch-db-column-details (conn table &optional schema catalog)
   "Return detailed column info for TABLE on CONN.

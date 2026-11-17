@@ -59,6 +59,7 @@
 (require 'clutch-object)
 (require 'clutch-edit)
 (require 'clutch-result)
+(require 'clutch-er)
 
 ;;;; Customization
 

@@ -16,6 +16,7 @@
 (require 'clutch-diagnostics)
 (require 'clutch-query)
 (require 'clutch-object)
+(require 'clutch-er)
 (require 'clutch-schema)
 (require 'clutch-sql)
 (require 'clutch-ui)
@@ -1005,6 +1006,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map "#" #'clutch-result-count-total)
     (define-key map "A" #'clutch-result-aggregate)
     (define-key map "s" #'clutch-result-sort-by-column)
+    (define-key map "R" #'clutch-result-add-relation)
     (define-key map "c" #'clutch-result-copy-dispatch)
     (define-key map "k" #'clutch-copy-context-for-agent)
     (define-key map "v" #'clutch-result-view-value)
@@ -1431,6 +1433,25 @@ The cycle is unsorted, ascending, descending, then unsorted again."
               (name (nth cidx clutch--result-columns))
               ((member name (clutch--visible-column-names))))
     name))
+
+(defun clutch-result-add-relation ()
+  "Add a relation from the column at point to a column of another table.
+The result must show one table, and the column one of its columns.  See
+`clutch-er-add-relation'."
+  (interactive)
+  (clutch-result--require-connection)
+  (clutch-result--refuse-if-moved)
+  (clutch-er-add-relation
+   (list :name (or clutch--result-source-table
+                   (user-error "This result does not show one table"))
+         :type "TABLE"
+         :schema clutch--result-source-schema
+         :catalog clutch--result-source-catalog)
+   (list (clutch-result--writable-source-column
+          (or (and (clutch-result--column-name-at-point)
+                   (clutch--col-idx-at-point))
+              (user-error "No column at point"))
+          "add a relation"))))
 
 ;;;###autoload
 (defun clutch-result-sort-by-column ()
@@ -4160,6 +4181,7 @@ previous window layout."
     (define-key map "n" #'clutch-record-next-row)
     (define-key map "p" #'clutch-record-prev-row)
     (define-key map "v" #'clutch-record-view-value)
+    (define-key map "r" #'clutch-record-follow-relation)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     (define-key map "I" #'clutch-clone-row-to-insert)
@@ -4286,22 +4308,95 @@ the label column width."
                    max-name-w)))
     (goto-char (point-min))))
 
-(defun clutch-record--follow-fk (fk val result-buf)
-  "Navigate to the FK-referenced row for VAL using FK plist, via RESULT-BUF.
-The referenced table is qualified by FK's :ref-schema when it has one."
-  (when (null val)
-    (user-error "NULL value — cannot follow"))
-  (when-let* ((placeholder (clutch--cell-placeholder-value val)))
-    (user-error "%s value — cannot follow" placeholder))
+(defun clutch-record--follow (relation ridx result-buf columns)
+  "Show the row RELATION references from row RIDX of RESULT-BUF.
+The query names every column of RELATION, so a key over several columns
+finds one row; each must be in the result with a value.  COLUMNS are its
+source column names, in result order, with nil for expressions.  The referenced
+table retains its catalog and schema qualification."
   (with-current-buffer result-buf
-    (let ((c (buffer-local-value 'clutch-connection result-buf))
-          (schema (plist-get fk :ref-schema)))
+    (let* ((conn clutch-connection)
+           (row (nth ridx (clutch--result-display-rows))))
       (clutch--execute
-       (format "SELECT * FROM %s%s WHERE %s = %s"
-               (if schema (concat (clutch-db-escape-identifier c schema) ".") "")
-               (clutch-db-escape-identifier c (plist-get fk :ref-table))
-               (clutch-db-escape-identifier c (plist-get fk :ref-column))
-               (clutch-db-value-to-literal c val #'clutch--format-value))))))
+       (format "SELECT * FROM %s WHERE %s"
+               (clutch--object-sql-name
+                conn (list :name (plist-get relation :table)
+                           :schema (plist-get relation :schema)
+                           :catalog (plist-get relation :catalog)))
+               (mapconcat
+                (pcase-lambda (`(,column . ,referenced))
+                  (let* ((cidx (or (cl-position column columns
+                                                :test #'equal)
+                                   (user-error "The relation also needs %s, which the result does not show"
+                                               column)))
+                         (value (nth cidx row)))
+                    (when (null value)
+                      (user-error "NULL value in %s — cannot follow" column))
+                    (when-let* ((placeholder (clutch--cell-placeholder-value value)))
+                      (user-error "%s value in %s — cannot follow"
+                                  placeholder column))
+                    (format "%s = %s"
+                            (clutch-db-escape-identifier conn referenced)
+                            (clutch-db-value-to-literal
+                             conn value #'clutch--format-value))))
+                (plist-get relation :pairs)
+                " AND "))))))
+
+(defun clutch-record--follow-column (result-buf cidx ridx &optional ask)
+  "Follow a relation from column CIDX of row RIDX of RESULT-BUF.
+The relations are those of `clutch-er-outgoing-relations' for the
+result's table that join the column.  Follow the first, a foreign key of
+the database before a relation added by hand, or with ASK choose when
+there are several."
+  (let* ((source-columns
+          (with-current-buffer result-buf
+            (cl-mapcar (lambda (name definition)
+                         (if (plist-member definition :source-column)
+                             (plist-get definition :source-column)
+                           name))
+                       clutch--result-columns clutch--result-column-defs)))
+         (relations
+          (with-current-buffer result-buf
+            (clutch--ensure-connection)
+            (clutch--refuse-while-running clutch-connection)
+            (clutch-result--refuse-if-moved)
+            (let ((column (nth cidx source-columns)))
+              (cl-remove-if-not
+               (lambda (relation) (assoc column (plist-get relation :pairs)))
+               (clutch-er-outgoing-relations
+                clutch-connection clutch--connection-params
+                (list :name (or clutch--result-source-table
+                                (user-error "This result does not show one table"))
+                      :type "TABLE"
+                      :schema clutch--result-source-schema
+                      :catalog clutch--result-source-catalog))))))
+         (choices
+          (mapcar (lambda (relation)
+                    (cons (format "%s (%s) from %s"
+                                  (plist-get relation :table)
+                                  (string-join (mapcar #'cdr (plist-get relation :pairs))
+                                               ", ")
+                                  (string-join (mapcar #'car (plist-get relation :pairs))
+                                               ", "))
+                          relation))
+                  relations)))
+    (clutch-record--follow
+     (cond ((null relations) (user-error "No relation starts at this field"))
+           ((or (not ask) (null (cdr relations))) (car relations))
+           (t (cdr (assoc (completing-read "Follow relation: " choices nil t)
+                          choices))))
+     ridx result-buf source-columns)))
+
+(defun clutch-record-follow-relation ()
+  "Follow a relation from the field at point, asking when several start there.
+Besides foreign keys, these are the relations added by hand to the
+result's table; see `clutch-er-add-relation'."
+  (interactive)
+  (let ((cidx (get-text-property (point) 'clutch-col-idx))
+        (ridx (get-text-property (point) 'clutch-row-idx)))
+    (unless (and cidx ridx (buffer-live-p clutch-record--result-buffer))
+      (user-error "No field at point"))
+    (clutch-record--follow-column clutch-record--result-buffer cidx ridx t)))
 
 (defun clutch-record--field-action-context ()
   "Return the action context for the Record field at point, or nil."
@@ -4331,7 +4426,6 @@ The referenced table is qualified by FK's :ref-schema when it has one."
             :column-index cidx
             :row-index ridx
             :result-buffer result-buf
-            :foreign-key fk
             :value value))))
 
 (defun clutch-record--field-action-description ()
@@ -4358,10 +4452,10 @@ The referenced table is qualified by FK's :ref-schema when it has one."
   (if-let* ((context (clutch-record--field-action-context)))
       (pcase (plist-get context :action)
         ('follow-fk
-         (clutch-record--follow-fk
-          (plist-get context :foreign-key)
-          (plist-get context :value)
-          (plist-get context :result-buffer)))
+         (clutch-record--follow-column
+          (plist-get context :result-buffer)
+          (plist-get context :column-index)
+          (plist-get context :row-index)))
         ((or 'expand 'collapse)
          (let ((cidx (plist-get context :column-index)))
            (if (eq (plist-get context :action) 'collapse)
@@ -4485,7 +4579,9 @@ The connection comes from the cached render state, not from the server."
    ["Inspect"
     ("RET" "Open record" clutch-result-open-record)
     ("v" "Full value" clutch-result-view-value)
-    ("?" "Column info" clutch-result-column-info)]
+    ("?" "Column info" clutch-result-column-info)
+    ("R" "Add relation" clutch-result-add-relation
+     :inapt-if-not clutch-result--column-name-at-point)]
    ["Copy / Export"
     ("c" "Copy..." clutch-result-copy-dispatch)
     ("e" "Export..." clutch-result-export)
@@ -4506,6 +4602,8 @@ The connection comes from the cached render state, not from the server."
     ("p" "Prev row"     clutch-record-prev-row)
     ("RET" "Toggle field" clutch-record-toggle-expand
      :description clutch-record--field-action-description
+     :inapt-if-not clutch-record--field-action-context)
+    ("r" "Follow relation" clutch-record-follow-relation
      :inapt-if-not clutch-record--field-action-context)]
    ["Inspect"
     ("v" "Full value" clutch-record-view-value)]

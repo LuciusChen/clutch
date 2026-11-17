@@ -75,7 +75,8 @@ Each entry has the form:
            [:url STR] [:display-name STR] [:props ALIST]
            [:tls BOOLEAN] [:ssl-mode disabled] [:sslmode require]
            [:connect-timeout N] [:read-idle-timeout N]
-           [:query-timeout N] [:rpc-timeout N]))
+           [:query-timeout N] [:rpc-timeout N]
+           [:relations-file FILE]))
 NAME is a string used for `completing-read'.
 :backend is required and names the backend symbol (\\='mysql, \\='pg,
 \\='sqlite, \\='mongodb, or a JDBC backend such as \\='oracle or
@@ -84,6 +85,9 @@ NAME is a string used for `completing-read'.
 query language.  For MongoDB, omit it for the normal document/MongoDB Shell
 surface, or use \\='sql-interface for MongoDB SQL Interface JDBC endpoints.
 :sql-product overrides the product derived from backend metadata.
+:relations-file names the file that keeps the relations added by hand in
+the ER view, such as a file shared in a project; by default each
+connection has one in `clutch-er-relations-directory'.
 :auth-database / :auth-source set the MongoDB authentication database for
 native MongoDB URLs and the default auth database in structured
 MongoDB SQL Interface JDBC URLs.
@@ -150,7 +154,8 @@ Password resolution order:
                                     (:read-idle-timeout natnum)
                                     (:query-timeout natnum)
                                     (:rpc-timeout natnum)
-                                    (:tls boolean))))
+                                    (:tls boolean)
+                                    (:relations-file file))))
   :group 'clutch)
 (defcustom clutch-tramp-context-policy 'ask
   "How connection commands use the current TRAMP buffer context.
@@ -308,6 +313,46 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
         name)))
    (t
     (abbreviate-file-name database))))
+
+(defconst clutch--console-url-secret-param-regexp
+  (concat "\\([?&;]"
+          (regexp-opt '("access_token" "pass" "password" "passwd"
+                        "private_key" "private-key" "pwd" "secret" "token"))
+          "=\\)[^&;]*")
+  "Regexp matching URL parameters that must not affect console identity.")
+
+(defconst clutch--console-identity-param-keys
+  '(:user :host :port :database :schema :sid :ssh-host
+    :tramp-default-directory)
+  "Connection params that distinguish query console identity.")
+
+(defun clutch--console-redacted-url (url)
+  "Return URL with obvious password parameters redacted."
+  (when url
+    (let ((case-fold-search t))
+      (replace-regexp-in-string
+       clutch--console-url-secret-param-regexp
+       "\\1REDACTED"
+       url))))
+
+(defun clutch--console-identity-pairs (params)
+  "Return canonical non-secret identity pairs for connection PARAMS."
+  (when params
+    (let ((backend (or (plist-get params :backend)
+                       (plist-get params :driver)))
+          (url (clutch--console-redacted-url (plist-get params :url))))
+      (append
+       (and backend (list (cons :backend backend)))
+       (cl-loop for key in clutch--console-identity-param-keys
+                when (plist-member params key)
+                collect (cons key (plist-get params key)))
+       (and url (list (cons :url url)))))))
+
+(defun clutch--console-identity-from-params (params)
+  "Return a stable query-console persistence identity from PARAMS."
+  (when-let* ((pairs (clutch--console-identity-pairs params)))
+    (concat "console-"
+            (secure-hash 'sha256 (prin1-to-string pairs)))))
 
 (defun clutch--connection-key (conn)
   "Return a descriptive string for CONN like \"user@host:port/db\".
@@ -2307,7 +2352,8 @@ port and TRANSPORT contains the live process metadata."
                             unless (memq k '(:sql-product :backend :password
                                              :pass-entry :profile-entry
                                              :ssh-host
-                                             :tramp-default-directory))
+                                             :tramp-default-directory
+                                             :relations-file))
                             append (list k v))))
     (if password
         (append db-params (list :password password))

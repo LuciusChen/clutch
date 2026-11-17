@@ -12,6 +12,7 @@
 | =C-c C-j=   | Jump to configured primary object types and run the default action |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions for the current object, or prompt |
+| =C-c C-v=   | Show the ER view of the table at point, or prompt |
 | =C-c C-p=   | Preview execution (dry-run) |
 | =C-c C-l=   | Switch current schema/database on the active connection |
 | =C-c C-s=   | Refresh schema for current connection now |
@@ -74,6 +75,7 @@ Without an explicit SQL row limit, paged query export and all-row result export 
 | =C=            | Jump to visible column                        |
 | ={= / =}=      | First visible data column / last visible data column |
 | =?=            | Show column type info at point                |
+| =R=            | Add a relation from the column at point (see [[*Relations added by hand][Relations added by hand]]) |
 | =g=            | Re-execute query                              |
 | =C-c '=       | Edit / re-edit at point                       |
 | =i=            | Stage new row for insertion                   |
@@ -232,6 +234,7 @@ Typical flow:
 | Key         | Action                        |
 |-------------+-------------------------------|
 | =RET=       | Expand long field / follow FK |
+| =r=         | Follow a relation from the field, asking when several start there |
 | =n= / =p=  | Next row / previous row       |
 | =C-c '=     | Edit / re-edit current field  |
 | =C-c C-k=   | Discard staged change at field |
@@ -256,6 +259,53 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 | =g=         | Refresh describe buffer       |
 | =C-c C-d=   | Describe object at point, or prompt |
 | =C-c C-o=   | Show object actions           |
+
+* ER View (clutch-er-mode) Key Bindings
+
+=C-c C-v=, =v= under Objects in the main menu (=C-c ?=), =r= in the object actions (=C-c C-o=), or =M-x clutch-er-diagram= opens the ER view of a table: its name over a rule, then its primary-key columns and the columns of its relations, each with its type and, beside it, the relation it ends.  =→ customers.id= is a foreign key of the column to another table, =← refunds.order_id= a foreign key of another table to the column, and a column that ends several relations takes a line for each.  A key over adjacent columns brackets them and names the other end once, as =─┐= beside =region= and =─┴→ regions (code, country)= beside =country=.  =◆= marks a primary-key column, =●= a column with a foreign key and =○= one with only relations added by hand.  Names in the table's own schema are not qualified.  Moving point onto a line highlights its relations and the columns they join; moving point never redraws the view.
+
+The view is available on native PostgreSQL, MySQL and SQLite connections; other connections refuse it, as they cannot list the keys that reference a table.  Columns and foreign keys come from the metadata cache, loaded when missing; the keys that reference the table are read each time the view loads.  On MySQL 5.6/5.7, InnoDB tables with simple ASCII names use the foreign-key dictionary to narrow the reverse lookup when the account can read it. Otherwise the standard lookup can open table metadata across the visible databases and may be slow on a large or locked instance. A timed-out MySQL metadata read recovers the connection when cancellation and draining succeed, and otherwise closes it. SQLite keeps no index of them, so the view reads the keys of every table in the table's database.  The view draws the same characters in a graphical frame and a terminal, and takes its colors from faces that inherit the theme's (=clutch-er-title=, =clutch-er-table=, =clutch-er-key=, =clutch-er-reference=, =clutch-er-manual=, =clutch-er-highlight=).
+
+| Key         | Action                                         |
+|-------------+------------------------------------------------|
+| =RET=       | Show the table at the other end of the relation at point |
+| =l=         | Show the table shown before                    |
+| =TAB=       | Show every column, or only key columns         |
+| =n= / =p=   | Next / previous line that belongs to a relation |
+| =a=         | Add a relation from the table, starting at the column at point |
+| =e=         | Change the relation at point, added by hand    |
+| =k=         | Delete the relation at point, added by hand    |
+| =b=         | Browse the table's rows                        |
+| =d=         | Describe the table                             |
+| =g=         | Load the table's columns and relations again   |
+| =C-c C-o=   | Show object actions                            |
+
+In graphical frames, the arrow that joins a composite-key bracket is aligned using the displayed fonts' glyph metrics. After changing the font or text scale, press =g= to reload and recalculate the alignment.
+
+Where its symbols are two columns wide, as in CJK language environments that make ambiguous characters wide, it draws with ASCII instead (=*=, =o=, =-->=, =<--=); set =clutch-er-charset= to =unicode= or =ascii= to choose, for a terminal whose widths differ from those Emacs assumes.
+
+** Relations added by hand
+
+A relation the database does not declare can be added by hand: =a= in the ER view starts from its table and the column at point, and =R= in a result buffer, also under Inspect in its =C-c ?= menu, from the result's table and the column at point; a result must show one table, and a column shown under an alias starts from its source column.  Clutch asks for the referencing columns first, then shows that source while asking for the referenced table and its columns: =orders (customer_id) -> customers (id)= means that =orders.customer_id= references =customers.id=. The referenced columns default to the source names when all exist in the target table, retaining their order; otherwise the input starts empty. Editing an existing relation starts with its saved target columns. For a relation over several columns, enter comma-separated names on both sides in corresponding order; the first source column references the first target column, and so on.  A relation that repeats a foreign key of the database or a relation stored already is refused.  The ER view shows a relation added by hand at both of its tables with a dotted link and =manual= after it, and does not show one that repeats a foreign key of the database, which the database may have gained since.  Relations added by hand serve browsing only: row identity, staged edits and every other workflow that changes data never read them.
+
+A saved relation whose column has been removed stays visible with =(missing column)=, so it can still be changed or deleted.
+
+They are kept in a JSON file for each connection, in =clutch-er-relations-directory= unless the connection's parameters name one with =:relations-file=.  The default filename hashes the same non-secret connection identity as the console, including its SSH or TRAMP origin, with the current schema excluded so unqualified relation ends follow a schema switch.  Clutch reads the file each time the view loads and again before each change, so a change made elsewhere meanwhile is kept, and replaces it whole through a temporary file beside it.  It writes the relations in a stable order, one field to a line, so a file kept in Git shows a change as one relation:
+
+#+begin_src json
+{
+  "version": 1,
+  "relations": [
+    {
+      "from": {"table":"orders"},
+      "to": {"schema":"ref","table":"regions"},
+      "columns": [["region","code"],["country","country"]]
+    }
+  ]
+}
+#+end_src
+
+Each end names its =table= and, when needed, its =schema= and =catalog=, as the database spells them.  An end without a schema names a table in the connection's current schema; Clutch leaves the schema out when it is the current one, so a file shared by databases whose schemas are named differently still matches.  =columns= pairs each column of =from= with the column of =to= it references.  A file of another version, or one Clutch cannot read, is reported by name and left as it is.
 
 * Typical Workflows
 
@@ -292,6 +342,10 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 3. RET → opens record view
 4. Press RET on an FK field → automatically runs SELECT * FROM users WHERE id = <value>
 #+end_src
+
+Following a relation from a result restores a lost connection before reading metadata, then checks that its connection still resolves names as when the query ran. After a schema or database switch, switch back or rerun the query before following. Relations retain their catalog and schema in both the ER view and generated SQL. An omitted catalog means the connection's current catalog, so a fully qualified query of that same table finds the same manual relations.
+
+A key over several columns names all of them, as in =SELECT * FROM regions WHERE code = 'n' AND country = 'b'=, so it finds the one row the record references; each of its columns must be in the result with a value, and columns shown under aliases use their source names, and the query uses the values the database holds, not staged edits.  =RET= follows the first foreign key through the field.  =r= also offers the relations added by hand from the result's table (see [[*Relations added by hand][Relations added by hand]]) and asks when several start at the field.
 
 ** Editing Data
 
@@ -433,6 +487,7 @@ The main navigation path is object-centric rather than tree-centric.  =C-c C-j= 
 
 - =d=: describe object
 - =s=: show DDL / source
+- =r=: open the ER view of a table
 - =j=: jump to the target object for objects with explicit target metadata such as indexes, triggers, and synonyms
 - =n=: copy object name
 - =f=: copy fully-qualified object name
@@ -463,6 +518,7 @@ If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers
 |-----+--------|
 | =d= | Describe object |
 | =s= | Show definition |
+| =r= | ER diagram (tables) |
 | =i= | Show index insight (MongoDB collections) |
 | =e= | Explain sample query (MongoDB collections) |
 | =v= | Show validation (MongoDB collections) |
@@ -486,7 +542,7 @@ Embark only exposes secondary object actions.  Default actions such as =C-c C-j=
 
 Requires the =transient= package (built-in since Emacs 28.1).
 
-Press =C-c ?= to open the transient menu.  The main menu is headed by the connection it acts on.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, =Switch schema/db=, and =Refresh schema=.
+Press =C-c ?= to open the transient menu.  The main menu is headed by the connection it acts on.  The *Objects* group contains =Jump to object=, =Describe object=, =Object actions=, =ER view= (=v=), =Switch schema/db=, and =Refresh schema=.
 
 Finite state is displayed as parenthesized choices, with the active choice highlighted.  For example, the connection menu shows =Auto-commit (manual|auto)=, and the result menu shows current filter, sort, copy-refinement, and layout states.
 

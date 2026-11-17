@@ -42,6 +42,20 @@ and stop at the top of the scale."
   (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (should (eq (clutch-viz-charset) 'ascii))))
 
+(ert-deftest clutch-test-viz-columns-align-by-display-width ()
+  "Columns line up by display width, CJK names included, and padding
+carries the column it aligns to."
+  (let ((rows (clutch-viz-columns '(("◆" "id" "int")
+                                    (" " "金额" "numeric"))
+                                  2)))
+    (should (equal (mapcar #'substring-no-properties rows)
+                   '("◆  id    int" "   金额  numeric")))
+    (should (equal (get-text-property 1 'display (car rows))
+                   '(space :align-to 5)))
+    (should (equal (mapcar #'substring-no-properties
+                           (clutch-viz-columns '(("a" "b") ("ccc" "d")) 0 3))
+                   '("a     b" "ccc   d")))))
+
 (ert-deftest clutch-test-viz-bar-chart-aligns-columns ()
   "Labels, bars and values line up by display width, including CJK labels."
   (let* ((chart (clutch-viz-bar-chart '(("北京" 40 "40")
