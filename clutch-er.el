@@ -756,7 +756,7 @@ Otherwise use ASCII."
                             (concat line "┴" arrow " ")
                           (if in (concat "<+" line) (concat line "+>"))))
                  (_ (if unicode
-                        (concat " " arrow "  ")
+                        (concat "  " arrow " ")
                       (if in (concat "<" line line)
                         (concat line line ">")))))))
     (setq text (propertize text 'face (if dot 'clutch-er-manual 'shadow)))

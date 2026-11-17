@@ -156,9 +156,9 @@ columns are asked for."
 
  orders                                    5 columns
  ───────────────────────────────────────────────────
- ◆ id            int     ←   items.order_id
-                         ←   refunds.order_id
- ● customer_id   int     →   customers.id
+ ◆ id            int      ←  items.order_id
+                          ←  refunds.order_id
+ ● customer_id   int      →  customers.id
  ● region        text   ─┐
  ● country       text   ─┴→  regions (code, country)
    … 1 more column
@@ -179,7 +179,7 @@ highlights its relations.  Neither changes the text."
       (clutch-test-er--goto "◆")
       (run-hooks 'post-command-hook)
       (should (equal (clutch-test-er--highlighted)
-                     '("←   refunds.order_id" "◆ id            int     ←   items.order_id")))
+                     '("←  refunds.order_id" "◆ id            int      ←  items.order_id")))
       (goto-char (point-min))
       (run-hooks 'post-command-hook)
       (should-not (clutch-test-er--highlighted))
@@ -218,7 +218,7 @@ highlights its relations.  Neither changes the text."
     (clutch-er-right)
     (clutch-er-follow)
     (should (string-match-p "^ customers " (clutch-test-er--text)))
-    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p " ←  orders.customer_id$" (clutch-test-er--text)))
     (clutch-er-left)
     (clutch-er-follow)
     (should (string-match-p "^ orders " (clutch-test-er--text))))
@@ -283,7 +283,7 @@ key of the database."
   ]
 }
 "))
-    (should (string-match-p "^ ○ note +text +⇢   customers.name  manual$"
+    (should (string-match-p "^ ○ note +text + ⇢  customers.name  manual$"
                             (clutch-test-er--text)))
     (clutch-test-er--goto "customers.name")
     (should (equal (clutch-test-er--answering '(("note") ("id")) "customers"
@@ -334,14 +334,14 @@ connection's current one."
                           clutch-connection clutch--connection-params
                           clutch-er--entry))))
     (clutch-er-refresh)
-    (should (string-match-p "^ ● customer_id +int +→   customers.id$"
+    (should (string-match-p "^ ● customer_id +int + →  customers.id$"
                             (clutch-test-er--text)))
     (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
     (clutch-test-er--goto-table "customers")
     (clutch-er-follow)
-    (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
-    (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))
+    (should (string-match-p " ←  orders.customer_id$" (clutch-test-er--text)))
+    (should (string-match-p " ⇠  orders.note  manual$" (clutch-test-er--text)))
     (clutch-er-left)
     (clutch-er-follow)
     (clutch-er--write-relations
