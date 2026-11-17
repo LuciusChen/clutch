@@ -331,11 +331,7 @@ itself succeeded."
   "Return KEY_COLUMN_USAGE rows of foreign keys on CONN matching WHERE.
 COLUMNS lists the columns to select.  Rows come in key order, and names
 come back as strings."
-  (let ((sql (format "SELECT %s \
-FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
-WHERE %s AND REFERENCED_TABLE_NAME IS NOT NULL \
-ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
-                     (string-join columns ", ") where)))
+  (let ((sql (clutch-db-mysql--key-column-sql columns where)))
     (mapcar (lambda (row)
               (mapcar (lambda (value)
                         (if (stringp value) value (format "%s" value)))
@@ -348,44 +344,162 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
 
 ;;;; Lifecycle methods
 
+(defun clutch-db-mysql--legacy-target-sql (table schema)
+  "Build the scoped engine lookup for TABLE in SCHEMA."
+  (format "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+          (clutch-db-mysql--schema-literal schema) (mysql-escape-literal table)))
+
+(defun clutch-db-mysql--dictionary-sql (rows)
+  "Build a dictionary lookup when target ROWS have safe InnoDB SQL names."
+  (pcase rows
+    (`((,owner ,name "InnoDB"))
+     ;; Other names are filename encoded in the legacy dictionary.
+     (when (and (string-match-p "\\`[A-Za-z0-9_]+\\'" owner)
+                (string-match-p "\\`[A-Za-z0-9_]+\\'" name))
+       (format "SELECT FOR_NAME FROM INFORMATION_SCHEMA.INNODB_SYS_FOREIGN WHERE REF_NAME = %s ORDER BY FOR_NAME"
+               (mysql-escape-literal (concat owner "/" name)))))))
+
+(defun clutch-db-mysql--dictionary-tables (rows)
+  "Decode dictionary ROWS to child tables, or `unsupported' for encoded names."
+  (let ((tables (delete-dups (mapcar #'car rows))))
+    (if (cl-every (lambda (name)
+                    (string-match-p "\\`[A-Za-z0-9_]+/[A-Za-z0-9_]+\\'" name))
+                  tables)
+        (mapcar (lambda (name) (split-string name "/")) tables)
+      'unsupported)))
+
+(defun clutch-db-mysql--dictionary-unavailable-p (err)
+  "Return non-nil when ERR means the legacy dictionary is unavailable."
+  (string-match-p "\\`\\[\\(?:1109\\|1142\\|1146\\|1227\\)\\]"
+                  (clutch-db--error-message err)))
+
 (defun clutch-db-mysql--legacy-referencing-tables (conn table schema)
   "Find InnoDB tables referencing TABLE in SCHEMA on CONN.
-Return schema/table pairs, or `unsupported' when the legacy dictionary
-cannot safely supply SQL names or the account cannot read it."
+Return schema/table pairs, or `unsupported' for the standard lookup."
   (condition-case err
-      (pcase (mysql-result-rows
-              (clutch-db-mysql--metadata-query
-               conn (format "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE \
-FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
-                            (clutch-db-mysql--schema-literal schema)
-                            (mysql-escape-literal table))))
-        (`((,owner ,name "InnoDB"))
-         ;; The dictionary uses filename-encoded identifiers.  Simple names
-         ;; need no decoding; other names retain the standard metadata path.
-         (if (and (string-match-p "\\`[A-Za-z0-9_]+\\'" owner)
-                  (string-match-p "\\`[A-Za-z0-9_]+\\'" name))
-             (let ((tables
-                    (delete-dups
-                     (mapcar #'car
-                             (mysql-result-rows
-                              (clutch-db-mysql--metadata-query
-                               conn (format "SELECT FOR_NAME \
-FROM INFORMATION_SCHEMA.INNODB_SYS_FOREIGN WHERE REF_NAME = %s ORDER BY FOR_NAME"
-                                            (mysql-escape-literal
-                                             (concat owner "/" name)))))))))
-               (if (cl-every (lambda (child)
-                               (string-match-p
-                                "\\`[A-Za-z0-9_]+/[A-Za-z0-9_]+\\'" child))
-                             tables)
-                   (mapcar (lambda (child) (split-string child "/")) tables)
-                 'unsupported))
-           'unsupported))
-        (_ 'unsupported))
+      (if-let* ((sql (clutch-db-mysql--dictionary-sql
+                      (mysql-result-rows
+                       (clutch-db-mysql--metadata-query
+                        conn (clutch-db-mysql--legacy-target-sql table schema))))))
+          (clutch-db-mysql--dictionary-tables
+           (mysql-result-rows (clutch-db-mysql--metadata-query conn sql)))
+        'unsupported)
     (mysql-query-error
-     (if (string-match-p "\\`\\[\\(?:1109\\|1142\\|1146\\|1227\\)\\]"
-                         (clutch-db--error-message err))
-         'unsupported
+     (if (clutch-db-mysql--dictionary-unavailable-p err) 'unsupported
        (signal (car err) (cdr err))))))
+
+(defun clutch-db-mysql--send-metadata (conn sql callback)
+  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK."
+  (unless (mysql-busy-p conn)
+    (mysql-query-async conn sql
+                       (lambda (result error)
+                         (funcall callback (and result (mysql-result-rows result)) error)))
+    t))
+
+(defun clutch-db-mysql--referencing-keys-async (conn table schema callback continue)
+  "Read incoming keys of TABLE in SCHEMA on CONN, observing CONTINUE."
+  (let ((send (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome)))
+        (columns '("TABLE_SCHEMA" "TABLE_NAME" "COLUMN_NAME"
+                   "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME"))
+        (where (format "REFERENCED_TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME = %s"
+                       (clutch-db-mysql--schema-literal schema)
+                       (mysql-escape-literal table))))
+    (cl-labels
+        ((read-keys (tables)
+           (clutch-db--metadata-request-series
+            send
+            (if (eq tables 'unsupported)
+                (list (clutch-db-mysql--key-column-sql columns where))
+              (cl-loop for (owner child) in tables
+                       collect (clutch-db-mysql--key-column-sql
+                                columns (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s AND %s"
+                                                (mysql-escape-literal owner)
+                                                (mysql-escape-literal child) where))))
+            (lambda (results)
+              (clutch-db-mysql--referencing-key-values (apply #'append results)))
+            callback continue)))
+      (if (string-match-p "\\`5\\.[67]\\." (or (mysql-conn-server-version conn) ""))
+          (clutch-db--metadata-request-series
+           send (list (clutch-db-mysql--legacy-target-sql table schema))
+           (lambda (results) (clutch-db-mysql--dictionary-sql (car results)))
+           (lambda (sql error)
+             (cond
+              (error (funcall callback nil error))
+              ((null sql) (read-keys 'unsupported))
+              (t
+               (clutch-db--metadata-request-series
+                send (list sql)
+                (lambda (results) (clutch-db-mysql--dictionary-tables (car results)))
+                (lambda (tables error)
+                  (cond ((and error (clutch-db-mysql--dictionary-unavailable-p error))
+                         (read-keys 'unsupported))
+                        (error (funcall callback nil error))
+                        (t (read-keys tables))))
+                continue))))
+           continue)
+        (read-keys 'unsupported)))))
+
+
+(defun clutch-db-mysql--primary-key-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
+          (if schema
+              (concat (mysql-escape-identifier schema) "."
+                      (mysql-escape-identifier table))
+            (mysql-escape-identifier table))))
+
+(defun clutch-db-mysql--column-details-sql (table schema)
+  "Build the metadata query for TABLE in SCHEMA."
+  (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT \
+FROM INFORMATION_SCHEMA.COLUMNS \
+WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s \
+ORDER BY ORDINAL_POSITION"
+          (if schema (mysql-escape-literal schema) "DATABASE()")
+          (mysql-escape-literal table)))
+
+(defun clutch-db-mysql--column-details-row (row pk-cols fks)
+  "Decode column ROW using PK-COLS and FKS."
+
+  (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))
+    (let* ((nullable (string= nullable-str "YES"))
+           (pk-p (member name pk-cols))
+           (fk (cdr (assoc name fks)))
+           (read-only (and extra
+                           (string-match-p
+                            "\\_<\\(VIRTUAL\\|STORED\\) GENERATED\\_>"
+                            extra)))
+           (generated (or read-only
+                          (and extra
+                               (string-match-p "\\_<auto_increment\\_>"
+                                               extra)))))
+      (list :name name :type type :nullable nullable
+            :primary-key (and pk-p t)
+            :foreign-key fk
+            :default (and default-val (not generated) default-val)
+            :generated (and generated t)
+            :read-only (and read-only t)
+            :comment (and comment (not (string-empty-p comment)) comment)))))
+
+(defun clutch-db-mysql--key-column-sql (columns where)
+  "Build a foreign-key query selecting COLUMNS under WHERE."
+  (format "SELECT %s \
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+WHERE %s AND REFERENCED_TABLE_NAME IS NOT NULL \
+ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
+          (string-join columns ", ") where))
+
+(defun clutch-db-mysql--foreign-key-values (rows)
+  "Decode foreign-key ROWS."
+  (mapcar (pcase-lambda (`(,column ,ref-schema ,ref-table ,ref-column ,constraint))
+            (cons column (list :ref-table ref-table :ref-column ref-column
+                               :ref-schema ref-schema :constraint constraint))) rows))
+
+(defun clutch-db-mysql--referencing-key-values (rows)
+  "Decode foreign-key ROWS."
+  (mapcar (pcase-lambda (`(,ref-schema ,ref-table ,column ,ref-column ,constraint))
+            (list :table ref-table :schema ref-schema :column column
+                  :ref-column ref-column :constraint constraint)) rows))
 
 (when (require 'mysql nil t)
 
@@ -852,11 +966,7 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
   (clutch-db--translate-library-error mysql-error
     (let* ((result (clutch-db-mysql--metadata-query
                     conn
-                    (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
-                            (if schema
-                                (concat (mysql-escape-identifier schema) "."
-                                        (mysql-escape-identifier table))
-                              (mysql-escape-identifier table)))))
+                    (clutch-db-mysql--primary-key-sql table schema)))
            (rows (mysql-result-rows result)))
       (mapcar (lambda (row)
                 (pcase-let ((`(,_ ,_ ,_ ,_ ,name) row))
@@ -920,17 +1030,13 @@ or costs, so neither hierarchy nor costs are inferred."
 Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
 :constraint K))."
   (clutch-db--translate-library-error mysql-error
-    (mapcar
-     (pcase-lambda (`(,column ,ref-schema ,ref-table ,ref-column ,constraint))
-       (cons column (list :ref-table ref-table :ref-column ref-column
-                          :ref-schema ref-schema :constraint constraint)))
-     (clutch-db-mysql--key-column-rows
-      conn
-      '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
-        "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
-      (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
-              (clutch-db-mysql--schema-literal schema)
-              (mysql-escape-literal table))))))
+    (clutch-db-mysql--foreign-key-values (clutch-db-mysql--key-column-rows
+                                          conn
+                                          '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
+                                            "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
+                                          (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+                                                  (clutch-db-mysql--schema-literal schema)
+                                                  (mysql-escape-literal table))))))
 
 (cl-defmethod clutch-db-referencing-keys ((conn mysql-conn) table
                                           &optional schema _catalog)
@@ -953,11 +1059,7 @@ Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
                                     (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s AND %s"
                                             (mysql-escape-literal owner)
                                             (mysql-escape-literal child) where))))))
-      (mapcar
-       (pcase-lambda (`(,ref-schema ,ref-table ,column ,ref-column ,constraint))
-         (list :table ref-table :schema ref-schema :column column
-               :ref-column ref-column :constraint constraint))
-       rows))))
+      (clutch-db-mysql--referencing-key-values rows))))
 
 ;;;; Column details
 
@@ -966,39 +1068,57 @@ Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
   "Return detailed column info for TABLE in SCHEMA on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
     (let* ((col-result (clutch-db-mysql--metadata-query
-                          conn
-                          (format "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT \
-FROM INFORMATION_SCHEMA.COLUMNS \
-WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s \
-ORDER BY ORDINAL_POSITION"
-                                  (if schema (mysql-escape-literal schema) "DATABASE()")
-                   (mysql-escape-literal table))))
-             (col-rows (mysql-result-rows col-result))
-             (pk-cols (clutch-db-primary-key-columns conn table schema))
-             (fks (clutch-db-foreign-keys conn table schema)))
+                        conn
+                        (clutch-db-mysql--column-details-sql table schema)))
+           (col-rows (mysql-result-rows col-result))
+           (pk-cols (clutch-db-primary-key-columns conn table schema))
+           (fks (clutch-db-foreign-keys conn table schema)))
       (mapcar
-       (lambda (row)
-         (pcase-let ((`(,name ,type ,nullable-str ,default-val ,extra ,comment) row))
-           (let* ((nullable (string= nullable-str "YES"))
-                  (pk-p (member name pk-cols))
-                  (fk (cdr (assoc name fks)))
-                  (read-only (and extra
-                                  (string-match-p
-                                   "\\_<\\(VIRTUAL\\|STORED\\) GENERATED\\_>"
-                                   extra)))
-                  (generated (or read-only
-                                 (and extra
-                                      (string-match-p "\\_<auto_increment\\_>"
-                                                      extra)))))
-             (list :name name :type type :nullable nullable
-                   :primary-key (and pk-p t)
-                   :foreign-key fk
-                   :default (and default-val (not generated) default-val)
-                   :generated (and generated t)
-                   :read-only (and read-only t)
-                   :comment (and comment (not (string-empty-p comment)) comment)))))
+       (lambda (row) (clutch-db-mysql--column-details-row row pk-cols fks))
        col-rows))))
+
+(cl-defmethod clutch-db-referencing-keys-async
+  ((conn mysql-conn) table callback &optional errback schema _catalog continue)
+  "Read MySQL TABLE's incoming keys on CONN without blocking."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db-mysql--referencing-keys-async
+     conn table schema (clutch-db--metadata-outcome callback errback) continue)
+    t))
+
+(cl-defmethod clutch-db-table-relations-async
+  ((conn mysql-conn) table callback &optional errback schema _catalog continue)
+  "Read MySQL TABLE metadata on CONN through asynchronous wire requests."
+  (when (fboundp 'mysql-query-async)
+    (let ((callback (clutch-db--metadata-outcome callback errback)))
+      (clutch-db--metadata-request-series
+       (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome))
+       (list (clutch-db-mysql--primary-key-sql table schema)
+             (clutch-db-mysql--key-column-sql
+              '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
+                "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
+              (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+                      (clutch-db-mysql--schema-literal schema)
+                      (mysql-escape-literal table)))
+             (clutch-db-mysql--column-details-sql table schema))
+       (pcase-lambda (`(,primary ,foreign ,columns))
+         (let ((primary (mapcar (lambda (row) (nth 4 row)) primary))
+               (foreign (clutch-db-mysql--foreign-key-values foreign)))
+           (list :columns
+                 (mapcar (lambda (row)
+                           (clutch-db-mysql--column-details-row row primary foreign))
+                         columns)
+                 :foreign-keys foreign)))
+       (lambda (metadata error)
+         (if error (funcall callback nil error)
+           (clutch-db-mysql--referencing-keys-async
+            conn table schema
+            (lambda (incoming error)
+              (funcall callback (and (not error)
+                                     (plist-put metadata :referencing-keys incoming))
+                       error))
+            continue)))
+       continue))
+    t))
 
 ;;;; Re-entrancy guard
 

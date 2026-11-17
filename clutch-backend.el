@@ -1648,6 +1648,77 @@ that many seconds before it may run.")
   "Backends without asynchronous schema refresh support return nil."
   nil)
 
+(cl-defgeneric clutch-db-referencing-keys-async
+    (conn table callback &optional errback schema catalog continue)
+  "Read TABLE's incoming keys on CONN without blocking, observing CONTINUE.
+CALLBACK receives the keys; ERRBACK receives an error message on failure.
+SCHEMA and CATALOG qualify TABLE.  Return nil without calling CALLBACK when
+unsupported; otherwise return non-nil.")
+
+(cl-defmethod clutch-db-referencing-keys-async
+  ((_conn t) _table _callback &optional _errback _schema _catalog _continue)
+  "Decline asynchronous incoming keys on this backend."
+  nil)
+
+(cl-defgeneric clutch-db-table-relations-async
+    (conn table callback &optional errback schema catalog continue)
+  "Read TABLE's columns and both directions of keys on CONN without blocking.
+CALLBACK receives a plist with :columns, :foreign-keys and :referencing-keys.
+ERRBACK receives an error message on failure.  SCHEMA and CATALOG qualify TABLE.
+CONTINUE, when non-nil, is called before each request; nil stops the load.
+Return non-nil when started, nil without calling CALLBACK when unsupported.")
+
+(cl-defmethod clutch-db-table-relations-async
+  ((_conn t) _table _callback &optional _errback _schema _catalog _continue)
+  "Decline asynchronous relation metadata on this backend."
+  nil)
+
+(defun clutch-db--metadata-outcome (callback errback)
+  "Return an outcome handler using metadata CALLBACK and ERRBACK contracts."
+  (lambda (data error)
+    (if error
+        (when errback (funcall errback (clutch-db--error-message error)))
+      (funcall callback data))))
+
+(defun clutch-db--metadata-request-series (send requests decode callback continue)
+  "Run metadata REQUESTS through asynchronous SEND, then DECODE.
+SEND takes a request and an outcome function receiving its result and an
+error.  Return non-nil after dispatch, or nil while the transport is busy
+without calling the outcome function.
+CALLBACK receives decoded data and nil, or nil and an error condition.
+CONTINUE, when supplied, decides whether another request may be sent."
+  (let (results settled)
+    (cl-labels
+        ((fail (err)
+           (unless settled
+             (setq settled t)
+             (funcall callback nil err)))
+         (next ()
+           (unless settled
+             (cond
+              ((and continue (not (funcall continue)))
+               (fail '(clutch-db-error "Metadata load cancelled")))
+              ((null requests)
+               (let ((outcome (condition-case err
+                                  (cons (funcall decode (nreverse results)) nil)
+                                (error (cons nil err)))))
+                 (setq settled t)
+                 (funcall callback (car outcome) (cdr outcome))))
+              (t
+               (condition-case err
+                   (let ((request (pop requests)))
+                     (unless (funcall send request
+                                      (lambda (result error)
+                                        (if error (fail error)
+                                          (push result results)
+                                          (next))))
+                       (push request requests)
+                       (run-with-timer 0.02 nil #'next)))
+                 (error
+                  (if settled (signal (car err) (cdr err))
+                    (fail err)))))))))
+      (next))))
+
 (cl-defgeneric clutch-db-column-details-async
     (conn table callback &optional errback schema catalog)
   "Start an asynchronous column-detail fetch for TABLE on CONN.

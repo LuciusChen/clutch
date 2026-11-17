@@ -250,7 +250,7 @@
             clutch--conn-sql-product clutch--connection-params)
            ("clutch-query" defcustom t clutch-console-directory
             clutch-console-yank-cleanup)
-           ("clutch-query" defvar t clutch--source-window)
+           ("clutch-connection" defvar t clutch--source-window)
            ("clutch-query" defvar-local t clutch--last-query
             clutch--last-result-buffer)
            ("clutch-schema" defcustom t

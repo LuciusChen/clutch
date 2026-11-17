@@ -417,6 +417,53 @@ draws with ASCII."
     (clutch-test-er--with-view (clutch-test-er--conn)
       (should (string-match-p "--> customers.id$" (clutch-test-er--text))))))
 
+(ert-deftest clutch-test-er-async-load-owns-its-reply ()
+  "ER loads defer rendering and release their activity on every outcome."
+  (dolist (case '(normal cancelled killed moved render-error dispatch-error))
+    (ert-info ((symbol-name case))
+      (clutch-test-er--with-view (clutch-test-er--conn)
+        (let ((conn clutch-connection)
+              (entry clutch-er--entry)
+              reply active)
+          (cl-letf (((symbol-function 'clutch-db-referencing-keys-async)
+                     (lambda (_conn _table callback &optional _errback _schema _catalog continue)
+                       (when (eq case 'dispatch-error) (error "Dispatch failed"))
+                       (setq reply callback active continue)
+                       t)))
+            (if (eq case 'dispatch-error)
+                (should-error (clutch-er-diagram entry))
+              (clutch-er-diagram entry)
+              (should reply)
+              (should (string-match-p "Loading relations" (buffer-string)))
+              (should (gethash conn clutch--running-queries))
+              (pcase case
+                ('cancelled
+                 ;; The backend declines cancellation; later workflow steps
+                 ;; and presentation must still stop on the user's request.
+                 (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                            (lambda (_) nil)))
+                   (clutch-cancel-query-or-quit)))
+                ('moved (setq-local clutch-connection (clutch-test-er--conn)))
+                ('killed (kill-buffer (current-buffer))))
+              (should (eq (and (funcall active) t)
+                          (and (memq case '(normal render-error)) t)))
+              (let (finish)
+                (cl-letf (((symbol-function 'run-with-idle-timer)
+                           (lambda (_delay _repeat function &rest args)
+                             (setq finish (lambda () (apply function args))))))
+                  (funcall reply nil))
+                (if (eq case 'render-error)
+                    (let ((clutch--table-metadata-updated-hook
+                           (list (lambda (&rest _) (error "Render failed")))))
+                      (should-error (funcall finish))
+                      (should (string-match-p "Render failed" (buffer-string))))
+                  (funcall finish)))
+              (pcase case
+                ('normal (should clutch-er--model))
+                ('cancelled (should (string-match-p "cancelled" (buffer-string))))))
+          (should-not (gethash conn clutch--running-queries))
+          (should-not (clutch-db-in-use-p conn))))))))
+
 (provide 'clutch-test-er)
 
 ;;; clutch-test-er.el ends here
