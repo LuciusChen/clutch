@@ -9,7 +9,8 @@
 
 (eval-and-compile
   (require 'clutch-test-common)
-  (require 'clutch-db-sqlite))
+  (require 'clutch-db-sqlite)
+  (require 'redis))
 
 ;;;; Execute — query execution and error handling
 
@@ -713,86 +714,87 @@ connection."
 
 (ert-deftest clutch-test-query-export-async-lifecycle ()
   "Direct export stays atomic on failure, cancel, kill, move and handler quit."
-  (dolist (outcome '(success page-error cancelled cancel-refused cancel-error
-                             killed moved quit incomplete))
-    (ert-info ((symbol-name outcome))
-      (let* ((dir (make-temp-file "clutch-query-export-async-" t))
-             (path (expand-file-name "out.tsv" dir))
-             (source (generate-new-buffer " *clutch-query-export*"))
-             completions)
-        (unwind-protect
-            (clutch-test--with-async-statements finishes
-              (write-region "original" nil path nil 'silent)
-              (with-current-buffer source
-                (insert "SELECT id FROM t")
-                (setq-local clutch-connection 'async-conn)
-                (let ((clutch-export-page-size 2))
-                  (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                            ((symbol-function 'clutch-db-sql-surface-p) (lambda (_conn _params) t))
-                            ((symbol-function 'read-file-name) (lambda (&rest _) path))
-                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                            ((symbol-function 'clutch-db-build-paged-sql)
-                             (lambda (_conn _sql page-num &rest _)
-                               (format "SELECT id FROM t PAGE %d" page-num)))
-                            ((symbol-function 'message)
-                             (lambda (fmt &rest args)
-                               (when (and fmt (string-prefix-p "Exported " fmt))
-                                 (push (apply #'format-message fmt args)
-                                       completions)))))
-                    (clutch-test--with-minibuffer-answers '("tsv" "utf-8")
-                      (clutch-export-query (point-min) (point-max)))
-                    (funcall (cdar finishes)
-                             (make-clutch-db-result :columns '((:name "id"))
-                                                    :rows '((1) (2))) nil)
-                    (ert-run-idle-timers)
-                    (should (equal (caar finishes) "SELECT id FROM t PAGE 1"))
-                    (should (equal (with-temp-buffer (insert-file-contents path)
-                                                     (buffer-string)) "original"))
-                    (pcase outcome
-                      ((or 'cancelled 'cancel-refused 'cancel-error)
-                       (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                                  (lambda (_)
-                                    (pcase outcome
-                                      ('cancelled t)
-                                      ('cancel-error
-                                       (signal 'clutch-db-error '("Cancel refused")))))))
-                         (clutch-cancel-query-or-quit)))
-                      ('killed (kill-buffer source))
-                      ('moved (setq-local clutch-connection 'another-conn)))
-                    (let ((write (symbol-function 'write-region)))
-                      (cl-letf (((symbol-function 'write-region)
-                                 (lambda (&rest args)
-                                   (if (eq outcome 'quit)
-                                       (signal 'quit nil)
-                                     (apply write args)))))
-                        (if (eq outcome 'page-error)
-                            (funcall (cdar finishes) nil '(clutch-db-error "query failed"))
-                          (funcall (cdar finishes)
-                                   (make-clutch-db-result
-                                    ;; Oracle's later pages append an RN column.
-                                    :columns '((:name "id") (:name "RN"))
-                                    :rows (if (eq outcome 'incomplete)
-                                              (list (list (make-clutch-db-value-preview
-                                                           :type 'clob :length 100
-                                                           :text "preview")))
-                                            (if (memq outcome '(cancelled cancel-refused cancel-error))
-                                                '((3 99) (4 100))
-                                              '((3 99))))) nil))
-                        (should-not
-                         (condition-case nil
-                             (progn (ert-run-idle-timers) nil)
-                           (quit t))))))))
-              (should (= (length finishes) 2))
-              (should-not (clutch-db--foreground-busy-p 'async-conn))
-              (should-not (gethash 'async-conn clutch--running-queries))
-              (should (equal completions
-                             (when (eq outcome 'success)
-                               (list (format "Exported 3 rows to %s (utf-8)" path)))))
-              (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
-                             (if (eq outcome 'success) "id\n1\n2\n3\n" "original")))
-              (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv"))))
-          (when (buffer-live-p source) (kill-buffer source))
-          (delete-directory dir t))))))
+  (let ((another-conn (make-clutch-test-conn))
+        (async-conn (make-clutch-test-conn)))
+    (dolist (outcome '(success page-error cancelled cancel-refused cancel-error
+                               killed moved quit incomplete))
+      (ert-info ((symbol-name outcome))
+        (let* ((dir (make-temp-file "clutch-query-export-async-" t))
+               (path (expand-file-name "out.tsv" dir))
+               (source (generate-new-buffer " *clutch-query-export*"))
+               completions)
+          (unwind-protect
+              (clutch-test--with-async-statements finishes
+                (write-region "original" nil path nil 'silent)
+                (with-current-buffer source
+                  (insert "SELECT id FROM t")
+                  (setq-local clutch-connection async-conn)
+                  (let ((clutch-export-page-size 2))
+                    (cl-letf (((symbol-function 'clutch-db-sql-surface-p) (lambda (_conn _params) t))
+                              ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                              ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                              ((symbol-function 'clutch-db-build-paged-sql)
+                               (lambda (_conn _sql page-num &rest _)
+                                 (format "SELECT id FROM t PAGE %d" page-num)))
+                              ((symbol-function 'message)
+                               (lambda (fmt &rest args)
+                                 (when (and fmt (string-prefix-p "Exported " fmt))
+                                   (push (apply #'format-message fmt args)
+                                         completions)))))
+                      (clutch-test--with-minibuffer-answers '("tsv" "utf-8")
+                        (clutch-export-query (point-min) (point-max)))
+                      (funcall (cdar finishes)
+                               (make-clutch-db-result :columns '((:name "id"))
+                                                      :rows '((1) (2))) nil)
+                      (ert-run-idle-timers)
+                      (should (equal (caar finishes) "SELECT id FROM t PAGE 1"))
+                      (should (equal (with-temp-buffer (insert-file-contents path)
+                                                       (buffer-string)) "original"))
+                      (pcase outcome
+                        ((or 'cancelled 'cancel-refused 'cancel-error)
+                         (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                                    (lambda (_)
+                                      (pcase outcome
+                                        ('cancelled t)
+                                        ('cancel-error
+                                         (signal 'clutch-db-error '("Cancel refused")))))))
+                           (clutch-cancel-query-or-quit)))
+                        ('killed (kill-buffer source))
+                        ('moved (setq-local clutch-connection another-conn)))
+                      (let ((write (symbol-function 'write-region)))
+                        (cl-letf (((symbol-function 'write-region)
+                                   (lambda (&rest args)
+                                     (if (eq outcome 'quit)
+                                         (signal 'quit nil)
+                                       (apply write args)))))
+                          (if (eq outcome 'page-error)
+                              (funcall (cdar finishes) nil '(clutch-db-error "query failed"))
+                            (funcall (cdar finishes)
+                                     (make-clutch-db-result
+                                      ;; Oracle's later pages append an RN column.
+                                      :columns '((:name "id") (:name "RN"))
+                                      :rows (if (eq outcome 'incomplete)
+                                                (list (list (make-clutch-db-value-preview
+                                                             :type 'clob :length 100
+                                                             :text "preview")))
+                                              (if (memq outcome '(cancelled cancel-refused cancel-error))
+                                                  '((3 99) (4 100))
+                                                '((3 99))))) nil))
+                          (should-not
+                           (condition-case nil
+                               (progn (ert-run-idle-timers) nil)
+                             (quit t))))))))
+                (should (= (length finishes) 2))
+                (should-not (clutch-db--foreground-busy-p async-conn))
+                (should-not (gethash async-conn clutch--running-queries))
+                (should (equal completions
+                               (when (eq outcome 'success)
+                                 (list (format "Exported 3 rows to %s (utf-8)" path)))))
+                (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                               (if (eq outcome 'success) "id\n1\n2\n3\n" "original")))
+                (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv"))))
+            (when (buffer-live-p source) (kill-buffer source))
+            (delete-directory dir t)))))))
 
 (ert-deftest clutch-test-query-export-streams-when-the-backend-can ()
   "Direct export streams formatted text when the backend offers it.
@@ -800,71 +802,71 @@ It sends no paged query, asks for the format's delimiter, writes each part
 in the chosen encoding and reports the rows the backend counted, and a
 failed or cancelled stream leaves the destination and no temporary file
 behind."
-  (pcase-dolist (`(,outcome ,kind)
-                 '((success "tsv") (error "tsv") (cancelled "tsv")
-                   (success "csv")))
-    (ert-info ((format "%s %s" outcome kind))
-      (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
-             (path (expand-file-name "out.tsv" dir))
-             (source (generate-new-buffer " *clutch-query-export*"))
-             (clutch-csv-delimiter ?\;)
-             stream interrupted messages)
-        (unwind-protect
-            (clutch-test--with-async-statements finishes
-              (write-region "original" nil path nil 'silent)
-              (with-current-buffer source
-                (insert "SELECT id, name FROM t")
-                (setq-local clutch-connection 'async-conn)
-                (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                          ((symbol-function 'clutch-db-sql-surface-p)
-                           (lambda (_conn _params) t))
-                          ((symbol-function 'read-file-name) (lambda (&rest _) path))
-                          ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-                          ((symbol-function 'clutch-db-delimited-export-async)
-                           (lambda (&rest arguments) (setq stream arguments) t))
-                          ((symbol-function 'clutch-db-interrupt-query)
-                           (lambda (_conn) (setq interrupted t)))
-                          ((symbol-function 'message)
-                           (lambda (format &rest arguments)
-                             (push (apply #'format format arguments) messages))))
-                  (clutch-test--with-minibuffer-answers (list kind "utf-8-bom")
-                    (clutch-export-query (point-min) (point-max)))
-                  (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
-                                       ,function ,callback)
-                               stream))
-                    (should (equal (list conn sql delimiter header null-text)
-                                   (list 'async-conn "SELECT id, name FROM t"
-                                         (if (equal kind "tsv") ?\t ?\;) t
-                                         clutch-export-null-value-text)))
-                    (funcall function "id\tname\n1\ta\n" 1)
-                    (funcall function "2\t中文\n" 1)
-                    (pcase outcome
-                      ('success
-                       (funcall callback (make-clutch-db-result :affected-rows 2) nil))
-                      ('error
-                       (funcall callback nil '(clutch-db-error "disk full")))
-                      ('cancelled
-                       (clutch-cancel-query-or-quit)
-                       (should interrupted)
-                       (funcall callback nil
-                                '(clutch-db-error "canceling statement"))))
-                    (ert-run-idle-timers))))
-              (should-not finishes)
-              (should-not (clutch-db--foreground-busy-p 'async-conn))
-              (should-not (gethash 'async-conn clutch--running-queries))
-              (should (equal (with-temp-buffer
-                               (set-buffer-multibyte nil)
-                               (insert-file-contents-literally path)
-                               (buffer-string))
-                             (if (eq outcome 'success)
-                                 (encode-coding-string "id\tname\n1\ta\n2\t中文\n"
-                                                       'utf-8-with-signature)
-                               "original")))
-              (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv")))
-              (when (eq outcome 'success)
-                (should (string-prefix-p "Exported 2 rows to" (car messages)))))
-          (when (buffer-live-p source) (kill-buffer source))
-          (delete-directory dir t))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (pcase-dolist (`(,outcome ,kind)
+                   '((success "tsv") (error "tsv") (cancelled "tsv")
+                     (success "csv")))
+      (ert-info ((format "%s %s" outcome kind))
+        (let* ((dir (make-temp-file "clutch-query-export-stream-" t))
+               (path (expand-file-name "out.tsv" dir))
+               (source (generate-new-buffer " *clutch-query-export*"))
+               (clutch-csv-delimiter ?\;)
+               stream interrupted messages)
+          (unwind-protect
+              (clutch-test--with-async-statements finishes
+                (write-region "original" nil path nil 'silent)
+                (with-current-buffer source
+                  (insert "SELECT id, name FROM t")
+                  (setq-local clutch-connection async-conn)
+                  (cl-letf (((symbol-function 'clutch-db-sql-surface-p)
+                             (lambda (_conn _params) t))
+                            ((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-db-delimited-export-async)
+                             (lambda (&rest arguments) (setq stream arguments) t))
+                            ((symbol-function 'clutch-db-interrupt-query)
+                             (lambda (_conn) (setq interrupted t)))
+                            ((symbol-function 'message)
+                             (lambda (format &rest arguments)
+                               (push (apply #'format format arguments) messages))))
+                    (clutch-test--with-minibuffer-answers (list kind "utf-8-bom")
+                      (clutch-export-query (point-min) (point-max)))
+                    (pcase-let ((`(,conn ,sql ,delimiter ,header ,null-text
+                                         ,function ,callback)
+                                 stream))
+                      (should (equal (list conn sql delimiter header null-text)
+                                     (list async-conn "SELECT id, name FROM t"
+                                           (if (equal kind "tsv") ?\t ?\;) t
+                                           clutch-export-null-value-text)))
+                      (funcall function "id\tname\n1\ta\n" 1)
+                      (funcall function "2\t中文\n" 1)
+                      (pcase outcome
+                        ('success
+                         (funcall callback (make-clutch-db-result :affected-rows 2) nil))
+                        ('error
+                         (funcall callback nil '(clutch-db-error "disk full")))
+                        ('cancelled
+                         (clutch-cancel-query-or-quit)
+                         (should interrupted)
+                         (funcall callback nil
+                                  '(clutch-db-error "canceling statement"))))
+                      (ert-run-idle-timers))))
+                (should-not finishes)
+                (should-not (clutch-db--foreground-busy-p async-conn))
+                (should-not (gethash async-conn clutch--running-queries))
+                (should (equal (with-temp-buffer
+                                 (set-buffer-multibyte nil)
+                                 (insert-file-contents-literally path)
+                                 (buffer-string))
+                               (if (eq outcome 'success)
+                                   (encode-coding-string "id\tname\n1\ta\n2\t中文\n"
+                                                         'utf-8-with-signature)
+                                 "original")))
+                (should (equal (directory-files dir nil "\\`[^.]") '("out.tsv")))
+                (when (eq outcome 'success)
+                  (should (string-prefix-p "Exported 2 rows to" (car messages)))))
+            (when (buffer-live-p source) (kill-buffer source))
+            (delete-directory dir t)))))))
 
 (ert-deftest clutch-test-file-export-pages-through-sqlite ()
   "Paged file output should equal complete formatting for every SQL format.
@@ -957,26 +959,27 @@ same bounded batches."
   "An export should end once even when showing a page's failure fails.
 Its connection is released and its completion runs once, as a batch ends
 when its continuation fails."
-  (with-temp-buffer
-    (clutch-test--with-async-statements finishes
-      (clutch-test--init-result-state
-       (list :columns '("id") :rows '((1)) :connection 'async-conn
-             :base-query "SELECT id FROM t" :server-pageable t
-             :result-max-rows 2))
-      (let (completions)
-        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                   (lambda (_conn _sql page-num &rest _)
-                     (format "SELECT id FROM t PAGE %d" page-num)))
-                  ((symbol-function 'clutch--present-statement-outcome)
-                   (lambda (&rest _) (error "Display failed")))
-                  ((symbol-function 'message) #'ignore))
-          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
-                                       #'ignore
-                                       (lambda (err) (push err completions)))
-          (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
-          (ignore-errors (ert-run-idle-timers))
-          (should (= (length completions) 1))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (clutch-test--with-async-statements finishes
+        (clutch-test--init-result-state
+         (list :columns '("id") :rows '((1)) :connection async-conn
+               :base-query "SELECT id FROM t" :server-pageable t
+               :result-max-rows 2))
+        (let (completions)
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn _sql page-num &rest _)
+                       (format "SELECT id FROM t PAGE %d" page-num)))
+                    ((symbol-function 'clutch--present-statement-outcome)
+                     (lambda (&rest _) (error "Display failed")))
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
+                                         #'ignore
+                                         (lambda (err) (push err completions)))
+            (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+            (ignore-errors (ert-run-idle-timers))
+            (should (= (length completions) 1))
+            (should-not (clutch-db--foreground-busy-p async-conn))))))))
 
 (ert-deftest clutch-test-query-activity-calls-its-end-function-once ()
   "A query activity calls the function it was given once, however often it ends."
@@ -1033,131 +1036,136 @@ Garbage collection took most of the time of a large export at Emacs's
 default threshold, and Emacs 29 reads from a process 4 KB at a time.  Every
 way an export ends restores the limits, one the user already set higher
 is kept, and one changed while the export ran is left as it was changed."
-  (dolist (ending '(success failure cancel))
-    (ert-info ((format "ended by %s" ending))
-      (clutch-test--with-global-export-limits 800000 4096
-        (clutch-test--with-async-statements finishes
-          (let (completions)
-            (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                       (lambda (_conn _sql page-num &rest _)
-                         (format "SELECT id FROM t PAGE %d" page-num)))
-                      ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
-                      ((symbol-function 'clutch--present-statement-outcome) #'ignore)
-                      ((symbol-function 'message) #'ignore))
-              (with-current-buffer
-                  (clutch-test--start-export "SELECT id FROM t" 'async-conn
-                                         (lambda (err) (push err completions)))
-                (should (>= gc-cons-threshold (* 16 1024 1024)))
-                (should (>= read-process-output-max 65536))
-                (pcase ending
-                  ('success
-                   (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil))
-                  ('failure
-                   (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
-                  ('cancel
-                   (clutch-cancel-query-or-quit)
-                   (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)))
-                (ert-run-idle-timers)
-                (should (= (length completions) 1))
-                (should (= gc-cons-threshold 800000))
-                (should (= read-process-output-max 4096)))))))))
-  (clutch-test--with-global-export-limits (* 256 1024 1024) (* 1024 1024)
-    (clutch-test--with-async-statements finishes
-      (let (completions)
-        (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
-                  ((symbol-function 'message) #'ignore))
-          (with-current-buffer
-              (clutch-test--start-export "SELECT id FROM t" 'async-conn
-                                         (lambda (err) (push err completions)))
-            (should (= gc-cons-threshold (* 256 1024 1024)))
-            ;; Changed while the export ran: not ours to put back.
-            (set-default-toplevel-value 'gc-cons-threshold (* 64 1024 1024))
-            (funcall (cdar finishes) nil '(clutch-db-error "boom"))
-            (ert-run-idle-timers)
-            (should (= gc-cons-threshold (* 64 1024 1024)))
-            (should (= read-process-output-max (* 1024 1024)))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (dolist (ending '(success failure cancel))
+      (ert-info ((format "ended by %s" ending))
+        (clutch-test--with-global-export-limits 800000 4096
+          (clutch-test--with-async-statements finishes
+            (let (completions)
+              (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                         (lambda (_conn _sql page-num &rest _)
+                           (format "SELECT id FROM t PAGE %d" page-num)))
+                        ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
+                        ((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (with-current-buffer
+                    (clutch-test--start-export "SELECT id FROM t" async-conn
+                                               (lambda (err) (push err completions)))
+                  (should (>= gc-cons-threshold (* 16 1024 1024)))
+                  (should (>= read-process-output-max 65536))
+                  (pcase ending
+                    ('success
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil))
+                    ('failure
+                     (funcall (cdar finishes) nil '(clutch-db-error "connection reset")))
+                    ('cancel
+                     (clutch-cancel-query-or-quit)
+                     (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)))
+                  (ert-run-idle-timers)
+                  (should (= (length completions) 1))
+                  (should (= gc-cons-threshold 800000))
+                  (should (= read-process-output-max 4096)))))))))
+    (clutch-test--with-global-export-limits (* 256 1024 1024) (* 1024 1024)
+      (clutch-test--with-async-statements finishes
+        (let (completions)
+          (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer
+                (clutch-test--start-export "SELECT id FROM t" async-conn
+                                           (lambda (err) (push err completions)))
+              (should (= gc-cons-threshold (* 256 1024 1024)))
+              ;; Changed while the export ran: not ours to put back.
+              (set-default-toplevel-value 'gc-cons-threshold (* 64 1024 1024))
+              (funcall (cdar finishes) nil '(clutch-db-error "boom"))
+              (ert-run-idle-timers)
+              (should (= gc-cons-threshold (* 64 1024 1024)))
+              (should (= read-process-output-max (* 1024 1024))))))))))
 
 (ert-deftest clutch-test-export-limits-last-until-the-last-export-ends ()
   "Concurrent exports share the raised limits until the last one ends.
 The first export to end used to put the lower values back under the other."
-  (clutch-test--with-global-export-limits 800000 4096
-    (clutch-test--with-async-statements finishes
-      (let (a-done b-done)
-        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                   (lambda (_conn sql page-num &rest _)
-                     (format "%s PAGE %d" sql page-num)))
-                  ((symbol-function 'clutch--present-statement-outcome) #'ignore)
-                  ((symbol-function 'message) #'ignore))
-          (clutch-test--start-export "SELECT a" 'conn-a (lambda (err) (push err a-done)))
-          (clutch-test--start-export "SELECT b" 'conn-b (lambda (err) (push err b-done)))
-          (should (equal (mapcar #'car finishes)
-                         '("SELECT b PAGE 0" "SELECT a PAGE 0")))
-          (funcall (cdr (assoc "SELECT a PAGE 0" finishes))
-                   (make-clutch-db-result :rows '((1))) nil)
-          (ert-run-idle-timers)
-          (should (= (length a-done) 1))
-          (should-not b-done)
-          (should (>= gc-cons-threshold (* 16 1024 1024)))
-          (should (>= read-process-output-max 65536))
-          (funcall (cdr (assoc "SELECT b PAGE 0" finishes))
-                   (make-clutch-db-result :rows '((1))) nil)
-          (ert-run-idle-timers)
-          (should (= (length b-done) 1))
-          (should (= gc-cons-threshold 800000))
-          (should (= read-process-output-max 4096)))))))
+  (let ((conn-a (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn)))
+    (clutch-test--with-global-export-limits 800000 4096
+      (clutch-test--with-async-statements finishes
+        (let (a-done b-done)
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn sql page-num &rest _)
+                       (format "%s PAGE %d" sql page-num)))
+                    ((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-test--start-export "SELECT a" conn-a (lambda (err) (push err a-done)))
+            (clutch-test--start-export "SELECT b" conn-b (lambda (err) (push err b-done)))
+            (should (equal (mapcar #'car finishes)
+                           '("SELECT b PAGE 0" "SELECT a PAGE 0")))
+            (funcall (cdr (assoc "SELECT a PAGE 0" finishes))
+                     (make-clutch-db-result :rows '((1))) nil)
+            (ert-run-idle-timers)
+            (should (= (length a-done) 1))
+            (should-not b-done)
+            (should (>= gc-cons-threshold (* 16 1024 1024)))
+            (should (>= read-process-output-max 65536))
+            (funcall (cdr (assoc "SELECT b PAGE 0" finishes))
+                     (make-clutch-db-result :rows '((1))) nil)
+            (ert-run-idle-timers)
+            (should (= (length b-done) 1))
+            (should (= gc-cons-threshold 800000))
+            (should (= read-process-output-max 4096))))))))
 
 (ert-deftest clutch-test-export-limits-ignore-temporary-bindings ()
   "An export that ends under a temporary binding still restores the globals.
 Checked against the binding in force, it found its own raised values gone
 and left them raised for good once the binding ended."
-  (clutch-test--with-global-export-limits 800000 4096
-    (clutch-test--with-async-statements finishes
-      (let (completions)
-        (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
-                  ((symbol-function 'message) #'ignore))
-          (clutch-test--start-export "SELECT id FROM t" 'async-conn
-                                         (lambda (err) (push err completions)))
-          (let ((gc-cons-threshold (* 5 1024 1024))
-                (read-process-output-max 8192))
-            (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)
-            (ert-run-idle-timers))
-          (should (= (length completions) 1))
-          (should (= (default-toplevel-value 'gc-cons-threshold) 800000))
-          (should (= (default-toplevel-value 'read-process-output-max) 4096)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (clutch-test--with-global-export-limits 800000 4096
+      (clutch-test--with-async-statements finishes
+        (let (completions)
+          (cl-letf (((symbol-function 'clutch--present-statement-outcome) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch-test--start-export "SELECT id FROM t" async-conn
+                                       (lambda (err) (push err completions)))
+            (let ((gc-cons-threshold (* 5 1024 1024))
+                  (read-process-output-max 8192))
+              (funcall (cdar finishes) (make-clutch-db-result :rows '((1))) nil)
+              (ert-run-idle-timers))
+            (should (= (length completions) 1))
+            (should (= (default-toplevel-value 'gc-cons-threshold) 800000))
+            (should (= (default-toplevel-value 'read-process-output-max) 4096))))))))
 
 (ert-deftest clutch-test-export-stops-when-its-result-loses-its-connection ()
   "An export whose result lost its connection should stop without showing the page.
 The disconnect that cleared the result's connection also closed it, and the
 page in flight then failed; showing that failure would put an error page in
 a buffer that holds no connection, or holds another one."
-  (clutch-test--with-result-state
-      (:columns '("id") :rows '((1)) :connection 'async-conn
-       :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
-    (clutch-test--with-async-statements finishes
-      (let (shown completions)
-        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                   (lambda (_conn _sql page-num &rest _)
-                     (format "SELECT id FROM t PAGE %d" page-num)))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (not (eq conn 'async-conn))))
-                  ((symbol-function 'clutch--show-execution-error)
-                   (lambda (&rest _) (setq shown t) "failed"))
-                  ((symbol-function 'message) #'ignore))
-          (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
-                                       #'ignore
-                                       (lambda (err) (push err completions)))
-          ;; A disconnect elsewhere clears the result's connection.
-          (with-temp-buffer
-            (clutch--invalidate-derived-buffers 'async-conn))
-          (funcall (cdar finishes) nil
-                   '(clutch-db-error
-                     "Disconnected while the statement ran; its outcome is unknown"))
-          (ert-run-idle-timers)
-          (should-not shown)
-          (should (= (length completions) 1))
-          (should (string-match-p "connection changed"
-                                  (error-message-string (car completions))))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (clutch-test--with-result-state
+        (:columns '("id") :rows '((1)) :connection async-conn
+                  :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+      (clutch-test--with-async-statements finishes
+        (let (shown completions)
+          (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_conn _sql page-num &rest _)
+                       (format "SELECT id FROM t PAGE %d" page-num)))
+                    ((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (not (eq conn async-conn))))
+                    ((symbol-function 'clutch--show-execution-error)
+                     (lambda (&rest _) (setq shown t) "failed"))
+                    ((symbol-function 'message) #'ignore))
+            (clutch-result--export-pages "SELECT id FROM t" "SELECT id FROM t" 2
+                                         #'ignore
+                                         (lambda (err) (push err completions)))
+            ;; A disconnect elsewhere clears the result's connection.
+            (with-temp-buffer
+              (clutch--invalidate-derived-buffers async-conn))
+            (funcall (cdar finishes) nil
+                     '(clutch-db-error
+                       "Disconnected while the statement ran; its outcome is unknown"))
+            (ert-run-idle-timers)
+            (should-not shown)
+            (should (= (length completions) 1))
+            (should (string-match-p "connection changed"
+                                    (error-message-string (car completions))))
+            (should-not (clutch-db--foreground-busy-p async-conn))))))))
 
 (ert-deftest clutch-test-export-stops-when-its-result-moves-during-a-synchronous-page ()
   "An export should stop when its result loses its connection during a page.
@@ -2262,26 +2270,29 @@ call when a backend interrupt succeeds."
 
 (ert-deftest clutch-test-batch-stops-when-its-buffer-switches-connection ()
   "A batch should stop rather than follow its buffer to another connection."
-  (with-temp-buffer
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (let (sent messages)
-        (cl-letf (((symbol-function 'clutch-db-query-async)
-                   (lambda (conn sql callback)
-                     (push (cons conn sql) sent)
-                     (push (cons sql callback) finishes)
-                     t))
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (setq-local clutch-connection 'conn-b)
-          (ert-run-idle-timers)
-          (should (equal sent '((conn-a . "UPDATE t SET n = 1"))))
-          (should (member "1 statement executed, then stopped: the connection changed"
-                          messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a)))))))
+  (let ((conn-a (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (let (sent messages)
+          (cl-letf (((symbol-function 'clutch-db-result-query-p) #'ignore)
+                    ((symbol-function 'clutch-db-query-async)
+                     (lambda (conn sql callback)
+                       (push (cons conn sql) sent)
+                       (push (cons sql callback) finishes)
+                       t))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (setq-local clutch-connection conn-b)
+            (ert-run-idle-timers)
+            (should (equal sent (list (cons conn-a "UPDATE t SET n = 1"))))
+            (should (member "1 statement executed, then stopped: the connection changed"
+                            messages))
+            (should-not (clutch-db--foreground-busy-p conn-a))))))))
 
 (ert-deftest clutch-test-batch-reports-a-statement-that-failed-after-its-buffer-moved ()
   "A batch statement that fails after its buffer moved should only be reported.
@@ -2289,56 +2300,54 @@ The disconnect that moved the buffer closed the connection, so the statement
 in flight failed with an unknown outcome; drawing that put an error page in
 a result buffer of another connection, or of none.  A statement that
 succeeds after its buffer moved leaves the marker of one the buffer runs."
-  (with-temp-buffer
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (let ((a-alive t) shown messages)
-        (cl-letf (((symbol-function 'clutch--connection-key)
-                   (lambda (conn) (if conn (symbol-name conn) "none")))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (or a-alive (not (eq conn 'conn-a)))))
-                  ((symbol-function 'clutch--show-execution-error)
-                   (lambda (&rest _) (setq shown t) "failed"))
-                  ((symbol-function 'clutch--retire-query-connection) #'ignore)
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+  (let ((conn-a (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (let ((a-alive t) shown messages)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or a-alive (not (eq conn conn-a)))))
+                    ((symbol-function 'clutch--show-execution-error)
+                     (lambda (&rest _) (setq shown t) "failed"))
+                    ((symbol-function 'clutch--retire-query-connection) #'ignore)
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch--execute-statements '("UPDATE t SET n = 1" "UPDATE t SET n = 2"))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            ;; Statement 2 runs; a disconnect then clears the buffer's connection.
+            (setq a-alive nil)
+            (setq-local clutch-connection nil)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-error
+                       "Disconnected while the statement ran; its outcome is unknown"))
+            (ert-run-idle-timers)
+            (should-not shown)
+            (should (cl-some
+                     (lambda (text)
+                       (string-match-p
+                        "\\`1 statement executed, then stopped: the connection changed; statement 2: .*outcome is unknown"
+                        text))
+                     messages))
+            (should-not (clutch-db--foreground-busy-p conn-a))))))
+    (with-temp-buffer
+      (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\nSELECT 3;")
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (clutch--execute-statements
+           (clutch--split-statement-specs (buffer-substring 1 41) 1))
+          (setq-local clutch-connection conn-b)
+          (clutch--execute-and-mark "SELECT 3;" 41 (point-max))
+          ;; conn-a's first statement succeeds while SELECT 3 runs on conn-b.
+          (funcall (cdr (car (last finishes)))
+                   (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
-          ;; Statement 2 runs; a disconnect then clears the buffer's connection.
-          (setq a-alive nil)
-          (setq-local clutch-connection nil)
-          (funcall (cdar finishes) nil
-                   '(clutch-db-error
-                     "Disconnected while the statement ran; its outcome is unknown"))
-          (ert-run-idle-timers)
-          (should-not shown)
-          (should (cl-some
-                   (lambda (text)
-                     (string-match-p
-                      "\\`1 statement executed, then stopped: the connection changed; statement 2: .*outcome is unknown"
-                      text))
-                   messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
-  (with-temp-buffer
-    (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\nSELECT 3;")
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (conn) (if conn (symbol-name conn) "none")))
-                ((symbol-function 'message) #'ignore))
-        (clutch--execute-statements
-         (clutch--split-statement-specs (buffer-substring 1 41) 1))
-        (setq-local clutch-connection 'conn-b)
-        (clutch--execute-and-mark "SELECT 3;" 41 (point-max))
-        ;; conn-a's first statement succeeds while SELECT 3 runs on conn-b.
-        (funcall (cdr (car (last finishes)))
-                 (make-clutch-db-result :affected-rows 1) nil)
-        (ert-run-idle-timers)
-        (should (string-prefix-p
-                 "Running"
-                 (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
+          (should (string-prefix-p
+                   "Running"
+                   (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
 
 (ert-deftest clutch-test-idle-retry-runs-only-on-its-reconnected-connection ()
   "An idle retry should run only on the connection its reconnect built.
@@ -2347,203 +2356,205 @@ plan.  After a reply that came once the statement started, a reconnect or
 a retry that fails before it runs ends the statement with its error.  A
 buffer that the reconnect's wait killed or moved elsewhere is not retried
 on, and a statement it started elsewhere keeps its marker."
-  (with-temp-buffer
-    (let* ((old (make-clutch-test-conn
-                 :queries (list (cons "stale-plan"
-                                      (lambda (conn)
-                                        (clutch-db-disconnect conn)
-                                        (signal 'clutch-db-execution-not-started
-                                                '("idle validation failed")))))))
-           (new (make-clutch-test-conn
-                 :queries (list (cons "fresh-plan"
-                                      (make-clutch-db-result :columns ["id"] :rows '((1)))))))
-           (clutch-connection old)
-           prepared-connections)
-      (cl-letf (((symbol-function 'clutch--prepare-row-identity-query)
-                 (lambda (conn sql)
-                   (should (equal sql "SELECT * FROM items"))
-                   (push conn prepared-connections)
-                   '(:sql "fresh-plan")))
-                ((symbol-function 'clutch--try-reconnect)
-                 (lambda () (setq clutch-connection new))))
-        (let ((outcome
-               (clutch-test--await-outcome
-                (lambda (k)
-                  (clutch--execute-statement
-                   "SELECT * FROM items" old t nil k
-                   '(:row-identity-prep (:sql "stale-plan") :server-pageable nil))))))
-          (should (eq (plist-get outcome :connection) new))
-          (should-not (clutch-test-conn-queries old))
-          (should-not (clutch-test-conn-queries new))
-          (should (equal prepared-connections (list new)))))))
-  (dolist (failing '(reconnect retry))
+  (let ((async-conn (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn))
+        (new-conn (make-clutch-test-conn)))
     (with-temp-buffer
-      (insert "SELECT 1")
-      (setq-local clutch-connection 'async-conn)
-      (clutch-test--with-async-statements finishes
-        (let ((alive t) shown)
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (or alive (not (eq conn 'async-conn)))))
-                    ((symbol-function 'clutch--try-reconnect)
-                     (lambda ()
-                       (when (eq failing 'reconnect)
-                         (signal 'clutch-db-error '("Connection refused")))
-                       (setq-local clutch-connection 'new-conn)))
-                    ((symbol-function 'clutch-db-query-async)
-                     (lambda (conn sql callback)
-                       (when (eq conn 'new-conn)
-                         (error "Dispatch failed"))
-                       (push (cons sql callback) finishes)
-                       t))
-                    ((symbol-function 'clutch-result--display-error)
-                     (lambda (&rest args) (setq shown args) nil)))
-            (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
-            (setq alive nil)
-            (funcall (cdar finishes) nil
-                     '(clutch-db-execution-not-started "connection invalidated"))
-            ;; The reply is handled in a timer, outside any command.
-            (let ((debug-on-error nil))
-              (ert-run-idle-timers))
-            (should-not (clutch-db--foreground-busy-p 'async-conn))
-            (should-not (clutch-db--foreground-busy-p 'new-conn))
-            (should-not clutch--execution-start-time)
-            (should (string-prefix-p
-                     "Last failed"
-                     (overlay-get clutch--executed-sql-overlay 'help-echo)))
-            (should (string-match-p (if (eq failing 'reconnect)
-                                        "Connection refused"
-                                      "Dispatch failed")
-                                    (format "%S" shown))))))))
-  (pcase-dolist (`(,reconnects ,starts) '((nil t) (t t) (t nil)))
-    (with-temp-buffer
-      (insert "SELECT 1;\nSELECT 2;")
-      (setq-local clutch-connection 'async-conn)
-      (clutch-test--with-async-statements finishes
-        (let ((source (current-buffer)) (alive t) shown)
-          (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (or alive (not (eq conn 'async-conn)))))
-                    ((symbol-function 'clutch--connection-key) #'symbol-name)
-                    ((symbol-function 'clutch--try-reconnect)
-                     ;; The reconnect's wait runs a timer that moves the
-                     ;; buffer to conn-b, and maybe starts SELECT 2 there.
-                     (lambda ()
-                       (let (moved)
-                         (run-with-timer
-                          0 nil (lambda ()
-                                  (with-current-buffer source
-                                    (setq-local clutch-connection 'conn-b)
-                                    (when starts
-                                      (clutch--execute-and-mark "SELECT 2;" 11 20)))
-                                  (setq moved t)))
-                         (while (not moved)
-                           (accept-process-output nil 0.01)))
-                       (if reconnects
-                           'new-conn
-                         (signal 'clutch-db-error '("Reconnect failed")))))
-                    ((symbol-function 'clutch-result--display-error)
-                     (lambda (&rest args) (setq shown args) nil)))
-            (clutch--execute-and-mark "SELECT 1;" 1 10)
-            (setq alive nil)
-            (funcall (cdar finishes) nil
-                     '(clutch-db-execution-not-started "connection invalidated"))
-            (let ((debug-on-error nil))
-              (ert-run-idle-timers))
-            (should-not shown)
-            (should (= (length finishes) (if starts 2 1)))
-            (should-not (clutch-db--foreground-busy-p 'async-conn))
-            (should (string-prefix-p
-                     (if starts "Running" "Last failed")
-                     (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
-  (let ((source (generate-new-buffer " *clutch-retry-killed*")))
-    (with-current-buffer source
-      (insert "SELECT 1;")
-      (setq-local clutch-connection 'async-conn))
-    (clutch-test--with-async-statements finishes
-      (let ((alive t))
-        (cl-letf (((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (or alive (not (eq conn 'async-conn)))))
+      (let* ((old (make-clutch-test-conn
+                   :queries (list (cons "stale-plan"
+                                        (lambda (conn)
+                                          (clutch-db-disconnect conn)
+                                          (signal 'clutch-db-execution-not-started
+                                                  '("idle validation failed")))))))
+             (new (make-clutch-test-conn
+                   :queries (list (cons "fresh-plan"
+                                        (make-clutch-db-result :columns ["id"] :rows '((1)))))))
+             (clutch-connection old)
+             prepared-connections)
+        (cl-letf (((symbol-function 'clutch--prepare-row-identity-query)
+                   (lambda (conn sql)
+                     (should (equal sql "SELECT * FROM items"))
+                     (push conn prepared-connections)
+                     '(:sql "fresh-plan")))
                   ((symbol-function 'clutch--try-reconnect)
-                   ;; The reconnect's wait runs a timer that kills the buffer.
-                   (lambda ()
-                     (run-with-timer 0 nil #'kill-buffer source)
-                     (while (buffer-live-p source)
-                       (accept-process-output nil 0.01))
-                     t)))
-          (with-current-buffer source
-            (clutch--execute-and-mark "SELECT 1;" 1 10))
-          (setq alive nil)
-          (funcall (cdar finishes) nil
-                   '(clutch-db-execution-not-started "connection invalidated"))
-          (let ((debug-on-error nil))
-            (ert-run-idle-timers))
-          (should (= (length finishes) 1))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+                   (lambda () (setq clutch-connection new))))
+          (let ((outcome
+                 (clutch-test--await-outcome
+                  (lambda (k)
+                    (clutch--execute-statement
+                     "SELECT * FROM items" old t nil k
+                     '(:row-identity-prep (:sql "stale-plan") :server-pageable nil))))))
+            (should (eq (plist-get outcome :connection) new))
+            (should-not (clutch-test-conn-queries old))
+            (should-not (clutch-test-conn-queries new))
+            (should (equal prepared-connections (list new)))))))
+    (dolist (failing '(reconnect retry))
+      (with-temp-buffer
+        (insert "SELECT 1")
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (let ((alive t) shown)
+            (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                       (lambda (conn) (or alive (not (eq conn async-conn)))))
+                      ((symbol-function 'clutch--try-reconnect)
+                       (lambda ()
+                         (when (eq failing 'reconnect)
+                           (signal 'clutch-db-error '("Connection refused")))
+                         (setq-local clutch-connection new-conn)))
+                      ((symbol-function 'clutch-db-query-async)
+                       (lambda (conn sql callback)
+                         (when (eq conn new-conn)
+                           (error "Dispatch failed"))
+                         (push (cons sql callback) finishes)
+                         t))
+                      ((symbol-function 'clutch-result--display-error)
+                       (lambda (&rest args) (setq shown args) nil)))
+              (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+              (setq alive nil)
+              (funcall (cdar finishes) nil
+                       '(clutch-db-execution-not-started "connection invalidated"))
+              ;; The reply is handled in a timer, outside any command.
+              (let ((debug-on-error nil))
+                (ert-run-idle-timers))
+              (should-not (clutch-db--foreground-busy-p async-conn))
+              (should-not (clutch-db--foreground-busy-p new-conn))
+              (should-not clutch--execution-start-time)
+              (should (string-prefix-p
+                       "Last failed"
+                       (overlay-get clutch--executed-sql-overlay 'help-echo)))
+              (should (string-match-p (if (eq failing 'reconnect)
+                                          "Connection refused"
+                                        "Dispatch failed")
+                                      (format "%S" shown))))))))
+    (pcase-dolist (`(,reconnects ,starts) '((nil t) (t t) (t nil)))
+      (with-temp-buffer
+        (insert "SELECT 1;\nSELECT 2;")
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (let ((source (current-buffer)) (alive t) shown)
+            (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                       (lambda (conn) (or alive (not (eq conn async-conn)))))
+                      ((symbol-function 'clutch--try-reconnect)
+                       ;; The reconnect's wait runs a timer that moves the
+                       ;; buffer to conn-b, and maybe starts SELECT 2 there.
+                       (lambda ()
+                         (let (moved)
+                           (run-with-timer
+                            0 nil (lambda ()
+                                    (with-current-buffer source
+                                      (setq-local clutch-connection conn-b)
+                                      (when starts
+                                        (clutch--execute-and-mark "SELECT 2;" 11 20)))
+                                    (setq moved t)))
+                           (while (not moved)
+                             (accept-process-output nil 0.01)))
+                         (if reconnects
+                             new-conn
+                           (signal 'clutch-db-error '("Reconnect failed")))))
+                      ((symbol-function 'clutch-result--display-error)
+                       (lambda (&rest args) (setq shown args) nil)))
+              (clutch--execute-and-mark "SELECT 1;" 1 10)
+              (setq alive nil)
+              (funcall (cdar finishes) nil
+                       '(clutch-db-execution-not-started "connection invalidated"))
+              (let ((debug-on-error nil))
+                (ert-run-idle-timers))
+              (should-not shown)
+              (should (= (length finishes) (if starts 2 1)))
+              (should-not (clutch-db--foreground-busy-p async-conn))
+              (should (string-prefix-p
+                       (if starts "Running" "Last failed")
+                       (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
+    (let ((source (generate-new-buffer " *clutch-retry-killed*")))
+      (with-current-buffer source
+        (insert "SELECT 1;")
+        (setq-local clutch-connection async-conn))
+      (clutch-test--with-async-statements finishes
+        (let ((alive t))
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or alive (not (eq conn async-conn)))))
+                    ((symbol-function 'clutch--try-reconnect)
+                     ;; The reconnect's wait runs a timer that kills the buffer.
+                     (lambda ()
+                       (run-with-timer 0 nil #'kill-buffer source)
+                       (while (buffer-live-p source)
+                         (accept-process-output nil 0.01))
+                       t)))
+            (with-current-buffer source
+              (clutch--execute-and-mark "SELECT 1;" 1 10))
+            (setq alive nil)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-execution-not-started "connection invalidated"))
+            (let ((debug-on-error nil))
+              (ert-run-idle-timers))
+            (should (= (length finishes) 1))
+            (should-not (clutch-db--foreground-busy-p async-conn))))))))
 
 (defmacro clutch-test--with-async-statements (finishes-var &rest body)
   "Run BODY with statements finishing only when callbacks in FINISHES-VAR run.
-Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR."
+Each started statement pushes (SQL . CALLBACK) onto FINISHES-VAR.
+Use the shared test backend for connection state.  Result classification and
+high-risk prompts have their own tests; UI and transaction hooks run."
   (declare (indent 1) (debug (symbolp body)))
   `(let ((clutch-db--foreground-connections (make-hash-table :test 'eq))
          (clutch--running-queries (make-hash-table :test 'eq))
+         (clutch--execution-refresh-timer nil)
+         (clutch-high-risk-query-confirmation nil)
          (,finishes-var nil))
-     (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_conn) t))
-               ((symbol-function 'clutch-result--check-pending-changes) #'ignore)
-               ((symbol-function 'clutch--update-mode-line) #'ignore)
-               ((symbol-function 'clutch--execution-refresh-start) #'ignore)
-               ((symbol-function 'clutch--confirm-query-execution) #'ignore)
-               ((symbol-function 'clutch-db-result-query-p) #'ignore)
-               ((symbol-function 'clutch--tx-uncertain-p) #'ignore)
-               ((symbol-function 'clutch--record-tx-state-after-query) #'ignore)
-               ((symbol-function 'clutch--note-schema-affecting-query) #'ignore)
-               ((symbol-function 'clutch-db-query-async)
-                (lambda (_conn sql callback)
-                  (push (cons sql callback) ,finishes-var)
-                  t)))
-       ,@body)))
+     (unwind-protect
+         (cl-letf (((symbol-function 'clutch-db-result-query-p) #'ignore)
+                   ((symbol-function 'clutch-db-query-async)
+                    (lambda (_conn sql callback)
+                      (push (cons sql callback) ,finishes-var)
+                      t)))
+           ,@body)
+       (clutch--execution-refresh-stop))))
 
 (ert-deftest clutch-test-statement-waits-for-a-background-request ()
   "A statement sent while background metadata holds the connection waits for it.
 The driver refuses a command on a connection with a request in flight."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (let* ((held t)
-             (probe (lambda (_orig _conn) held)))
-        (advice-add 'clutch-db-request-in-flight-p :around probe)
-        (unwind-protect
-            (progn
-              (run-with-timer 0.2 nil (lambda () (setq held nil)))
-              (clutch--execute-statement "SELECT 1" 'async-conn t nil #'ignore)
-              (should-not held)
-              (should (equal (mapcar #'car finishes) '("SELECT 1"))))
-          (advice-remove 'clutch-db-request-in-flight-p probe))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements finishes
+        (let* ((held t)
+               (probe (lambda (_orig _conn) held)))
+          (advice-add 'clutch-db-request-in-flight-p :around probe)
+          (unwind-protect
+              (progn
+                (run-with-timer 0.2 nil (lambda () (setq held nil)))
+                (clutch--execute-statement "SELECT 1" async-conn t nil #'ignore)
+                (should-not held)
+                (should (equal (mapcar #'car finishes) '("SELECT 1"))))
+            (advice-remove 'clutch-db-request-in-flight-p probe)))))))
 
 (ert-deftest clutch-test-result-context-interruption-keeps-the-successful-reply ()
   "A failed context lookup must not lose a successful asynchronous query.
 An interrupted lookup ran before the activity guard, leaving its timer
 and foreground reservation behind instead of presenting the result."
-  (dolist (failure '(clutch-db-error quit))
-    (with-temp-buffer
-      (setq-local clutch-connection 'async-conn)
-      (clutch-test--with-async-statements finishes
-        (let (presented)
-          (cl-letf (((symbol-function 'clutch-db-resolution-context)
-                     (lambda (_conn) (signal failure '("Context unavailable"))))
-                    ((symbol-function 'clutch--present-statement-outcome)
-                     (lambda (_sql _conn outcome &rest _)
-                       (setq presented outcome))))
-            (clutch--execute "SELECT 1")
-            (funcall (cdar finishes)
-                     (make-clutch-db-result :columns '((:name "value"))
-                                            :rows '((1))) nil)
-            (condition-case nil (ert-run-idle-timers) (quit nil))
-            (should presented)
-            (should (equal (clutch-db-result-rows (plist-get presented :result))
-                           '((1))))
-            (should (eq (plist-get presented :resolution-context) 'unknown))
-            (should-not clutch--execution-start-time)
-            (should (zerop (hash-table-count clutch-db--foreground-connections)))
-            (should (zerop (hash-table-count clutch--running-queries)))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (dolist (failure '(clutch-db-error quit))
+      (with-temp-buffer
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (let (presented)
+            (cl-letf (((symbol-function 'clutch-db-resolution-context)
+                       (lambda (_conn) (signal failure '("Context unavailable"))))
+                      ((symbol-function 'clutch--present-statement-outcome)
+                       (lambda (_sql _conn outcome &rest _)
+                         (setq presented outcome))))
+              (clutch--execute "SELECT 1")
+              (funcall (cdar finishes)
+                       (make-clutch-db-result :columns '((:name "value"))
+                                              :rows '((1))) nil)
+              (condition-case nil (ert-run-idle-timers) (quit nil))
+              (should presented)
+              (should (equal (clutch-db-result-rows (plist-get presented :result))
+                             '((1))))
+              (should (eq (plist-get presented :resolution-context) 'unknown))
+              (should-not clutch--execution-start-time)
+              (should (zerop (hash-table-count clutch-db--foreground-connections)))
+              (should (zerop (hash-table-count clutch--running-queries))))))))))
 
 (ert-deftest clutch-test-quit-in-the-command-loop-cancels-the-running-query ()
   "A quit that reaches the command loop comes back as \\`C-g'.
@@ -2553,37 +2564,39 @@ buffer's query runs, the quit is delivered as the key again, whose
 command cancels the query once.  Another error, a buffer without a
 running query, a buffer where \\`C-g' runs another command and a query
 already being cancelled get no key."
-  (should (advice-function-member-p #'clutch--cancel-running-query-on-quit
-                                    (default-value 'command-error-function)))
-  (with-temp-buffer
-    (clutch-mode)
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements _finishes
-      ;; Only this handler runs, not others on the global value, such as
-      ;; Transient's while a menu is open.
-      (let ((command-error-function #'ignore)
-            unread-command-events interrupts)
-        (add-function :after command-error-function
-                      #'clutch--cancel-running-query-on-quit)
-        (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                   (lambda (conn) (push conn interrupts) t)))
-          (clutch--run-db-query-async 'async-conn "SELECT 1" nil #'ignore)
-          (funcall command-error-function '(error "Other") "" nil)
-          (with-temp-buffer
-            (funcall command-error-function '(quit) "" nil))
-          (with-temp-buffer
-            (setq-local clutch-connection 'other-conn)
-            (clutch--run-db-query-async 'other-conn "SELECT 2" nil #'ignore)
-            (funcall command-error-function '(quit) "" nil))
-          (should-not unread-command-events)
-          (funcall command-error-function '(quit) "" nil)
-          (should (equal unread-command-events '(?\C-g)))
-          ;; The command loop reads it as the key.
-          (call-interactively
-           (key-binding (vector (pop unread-command-events))))
-          (should (equal interrupts '(async-conn)))
-          (funcall command-error-function '(quit) "" nil)
-          (should-not unread-command-events))))))
+  (let ((async-conn (make-clutch-test-conn))
+        (other-conn (make-clutch-test-conn)))
+    (should (advice-function-member-p #'clutch--cancel-running-query-on-quit
+                                      (default-value 'command-error-function)))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements _finishes
+        ;; Only this handler runs, not others on the global value, such as
+        ;; Transient's while a menu is open.
+        (let ((command-error-function #'ignore)
+              unread-command-events interrupts)
+          (add-function :after command-error-function
+                        #'clutch--cancel-running-query-on-quit)
+          (cl-letf (((symbol-function 'clutch-db-interrupt-query)
+                     (lambda (conn) (push conn interrupts) t)))
+            (clutch--run-db-query-async async-conn "SELECT 1" nil #'ignore)
+            (funcall command-error-function '(error "Other") "" nil)
+            (with-temp-buffer
+              (funcall command-error-function '(quit) "" nil))
+            (with-temp-buffer
+              (setq-local clutch-connection other-conn)
+              (clutch--run-db-query-async other-conn "SELECT 2" nil #'ignore)
+              (funcall command-error-function '(quit) "" nil))
+            (should-not unread-command-events)
+            (funcall command-error-function '(quit) "" nil)
+            (should (equal unread-command-events '(?\C-g)))
+            ;; The command loop reads it as the key.
+            (call-interactively
+             (key-binding (vector (pop unread-command-events))))
+            (should (equal interrupts (list async-conn)))
+            (funcall command-error-function '(quit) "" nil)
+            (should-not unread-command-events)))))))
 
 (ert-deftest clutch-test-indirect-execute-runs-in-a-buffer-holding-its-connection ()
   "SQL from an indirect edit should run in a buffer that holds its connection.
@@ -2719,53 +2732,51 @@ reconnecting from it failed with \"Connection params require :backend\"."
 Drawing it put the old connection's error page in the result buffer that the
 buffer's new connection names, and bound that buffer to the old connection.
 Nor does it mark its statement over one the buffer now runs."
-  (with-temp-buffer
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (let ((a-alive t) rendered messages)
-        (cl-letf (((symbol-function 'clutch--connection-key)
-                   (lambda (conn) (if conn (symbol-name conn) "none")))
-                  ((symbol-function 'clutch--connection-alive-p)
-                   (lambda (conn) (or a-alive (not (eq conn 'conn-a)))))
-                  ((symbol-function 'clutch--retire-query-connection) #'ignore)
-                  ((symbol-function 'clutch-result--display-error)
-                   (lambda (&rest _) (setq rendered t) nil))
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch--execute "UPDATE t SET n = 1 WHERE id = 1")
-          ;; Disconnected and connected elsewhere while the reply waits.
-          (setq a-alive nil)
-          (setq-local clutch-connection 'conn-b)
-          (funcall (cdar finishes) nil
-                   '(clutch-db-error
-                     "Disconnected while the statement ran; its outcome is unknown"))
+  (let ((conn-a (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (let ((a-alive t) rendered messages)
+          (cl-letf (((symbol-function 'clutch--connection-alive-p)
+                     (lambda (conn) (or a-alive (not (eq conn conn-a)))))
+                    ((symbol-function 'clutch--retire-query-connection) #'ignore)
+                    ((symbol-function 'clutch-result--display-error)
+                     (lambda (&rest _) (setq rendered t) nil))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch--execute "UPDATE t SET n = 1 WHERE id = 1")
+            ;; Disconnected and connected elsewhere while the reply waits.
+            (setq a-alive nil)
+            (setq-local clutch-connection conn-b)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-error
+                       "Disconnected while the statement ran; its outcome is unknown"))
+            (ert-run-idle-timers)
+            (should-not rendered)
+            (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
+                             messages))
+            (should-not (clutch-db--foreground-busy-p conn-a))))))
+    (with-temp-buffer
+      (insert "SELECT 1;\nSELECT 2;")
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (clutch--execute-and-mark "SELECT 1;" 1 10)
+          (setq-local clutch-connection conn-b)
+          (clutch--execute-and-mark "SELECT 2;" 11 20)
+          ;; conn-a answers while the buffer runs SELECT 2 on conn-b.
+          (funcall (cdr (car (last finishes)))
+                   (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
-          (should-not rendered)
-          (should (cl-some (lambda (text) (string-match-p "outcome is unknown" text))
-                           messages))
-          (should-not (clutch-db--foreground-busy-p 'conn-a))))))
-  (with-temp-buffer
-    (insert "SELECT 1;\nSELECT 2;")
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch--connection-key)
-                 (lambda (conn) (if conn (symbol-name conn) "none")))
-                ((symbol-function 'message) #'ignore))
-        (clutch--execute-and-mark "SELECT 1;" 1 10)
-        (setq-local clutch-connection 'conn-b)
-        (clutch--execute-and-mark "SELECT 2;" 11 20)
-        ;; conn-a answers while the buffer runs SELECT 2 on conn-b.
-        (funcall (cdr (car (last finishes)))
-                 (make-clutch-db-result :affected-rows 1) nil)
-        (ert-run-idle-timers)
-        (should (string-prefix-p
-                 "Running"
-                 (overlay-get clutch--executed-sql-overlay 'help-echo)))
-        (should (equal (buffer-substring-no-properties
-                        (overlay-start clutch--executed-sql-overlay)
-                        (overlay-end clutch--executed-sql-overlay))
-                       "SELECT 2;"))))))
+          (should (string-prefix-p
+                   "Running"
+                   (overlay-get clutch--executed-sql-overlay 'help-echo)))
+          (should (equal (buffer-substring-no-properties
+                          (overlay-start clutch--executed-sql-overlay)
+                          (overlay-end clutch--executed-sql-overlay))
+                         "SELECT 2;")))))))
 
 (ert-deftest clutch-test-redis-select-moves-the-session-to-its-database ()
   "A Redis SELECT should move the session to the database it selects.
@@ -2776,17 +2787,19 @@ cached keys and their metadata stayed that database's."
   (with-temp-buffer
     ;; The client reports the database that the SELECT moves it to, as
     ;; redis.el does once the server accepts it.
-    (let ((conn (make-clutch-redis-conn :client (make-redis-conn :database "1")))
+    (let ((conn (make-clutch-redis-conn :client (make-redis-conn :database "0")))
           primed)
       (setq-local clutch-connection conn)
       (setq-local clutch--connection-params '(:backend redis :database 0))
       (clutch-test--with-async-statements finishes
         (let ((clutch--schema-cache (make-hash-table :test 'eq)))
           (puthash conn 'keys-of-database-0 clutch--schema-cache)
-          (cl-letf (((symbol-function 'clutch-result--display-select) #'ignore)
+          (cl-letf (((symbol-function 'redis-live-p) (lambda (_client) t))
+                    ((symbol-function 'clutch-result--display-select) #'ignore)
                     ((symbol-function 'clutch--prime-schema-cache)
                      (lambda (connection) (setq primed connection))))
             (clutch--execute "SELECT 1")
+            (setf (redis-conn-database (clutch-redis-conn-client conn)) "1")
             (funcall (cdar finishes)
                      (make-clutch-db-result :columns '((:name "value"))
                                             :rows '(("OK")))
@@ -2850,184 +2863,151 @@ the cached tables of the database left."
         (should (equal (plist-get clutch--connection-params :search-path)
                        "main"))))))
 
-(ert-deftest clutch-test-transaction-commands-follow-the-namespace-back ()
-  "Ending a transaction from a command should follow the namespace back.
-PostgreSQL undoes a search_path set inside a transaction that rolls back,
-but the console stayed on it after `clutch-rollback', and after a commit or
-a switch to auto-commit that ended a SET LOCAL.  The follow-up runs once
-the transaction has ended, against the namespace shown before."
-  (with-temp-buffer
-    (setq-local clutch-connection (make-clutch-test-conn :commit-mode 'manual))
-    (setq-local clutch--connection-render-state '(:namespace "alt"))
-    (let (events)
-      (cl-letf (((symbol-function 'clutch--ensure-transaction-connection) #'ignore)
-                ((symbol-function 'clutch--tx-uncertain-p) #'ignore)
-                ((symbol-function 'clutch--tx-unresolved-p) #'ignore)
-                ((symbol-function 'clutch-db-rollback)
-                 (lambda (_conn) (push 'rollback events)))
-                ((symbol-function 'clutch-db-commit)
-                 (lambda (_conn) (push 'commit events) nil))
-                ((symbol-function 'clutch-db-set-auto-commit)
-                 (lambda (_conn _auto) (push 'auto-commit events)))
-                ((symbol-function 'clutch--mark-dml-results-rolled-back) #'ignore)
-                ((symbol-function 'clutch--mark-dml-results-committed) #'ignore)
-                ((symbol-function 'clutch--clear-tx-state) #'ignore)
-                ((symbol-function 'message) #'ignore)
-                ((symbol-function 'clutch-db-namespace-switch-p)
-                 (lambda (_conn sql) (push sql events) t))
-                ((symbol-function 'clutch--note-namespace-switch)
-                 (lambda (_conn before) (push (list 'follow before) events))))
-        (clutch-rollback)
-        (clutch-commit)
-        (clutch-toggle-auto-commit)
-        (should (equal (nreverse events)
-                       '(rollback "ROLLBACK" (follow ("alt" nil))
-                         commit "COMMIT" (follow ("alt" nil))
-                         auto-commit "COMMIT" (follow ("alt" nil)))))))))
-
 (ert-deftest clutch-test-repl-reply-after-the-repl-moved-draws-no-result ()
   "A REPL statement's reply after the REPL left its connection draws no result.
 Showing the SELECT put the old connection's rows in the result buffer that
 the REPL's new connection names, bound to the old connection."
-  (with-temp-buffer
-    (setq-local clutch-connection 'conn-a)
-    (clutch-test--with-async-statements finishes
-      (let (displayed output)
-        (cl-letf (((symbol-function 'clutch--connection-key)
-                   (lambda (conn) (if conn (symbol-name conn) "none")))
-                  ((symbol-function 'clutch-result--display-select)
-                   (lambda (&rest _) (setq displayed t)))
-                  ((symbol-function 'clutch-repl--output)
-                   (lambda (text) (push text output)))
-                  ((symbol-function 'message) #'ignore))
-          (clutch-repl--execute-and-print "SELECT 1")
-          (setq-local clutch-connection 'conn-b)
-          (funcall (cdar finishes)
-                   (make-clutch-db-result :columns '((:name "1")) :rows '((1)))
-                   nil)
-          (ert-run-idle-timers)
-          (should-not displayed)
-          (should (string-match-p "not shown" (car output))))))))
+  (let ((conn-a (make-clutch-test-conn))
+        (conn-b (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection conn-a)
+      (clutch-test--with-async-statements finishes
+        (let (displayed output)
+          (cl-letf (((symbol-function 'clutch-result--display-select)
+                     (lambda (&rest _) (setq displayed t)))
+                    ((symbol-function 'clutch-repl--output)
+                     (lambda (text) (push text output)))
+                    ((symbol-function 'message) #'ignore))
+            (clutch-repl--execute-and-print "SELECT 1")
+            (setq-local clutch-connection conn-b)
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns '((:name "1")) :rows '((1)))
+                     nil)
+            (ert-run-idle-timers)
+            (should-not displayed)
+            (should (string-match-p "not shown" (car output)))))))))
 
 (ert-deftest clutch-test-async-execute-presents-after-completion ()
   "An asynchronous statement should hold its connection until it finishes.
 Its marker shows that it ran even when presenting its result fails."
-  (with-temp-buffer
-    (insert "UPDATE t SET n = 1 WHERE id = 1")
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (let (displayed)
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (insert "UPDATE t SET n = 1 WHERE id = 1")
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements finishes
+        (let (displayed)
+          (cl-letf (((symbol-function 'clutch-result--display)
+                     (lambda (result _sql _elapsed) (setq displayed result))))
+            (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
+            (should (equal (mapcar #'car finishes) (list (buffer-string))))
+            (should (clutch-db--foreground-busy-p async-conn))
+            (should (string-prefix-p
+                     "Running"
+                     (overlay-get clutch--executed-sql-overlay 'help-echo)))
+            (should (eq (overlay-get clutch--executed-sql-overlay 'face)
+                        'clutch-running-sql-face))
+            (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+            (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))
+            (should-error (clutch--execute "SELECT 2") :type 'user-error)
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (should-not displayed)
+            (ert-run-idle-timers)
+            (should (= (clutch-db-result-affected-rows displayed) 1))
+            (should-not (gethash async-conn clutch--running-queries))
+            (should-not (clutch-db--foreground-busy-p async-conn))
+            (should-not clutch--execution-start-time)
+            (should (string-prefix-p
+                     "Last executed"
+                     (overlay-get clutch--executed-sql-overlay 'help-echo)))
+            (should-not (overlay-get clutch--executed-sql-overlay 'face))
+            (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
+            (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))))))
+    (with-temp-buffer
+      (insert "UPDATE t SET n = 1 WHERE id = 1")
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements finishes
         (cl-letf (((symbol-function 'clutch-result--display)
-                   (lambda (result _sql _elapsed) (setq displayed result))))
+                   (lambda (&rest _) (error "Presenting failed"))))
           (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
-          (should (equal (mapcar #'car finishes) (list (buffer-string))))
-          (should (clutch-db--foreground-busy-p 'async-conn))
-          (should (string-prefix-p
-                   "Running"
-                   (overlay-get clutch--executed-sql-overlay 'help-echo)))
-          (should (eq (overlay-get clutch--executed-sql-overlay 'face)
-                      'clutch-running-sql-face))
-          (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
-          (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))
-          (should-error (clutch--execute "SELECT 2") :type 'user-error)
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (should-not displayed)
-          (ert-run-idle-timers)
-          (should (= (clutch-db-result-affected-rows displayed) 1))
-          (should-not (gethash 'async-conn clutch--running-queries))
-          (should-not (clutch-db--foreground-busy-p 'async-conn))
-          (should-not clutch--execution-start-time)
+          ;; The error then ends the timer, as it would outside a test.
+          (let ((debug-on-error nil))
+            (ert-run-idle-timers))
           (should (string-prefix-p
                    "Last executed"
-                   (overlay-get clutch--executed-sql-overlay 'help-echo)))
-          (should-not (overlay-get clutch--executed-sql-overlay 'face))
-          (should (= (overlay-start clutch--executed-sql-overlay) (point-min)))
-          (should (= (overlay-end clutch--executed-sql-overlay) (point-max)))))))
-  (with-temp-buffer
-    (insert "UPDATE t SET n = 1 WHERE id = 1")
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-result--display)
-                 (lambda (&rest _) (error "Presenting failed"))))
-        (clutch--execute-and-mark (buffer-string) (point-min) (point-max))
-        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-        ;; The error then ends the timer, as it would outside a test.
-        (let ((debug-on-error nil))
-          (ert-run-idle-timers))
-        (should (string-prefix-p
-                 "Last executed"
-                 (overlay-get clutch--executed-sql-overlay 'help-echo)))))))
+                   (overlay-get clutch--executed-sql-overlay 'help-echo))))))))
 
 (ert-deftest clutch-test-page-load-keeps-result-until-it-succeeds ()
   "A page load should leave the page, its sort and staging until it succeeds.
 It runs without blocking, staging waits for it, and a failure leaves the
 result as it was.  So does \[clutch-cancel-query-or-quit], also when the
 backend refuses the cancel or fails to send it and the page then arrives."
-  (clutch-test--with-result-state
-      (:columns '("id" "name")
-       :rows '((1 "a") (2 "b"))
-       :connection 'async-conn
-       :base-query "SELECT id, name FROM t"
-       :server-pageable t
-       :server-rewritable t)
-    (clutch-test--with-async-statements finishes
-      (let (messages)
-        (cl-letf (((symbol-function 'clutch-db-sql-surface-p) (lambda (&rest _) t))
-                  ((symbol-function 'clutch-db-build-paged-sql)
-                   (lambda (&rest _) "SELECT id, name FROM t ORDER BY name DESC"))
-                  ((symbol-function 'clutch--refresh-display) #'ignore)
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch-result--sort "name" t)
-          (should (= (length finishes) 1))
-          (should-not clutch--sort-column)
-          (should-not clutch--order-by)
-          (should (equal clutch--result-rows '((1 "a") (2 "b"))))
-          (should (string-match-p
-                   "A query is running"
-                   (error-message-string
-                    (should-error (clutch-edit--require-sql-staged-mutation
-                                   "Edit / re-edit")
-                                  :type 'user-error))))
-          ;; An edit opened before the page load cannot be staged either.
-          (should (string-match-p
-                   "A query is running"
-                   (error-message-string
-                    (should-error (clutch-result--apply-edit
-                                   0 1 "z" (list :identity [1] :original "a"
-                                                 :original-state (cons nil "a")))
-                                  :type 'user-error))))
-          (funcall (cdar finishes) nil '(clutch-db-error "relation does not exist"))
-          (ert-run-idle-timers)
-          (should-not clutch--sort-column)
-          (should-not clutch--order-by)
-          (should (equal clutch--result-rows '((1 "a") (2 "b"))))
-          (should (string-suffix-p "(result unchanged)" (car messages)))
-          (clutch-result--sort "name" t)
-          (funcall (cdar finishes)
-                   (make-clutch-db-result :columns clutch--result-column-defs
-                                          :rows '((2 "b") (1 "a")))
-                   nil)
-          (ert-run-idle-timers)
-          (should (equal clutch--sort-column "name"))
-          (should (equal clutch--order-by '("name" . "DESC")))
-          (should (equal clutch--result-rows '((2 "b") (1 "a"))))
-          (should (equal (car messages) "Sorted by name DESC"))
-          (dolist (interrupt (list #'ignore
-                                   (lambda (_conn)
-                                     (signal 'clutch-db-error '("cancel failed")))))
-            (cl-letf (((symbol-function 'clutch-db-interrupt-query) interrupt))
-              (clutch-result--sort "name" nil)
-              (clutch-cancel-query-or-quit)
-              (funcall (cdar finishes)
-                       (make-clutch-db-result :columns clutch--result-column-defs
-                                              :rows '((1 "a") (2 "b")))
-                       nil)
-              (ert-run-idle-timers)
-              (should (equal clutch--order-by '("name" . "DESC")))
-              (should (equal clutch--result-rows '((2 "b") (1 "a"))))
-              (should (string-suffix-p "(result unchanged)" (car messages))))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (clutch-test--with-result-state
+        (:columns '("id" "name")
+                  :rows '((1 "a") (2 "b"))
+                  :connection async-conn
+                  :base-query "SELECT id, name FROM t"
+                  :server-pageable t
+                  :server-rewritable t)
+      (clutch-test--with-async-statements finishes
+        (let (messages)
+          (cl-letf (((symbol-function 'clutch-db-sql-surface-p) (lambda (&rest _) t))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (&rest _) "SELECT id, name FROM t ORDER BY name DESC"))
+                    ((symbol-function 'clutch--refresh-display) #'ignore)
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch-result--sort "name" t)
+            (should (= (length finishes) 1))
+            (should-not clutch--sort-column)
+            (should-not clutch--order-by)
+            (should (equal clutch--result-rows '((1 "a") (2 "b"))))
+            (should (string-match-p
+                     "A query is running"
+                     (error-message-string
+                      (should-error (clutch-edit--require-sql-staged-mutation
+                                     "Edit / re-edit")
+                                    :type 'user-error))))
+            ;; An edit opened before the page load cannot be staged either.
+            (should (string-match-p
+                     "A query is running"
+                     (error-message-string
+                      (should-error (clutch-result--apply-edit
+                                     0 1 "z" (list :identity [1] :original "a"
+                                                   :original-state (cons nil "a")))
+                                    :type 'user-error))))
+            (funcall (cdar finishes) nil '(clutch-db-error "relation does not exist"))
+            (ert-run-idle-timers)
+            (should-not clutch--sort-column)
+            (should-not clutch--order-by)
+            (should (equal clutch--result-rows '((1 "a") (2 "b"))))
+            (should (string-suffix-p "(result unchanged)" (car messages)))
+            (clutch-result--sort "name" t)
+            (funcall (cdar finishes)
+                     (make-clutch-db-result :columns clutch--result-column-defs
+                                            :rows '((2 "b") (1 "a")))
+                     nil)
+            (ert-run-idle-timers)
+            (should (equal clutch--sort-column "name"))
+            (should (equal clutch--order-by '("name" . "DESC")))
+            (should (equal clutch--result-rows '((2 "b") (1 "a"))))
+            (should (equal (car messages) "Sorted by name DESC"))
+            (dolist (interrupt (list #'ignore
+                                     (lambda (_conn)
+                                       (signal 'clutch-db-error '("cancel failed")))))
+              (cl-letf (((symbol-function 'clutch-db-interrupt-query) interrupt))
+                (clutch-result--sort "name" nil)
+                (clutch-cancel-query-or-quit)
+                (funcall (cdar finishes)
+                         (make-clutch-db-result :columns clutch--result-column-defs
+                                                :rows '((1 "a") (2 "b")))
+                         nil)
+                (ert-run-idle-timers)
+                (should (equal clutch--order-by '("name" . "DESC")))
+                (should (equal clutch--result-rows '((2 "b") (1 "a"))))
+                (should (string-suffix-p "(result unchanged)" (car messages)))))))))))
 
 (ert-deftest clutch-test-page-load-leaves-a-result-of-another-connection ()
   "A page that arrives once its buffer shows another connection's result is dropped.
@@ -3035,31 +3015,32 @@ Showing it there would pair one database's rows with another's connection,
 and an edit would then change the other database by the first one's keys.
 A failure is dropped too: its error page would replace that result and bind
 the buffer to the closed connection."
-  (dolist (reply (list (list (make-clutch-db-result :rows '((3) (4))) nil)
-                       (list nil '(clutch-db-error "connection closed"))))
-    (clutch-test--with-result-state
-        (:columns '("id") :rows '((1) (2)) :connection 'async-conn
-         :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
-      (clutch-test--with-async-statements finishes
-        (let (shown)
-          (cl-letf (((symbol-function 'clutch--ensure-connection) #'ignore)
-                    ((symbol-function 'clutch-db-build-paged-sql)
-                     (lambda (&rest _) "SELECT id FROM t PAGE 1"))
-                    ((symbol-function 'clutch--connection-alive-p)
-                     (lambda (conn) (not (eq conn 'async-conn))))
-                    ((symbol-function 'clutch--show-execution-error)
-                     (lambda (&rest _) (setq shown t) "failed"))
-                    ((symbol-function 'clutch--refresh-display) #'ignore)
-                    ((symbol-function 'message) #'ignore))
-            (clutch-result--execute-page 1)
-            (apply (cdar finishes) reply)
-            ;; Before the reply is handled, the buffer shows another result.
-            (setq-local clutch-connection 'other-conn
-                        clutch--result-rows '((10) (20)))
-            (ert-run-idle-timers)
-            (should-not shown)
-            (should (equal clutch--result-rows '((10) (20))))
-            (should (eq clutch-connection 'other-conn))))))))
+  (let ((async-conn (make-clutch-test-conn))
+        (other-conn (make-clutch-test-conn)))
+    (dolist (reply (list (list (make-clutch-db-result :rows '((3) (4))) nil)
+                         (list nil '(clutch-db-error "connection closed"))))
+      (setf (clutch-test-conn-live async-conn) t)
+      (clutch-test--with-result-state
+          (:columns '("id") :rows '((1) (2)) :connection async-conn
+                    :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+        (clutch-test--with-async-statements finishes
+          (let (shown)
+            (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                       (lambda (&rest _) "SELECT id FROM t PAGE 1"))
+                      ((symbol-function 'clutch--show-execution-error)
+                       (lambda (&rest _) (setq shown t) "failed"))
+                      ((symbol-function 'clutch--refresh-display) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result--execute-page 1)
+              (setf (clutch-test-conn-live async-conn) nil)
+              (apply (cdar finishes) reply)
+              ;; Before the reply is handled, the buffer shows another result.
+              (setq-local clutch-connection other-conn
+                          clutch--result-rows '((10) (20)))
+              (ert-run-idle-timers)
+              (should-not shown)
+              (should (equal clutch--result-rows '((10) (20))))
+              (should (eq clutch-connection other-conn)))))))))
 
 (ert-deftest clutch-test-query-activity-reply-needs-its-buffer-on-its-connection ()
   "A reply should reach its handler only while its buffer holds its connection.
@@ -3107,220 +3088,227 @@ it and says so; a handler that exits nonlocally ends it too."
   "Ending a query activity should leave the time of a later one in its buffer.
 A page load that ends after its buffer moved to another connection and
 started loading a page there cleared the time of that running load."
-  (clutch-test--with-result-state
-      (:columns '("id") :rows '((1) (2)) :connection 'async-conn
-       :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
-                 (lambda (&rest _) "SELECT id FROM t PAGE 1"))
-                ((symbol-function 'clutch--refresh-display) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result--execute-page 1)
-        (funcall (cdar finishes) nil '(clutch-db-error "connection closed"))
-        (setq-local clutch-connection 'other-conn)
-        (clutch-result--execute-page 1)
-        (ert-run-idle-timers)
-        (should (gethash 'other-conn clutch--running-queries))
-        (should clutch--execution-start-time)
-        (funcall (cdar finishes)
-                 (make-clutch-db-result :columns clutch--result-column-defs
-                                        :rows '((3) (4)))
-                 nil)
-        (ert-run-idle-timers)
-        (should-not clutch--execution-start-time)))))
+  (let ((async-conn (make-clutch-test-conn))
+        (other-conn (make-clutch-test-conn)))
+    (clutch-test--with-result-state
+        (:columns '("id") :rows '((1) (2)) :connection async-conn
+                  :base-query "SELECT id FROM t" :server-pageable t :result-max-rows 2)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-db-build-paged-sql)
+                   (lambda (&rest _) "SELECT id FROM t PAGE 1"))
+                  ((symbol-function 'clutch--refresh-display) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (clutch-result--execute-page 1)
+          (funcall (cdar finishes) nil '(clutch-db-error "connection closed"))
+          (setq-local clutch-connection other-conn)
+          (clutch-result--execute-page 1)
+          (ert-run-idle-timers)
+          (should (gethash other-conn clutch--running-queries))
+          (should clutch--execution-start-time)
+          (funcall (cdar finishes)
+                   (make-clutch-db-result :columns clutch--result-column-defs
+                                          :rows '((3) (4)))
+                   nil)
+          (ert-run-idle-timers)
+          (should-not clutch--execution-start-time))))))
 
 (ert-deftest clutch-test-last-page-counts-rows-first ()
   "The last page of an uncounted result should load once the count arrives.
 C-g during the count of a last-page move should stop the page load.
 The cancel may meet a count that has already finished; the move stops
 there, and the result keeps its rows and its unknown total."
-  (pcase-dolist (`(,cancel ,sent ,total)
-                 '((nil ("SELECT id FROM t PAGE 2" "SELECT count(*) FROM t") 5)
-                   (t ("SELECT count(*) FROM t") nil)))
-    (ert-info ((format "cancelled: %s" cancel))
-      (clutch-test--with-result-state
-          (:columns '("id") :rows '((1) (2)) :connection 'async-conn
-           :base-query "SELECT id FROM t" :server-pageable t :server-rewritable t
-           :page-total-rows nil :result-max-rows 2)
-        (clutch-test--with-async-statements finishes
-          (cl-letf (((symbol-function 'clutch-db-build-count-sql)
-                     (lambda (&rest _) "SELECT count(*) FROM t"))
-                    ((symbol-function 'clutch-db-build-paged-sql)
-                     (lambda (_conn _sql page-num &rest _)
-                       (format "SELECT id FROM t PAGE %d" page-num)))
-                    ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
-                    ((symbol-function 'clutch--refresh-display) #'ignore)
-                    ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                    ((symbol-function 'message) #'ignore))
-            (clutch-result-last-page)
-            (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
-            (when cancel
-              (clutch-cancel-query-or-quit))
-            (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
-            (ert-run-idle-timers)
-            (should (equal (mapcar #'car finishes) sent))
-            (should (equal clutch--page-total-rows total))
-            (should (equal clutch--result-rows '((1) (2))))
-            (if cancel
-                (should-not (clutch-db--foreground-busy-p 'async-conn))
-              ;; The page load counts its own time once the count's has ended.
-              (should clutch--execution-start-time))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (pcase-dolist (`(,cancel ,sent ,total)
+                   '((nil ("SELECT id FROM t PAGE 2" "SELECT count(*) FROM t") 5)
+                     (t ("SELECT count(*) FROM t") nil)))
+      (ert-info ((format "cancelled: %s" cancel))
+        (clutch-test--with-result-state
+            (:columns '("id") :rows '((1) (2)) :connection async-conn
+                      :base-query "SELECT id FROM t" :server-pageable t :server-rewritable t
+                      :page-total-rows nil :result-max-rows 2)
+          (clutch-test--with-async-statements finishes
+            (cl-letf (((symbol-function 'clutch-db-build-count-sql)
+                       (lambda (&rest _) "SELECT count(*) FROM t"))
+                      ((symbol-function 'clutch-db-build-paged-sql)
+                       (lambda (_conn _sql page-num &rest _)
+                         (format "SELECT id FROM t PAGE %d" page-num)))
+                      ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t))
+                      ((symbol-function 'clutch--refresh-display) #'ignore)
+                      ((symbol-function 'clutch--refresh-footer-line) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (clutch-result-last-page)
+              (should (equal (mapcar #'car finishes) '("SELECT count(*) FROM t")))
+              (when cancel
+                (clutch-cancel-query-or-quit))
+              (funcall (cdar finishes) (make-clutch-db-result :rows '((5))) nil)
+              (ert-run-idle-timers)
+              (should (equal (mapcar #'car finishes) sent))
+              (should (equal clutch--page-total-rows total))
+              (should (equal clutch--result-rows '((1) (2))))
+              (if cancel
+                  (should-not (clutch-db--foreground-busy-p async-conn))
+                ;; The page load counts its own time once the count's has ended.
+                (should clutch--execution-start-time)))))))))
 
 (ert-deftest clutch-test-async-execute-drops-outcome-of-killed-buffer ()
   "A statement finishing after its buffer is killed should only be reported."
-  (let ((buffer (generate-new-buffer " *clutch-async-source*"))
-        messages displayed)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-result--display)
-                 (lambda (&rest _args) (setq displayed t)))
-                ((symbol-function 'message)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) messages))))
-        (with-current-buffer buffer
-          (setq-local clutch-connection 'async-conn)
-          (clutch--execute "UPDATE t SET n = 1 WHERE id = 1"))
-        (kill-buffer buffer)
-        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-        (ert-run-idle-timers)
-        (should-not displayed)
-        (should (member "Query finished after its buffer was killed" messages))
-        (should-not (gethash 'async-conn clutch--running-queries))
-        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (let ((buffer (generate-new-buffer " *clutch-async-source*"))
+          messages displayed)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'clutch-result--display)
+                   (lambda (&rest _args) (setq displayed t)))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (with-current-buffer buffer
+            (setq-local clutch-connection async-conn)
+            (clutch--execute "UPDATE t SET n = 1 WHERE id = 1"))
+          (kill-buffer buffer)
+          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+          (ert-run-idle-timers)
+          (should-not displayed)
+          (should (member "Query finished after its buffer was killed" messages))
+          (should-not (gethash async-conn clutch--running-queries))
+          (should-not (clutch-db--foreground-busy-p async-conn)))))))
 
 (ert-deftest clutch-test-batch-redisplays-once-per-interval ()
   "A batch draws its first statement at once, then at most once per interval.
 Each forced redisplay costs milliseconds, and two per statement made up
 half the run time of a script of thousands of short statements.  The clock
 is controlled, so the result does not depend on the speed of the machine."
-  (with-temp-buffer
-    (dotimes (i 4)
-      (insert (format "UPDATE t SET n = %d;\n" i)))
-    (setq-local clutch-connection 'async-conn)
-    (let ((now 1000.0)
-          (redisplays 0))
-      (clutch-test--with-async-statements finishes
-        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
-                  ((symbol-function 'message) #'ignore)
-                  ((symbol-function 'float-time) (lambda (&rest _) now))
-                  ((symbol-function 'redisplay)
-                   (lambda (&rest _) (cl-incf redisplays))))
-          (cl-flet ((finish ()
-                      (funcall (cdar finishes)
-                               (make-clutch-db-result :affected-rows 1) nil)
-                      (ert-run-idle-timers)))
-            (clutch--execute-statements
-             (clutch--split-statement-specs (buffer-string) (point-min)))
-            ;; The activity redisplays once itself, and the first statement
-            ;; is drawn at once.
-            (should (= redisplays 2))
-            ;; Within the interval the next statements draw nothing.
-            (finish)
-            (finish)
-            (should (= redisplays 2))
-            ;; Once it has passed, the next statement draws again.
-            (setq now (+ now 1.0))
-            (finish)
-            (should (= redisplays 3))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (dotimes (i 4)
+        (insert (format "UPDATE t SET n = %d;\n" i)))
+      (setq-local clutch-connection async-conn)
+      (let ((now 1000.0)
+            (redisplays 0))
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                    ((symbol-function 'message) #'ignore)
+                    ((symbol-function 'float-time) (lambda (&rest _) now))
+                    ((symbol-function 'redisplay)
+                     (lambda (&rest _) (cl-incf redisplays))))
+            (cl-flet ((finish ()
+                        (funcall (cdar finishes)
+                                 (make-clutch-db-result :affected-rows 1) nil)
+                        (ert-run-idle-timers)))
+              (clutch--execute-statements
+               (clutch--split-statement-specs (buffer-string) (point-min)))
+              ;; The activity redisplays once itself, and the first statement
+              ;; is drawn at once.
+              (should (= redisplays 2))
+              ;; Within the interval the next statements draw nothing.
+              (finish)
+              (finish)
+              (should (= redisplays 2))
+              ;; Once it has passed, the next statement draws again.
+              (setq now (+ now 1.0))
+              (finish)
+              (should (= redisplays 3)))))))))
 
 (ert-deftest clutch-test-batch-markers-stay-on-their-statement-lines ()
   "Each statement of a batch is marked on its own line.
 A comment after the previous semicolon used to pull the marker, and the
 text sent, onto the line above."
-  (with-temp-buffer
-    (insert "UPDATE a SET n = 1; -- first\nUPDATE b SET n = 2; -- second\n")
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch--execute-statements
-         (clutch--split-statement-specs (buffer-string) (point-min)))
-        (should (equal (mapcar #'car finishes) '("UPDATE a SET n = 1")))
-        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-        (ert-run-idle-timers)
-        (should (equal (mapcar #'car finishes)
-                       '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
-        (should (= (line-number-at-pos
-                    (overlay-start clutch--executed-sql-overlay))
-                   2))
-        (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-        (ert-run-idle-timers)
-        (should (= (line-number-at-pos
-                    (overlay-start clutch--executed-sql-overlay))
-                   2))))))
-
-(ert-deftest clutch-test-async-markers-follow-edits-while-running ()
-  "Status markers should stay on their statement while the buffer is edited.
-While it runs or is being cancelled, its background covers just its text.
-A statement deleted while it runs leaves no marker behind."
-  (cl-flet ((marker-line ()
-              (save-excursion
-                (goto-char (overlay-start clutch--executed-sql-overlay))
-                (buffer-substring-no-properties
-                 (line-beginning-position) (line-end-position))))
-            (marked-text ()
-              (buffer-substring-no-properties
-               (overlay-start clutch--executed-sql-overlay)
-               (overlay-end clutch--executed-sql-overlay))))
+  (let ((async-conn (make-clutch-test-conn)))
     (with-temp-buffer
-      (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
-      (setq-local clutch-connection 'async-conn)
-      (clutch-test--with-async-statements finishes
-        (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
-                  ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t)))
-          (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
-          (goto-char (point-min))
-          (insert "-- typed while it runs\n")
-          (save-excursion
-            (goto-char (overlay-start clutch--executed-sql-overlay))
-            (insert "-- typed at its start\n"))
-          (should (equal (marked-text) "UPDATE t SET n = 1;"))
-          (clutch-cancel-query-or-quit)
-          (should (equal (marker-line) "UPDATE t SET n = 1;"))
-          (should (equal (marked-text) "UPDATE t SET n = 1;"))
-          (should (eq (overlay-get clutch--executed-sql-overlay 'face)
-                      'clutch-cancelling-sql-face))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (ert-run-idle-timers)
-          (should (equal (marker-line) "UPDATE t SET n = 1;")))))
-    (with-temp-buffer
-      (insert "SELECT 1;  \nUPDATE t SET n = 1;\n")
-      (setq-local clutch-connection 'async-conn)
-      (goto-char (point-min))
-      (search-forward "UPDATE")
-      (clutch-test--with-async-statements finishes
-        (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
-          (clutch-execute-dwim (point) (point))
-          (goto-char (point-min))
-          (end-of-line)
-          (insert "-- typed while it runs")
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (ert-run-idle-timers)
-          (should (equal (marker-line) "UPDATE t SET n = 1;")))))
-    (with-temp-buffer
-      (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
-      (setq-local clutch-connection 'async-conn)
+      (insert "UPDATE a SET n = 1; -- first\nUPDATE b SET n = 2; -- second\n")
+      (setq-local clutch-connection async-conn)
       (clutch-test--with-async-statements finishes
         (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
                   ((symbol-function 'message) #'ignore))
           (clutch--execute-statements
            (clutch--split-statement-specs (buffer-string) (point-min)))
-          (goto-char (point-min))
-          (insert "-- typed while the first one runs\n")
+          (should (equal (mapcar #'car finishes) '("UPDATE a SET n = 1")))
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
+          (should (equal (mapcar #'car finishes)
+                         '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
+          (should (= (line-number-at-pos
+                      (overlay-start clutch--executed-sql-overlay))
+                     2))
           (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
           (ert-run-idle-timers)
-          (should (equal (marker-line) "UPDATE b SET n = 2;")))))
-    (with-temp-buffer
-      (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
-      (setq-local clutch-connection 'async-conn)
-      (clutch-test--with-async-statements finishes
-        (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
-          (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
-          (delete-region 11 (point-max))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (ert-run-idle-timers)
-          (should-not clutch--executed-sql-overlay))))))
+          (should (= (line-number-at-pos
+                      (overlay-start clutch--executed-sql-overlay))
+                     2)))))))
+
+(ert-deftest clutch-test-async-markers-follow-edits-while-running ()
+  "Status markers should stay on their statement while the buffer is edited.
+While it runs or is being cancelled, its background covers just its text.
+A statement deleted while it runs leaves no marker behind."
+  (let ((async-conn (make-clutch-test-conn)))
+    (cl-flet ((marker-line ()
+                (save-excursion
+                  (goto-char (overlay-start clutch--executed-sql-overlay))
+                  (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position))))
+              (marked-text ()
+                (buffer-substring-no-properties
+                 (overlay-start clutch--executed-sql-overlay)
+                 (overlay-end clutch--executed-sql-overlay))))
+      (with-temp-buffer
+        (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                    ((symbol-function 'clutch-db-interrupt-query) (lambda (_conn) t)))
+            (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
+            (goto-char (point-min))
+            (insert "-- typed while it runs\n")
+            (save-excursion
+              (goto-char (overlay-start clutch--executed-sql-overlay))
+              (insert "-- typed at its start\n"))
+            (should (equal (marked-text) "UPDATE t SET n = 1;"))
+            (clutch-cancel-query-or-quit)
+            (should (equal (marker-line) "UPDATE t SET n = 1;"))
+            (should (equal (marked-text) "UPDATE t SET n = 1;"))
+            (should (eq (overlay-get clutch--executed-sql-overlay 'face)
+                        'clutch-cancelling-sql-face))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (should (equal (marker-line) "UPDATE t SET n = 1;")))))
+      (with-temp-buffer
+        (insert "SELECT 1;  \nUPDATE t SET n = 1;\n")
+        (setq-local clutch-connection async-conn)
+        (goto-char (point-min))
+        (search-forward "UPDATE")
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
+            (clutch-execute-dwim (point) (point))
+            (goto-char (point-min))
+            (end-of-line)
+            (insert "-- typed while it runs")
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (should (equal (marker-line) "UPDATE t SET n = 1;")))))
+      (with-temp-buffer
+        (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-result--display) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (clutch--execute-statements
+             (clutch--split-statement-specs (buffer-string) (point-min)))
+            (goto-char (point-min))
+            (insert "-- typed while the first one runs\n")
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (should (equal (marker-line) "UPDATE b SET n = 2;")))))
+      (with-temp-buffer
+        (insert "SELECT 1;\nUPDATE t SET n = 1;\n")
+        (setq-local clutch-connection async-conn)
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'clutch-result--display) #'ignore))
+            (clutch--execute-and-mark "UPDATE t SET n = 1;" 11 (point-max))
+            (delete-region 11 (point-max))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (should-not clutch--executed-sql-overlay)))))))
 
 (ert-deftest clutch-test-execute-at-point-flashes-the-statement ()
   "The statement picked at point should flash first.
@@ -3384,136 +3372,142 @@ region, as from the REPL, does not flash, and
 (ert-deftest clutch-test-execute-chosen-text-does-not-flash ()
   "A region, the buffer and each statement of a batch should not flash.
 The user chose that text, so it needs no flash to show what runs."
-  (with-temp-buffer
-    (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
-    (setq-local clutch-connection 'async-conn)
-    (let ((transient-mark-mode t)
-          flashes)
-      (clutch-test--with-async-statements finishes
-        (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
-                   (lambda (beg end &rest _)
-                     (push (buffer-substring-no-properties beg end) flashes)))
-                  ((symbol-function 'clutch-result--display) #'ignore)
-                  ((symbol-function 'message) #'ignore))
-          (cl-flet ((finish ()
-                      (funcall (cdar finishes)
-                               (make-clutch-db-result :affected-rows 1) nil)
-                      (ert-run-idle-timers)))
-            (clutch-execute-buffer)
-            (finish)
-            (finish)
-            (should (equal (mapcar #'car finishes)
-                           '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
-            (goto-char (point-min))
-            (set-mark (line-end-position))
-            (call-interactively #'clutch-execute-dwim)
-            (finish)
-            (should (equal (caar finishes) "UPDATE a SET n = 1"))
-            (should (= (length finishes) 3))
-            (should-not flashes)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (insert "UPDATE a SET n = 1;\nUPDATE b SET n = 2;\n")
+      (setq-local clutch-connection async-conn)
+      (let ((transient-mark-mode t)
+            flashes)
+        (clutch-test--with-async-statements finishes
+          (cl-letf (((symbol-function 'pulse-momentary-highlight-region)
+                     (lambda (beg end &rest _)
+                       (push (buffer-substring-no-properties beg end) flashes)))
+                    ((symbol-function 'clutch-result--display) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (cl-flet ((finish ()
+                        (funcall (cdar finishes)
+                                 (make-clutch-db-result :affected-rows 1) nil)
+                        (ert-run-idle-timers)))
+              (clutch-execute-buffer)
+              (finish)
+              (finish)
+              (should (equal (mapcar #'car finishes)
+                             '("UPDATE b SET n = 2" "UPDATE a SET n = 1")))
+              (goto-char (point-min))
+              (set-mark (line-end-position))
+              (call-interactively #'clutch-execute-dwim)
+              (finish)
+              (should (equal (caar finishes) "UPDATE a SET n = 1"))
+              (should (= (length finishes) 3))
+              (should-not flashes))))))))
 
 (ert-deftest clutch-test-async-statements-run-one-after-another ()
   "A batch should send each statement after the previous one finishes."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (let (messages)
-        (cl-letf (((symbol-function 'clutch--show-execution-error)
-                   (lambda (&rest _args) "duplicate key"))
-                  ((symbol-function 'message)
-                   (lambda (format-string &rest args)
-                     (push (apply #'format format-string args) messages))))
-          (clutch--execute-statements
-           '("INSERT INTO t VALUES (1)"
-             "INSERT INTO t VALUES (2)"
-             "INSERT INTO t VALUES (3)"))
-          (should (equal (mapcar #'car finishes) '("INSERT INTO t VALUES (1)")))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          (ert-run-idle-timers)
-          (should (equal (mapcar #'car finishes)
-                         '("INSERT INTO t VALUES (2)"
-                           "INSERT INTO t VALUES (1)")))
-          (funcall (cdar finishes) nil '(clutch-db-error "duplicate key"))
-          (ert-run-idle-timers)
-          (should (= (length finishes) 2))
-          (should (cl-find-if (lambda (text)
-                                (string-prefix-p
-                                 "Statement 2 failed: duplicate key" text))
-                              messages))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements finishes
+        (let (messages)
+          (cl-letf (((symbol-function 'clutch--show-execution-error)
+                     (lambda (&rest _args) "duplicate key"))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch--execute-statements
+             '("INSERT INTO t VALUES (1)"
+               "INSERT INTO t VALUES (2)"
+               "INSERT INTO t VALUES (3)"))
+            (should (equal (mapcar #'car finishes) '("INSERT INTO t VALUES (1)")))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            (ert-run-idle-timers)
+            (should (equal (mapcar #'car finishes)
+                           '("INSERT INTO t VALUES (2)"
+                             "INSERT INTO t VALUES (1)")))
+            (funcall (cdar finishes) nil '(clutch-db-error "duplicate key"))
+            (ert-run-idle-timers)
+            (should (= (length finishes) 2))
+            (should (cl-find-if (lambda (text)
+                                  (string-prefix-p
+                                   "Statement 2 failed: duplicate key" text))
+                                messages))
+            (should-not (clutch-db--foreground-busy-p async-conn))))))))
 
 (ert-deftest clutch-test-async-batch-stops-when-cancel-meets-a-finished-statement ()
   "C-g should stop a batch even when its statement finishes first.
 A statement's result can arrive before the cancel; that statement keeps
 its outcome and the next one does not run, even if cancellation fails."
-  (dolist (cancel-result '(t nil error))
-    (ert-info ((format "Cancel result: %S" cancel-result))
-      (with-temp-buffer
-        (clutch-mode)
-        (setq-local clutch-connection 'async-conn)
-        (insert "UPDATE t SET n = 1 WHERE id = 1; DELETE FROM t WHERE id = 2;")
-        (clutch-test--with-async-statements finishes
-          (let (messages recorded)
-            (cl-letf (((symbol-function 'clutch-db-interrupt-query)
-                       (lambda (_conn)
-                         (if (eq cancel-result 'error)
-                             (signal 'clutch-db-error '("Cancel refused"))
-                           cancel-result)))
-                      ((symbol-function 'clutch--record-tx-state-after-query)
-                       (lambda (_conn sql) (push sql recorded)))
-                      ((symbol-function 'message)
-                       (lambda (format-string &rest args)
-                         (push (apply #'format format-string args) messages))))
-              (call-interactively #'clutch-execute-buffer)
-              (call-interactively #'clutch-cancel-query-or-quit)
-              (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-              (ert-run-idle-timers)
-              (should (equal (mapcar #'car finishes)
-                             '("UPDATE t SET n = 1 WHERE id = 1")))
-              (should (equal recorded '("UPDATE t SET n = 1 WHERE id = 1")))
-              (should (member "1 statement executed, then cancelled" messages))
-              (should-not (gethash 'async-conn clutch--running-queries))
-              (should-not (clutch-db--foreground-busy-p 'async-conn)))))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (dolist (cancel-result '(t nil error))
+      (ert-info ((format "Cancel result: %S" cancel-result))
+        (with-temp-buffer
+          (clutch-mode)
+          (setq-local clutch-connection async-conn)
+          (insert "UPDATE t SET n = 1 WHERE id = 1; DELETE FROM t WHERE id = 2;")
+          (clutch-test--with-async-statements finishes
+            (let (messages recorded)
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                        ((symbol-function 'clutch-db-interrupt-query)
+                         (lambda (_conn)
+                           (if (eq cancel-result 'error)
+                               (signal 'clutch-db-error '("Cancel refused"))
+                             cancel-result)))
+                        ((symbol-function 'clutch--record-tx-state-after-query)
+                         (lambda (_conn sql) (push sql recorded)))
+                        ((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (push (apply #'format format-string args) messages))))
+                (call-interactively #'clutch-execute-buffer)
+                (call-interactively #'clutch-cancel-query-or-quit)
+                (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+                (ert-run-idle-timers)
+                (should (equal (mapcar #'car finishes)
+                               '("UPDATE t SET n = 1 WHERE id = 1")))
+                (should (equal recorded '("UPDATE t SET n = 1 WHERE id = 1")))
+                (should (member "1 statement executed, then cancelled" messages))
+                (should-not (gethash async-conn clutch--running-queries))
+                (should-not (clutch-db--foreground-busy-p async-conn))))))))))
 
 (ert-deftest clutch-test-async-batch-releases-its-connection-on-a-quit ()
   "A quit while a batch starts its next statement should end the batch.
 Otherwise the connection stays reserved and the mode line keeps counting."
-  (with-temp-buffer
-    (setq-local clutch-connection 'async-conn)
-    (clutch-test--with-async-statements finishes
-      (let ((execute (symbol-function 'clutch--execute-statement))
-            (calls 0))
-        (cl-letf (((symbol-function 'message) #'ignore)
-                  ((symbol-function 'clutch--execute-statement)
-                   (lambda (&rest args)
-                     (if (= (cl-incf calls) 2)
-                         (signal 'quit nil)
-                       (apply execute args)))))
-          (clutch--execute-statements
-           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2"))
-          (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
-          ;; ERT does not fail a test that quits, so take the quit here.
-          (condition-case nil (ert-run-idle-timers) (quit nil))
-          (should (= calls 2))
-          (should-not (clutch-db--foreground-busy-p 'async-conn)))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (with-temp-buffer
+      (setq-local clutch-connection async-conn)
+      (clutch-test--with-async-statements finishes
+        (let ((execute (symbol-function 'clutch--execute-statement))
+              (calls 0))
+          (cl-letf (((symbol-function 'message) #'ignore)
+                    ((symbol-function 'clutch--execute-statement)
+                     (lambda (&rest args)
+                       (if (= (cl-incf calls) 2)
+                           (signal 'quit nil)
+                         (apply execute args)))))
+            (clutch--execute-statements
+             '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2"))
+            (funcall (cdar finishes) (make-clutch-db-result :affected-rows 1) nil)
+            ;; ERT does not fail a test that quits, so take the quit here.
+            (condition-case nil (ert-run-idle-timers) (quit nil))
+            (should (= calls 2))
+            (should-not (clutch-db--foreground-busy-p async-conn))))))))
 
 (ert-deftest clutch-test-async-batch-failure-after-buffer-kill-says-nothing-odd ()
   "A batch statement that fails after its buffer is killed should not say nil."
-  (let ((source (generate-new-buffer " *clutch-batch-killed*"))
-        messages)
-    (clutch-test--with-async-statements finishes
-      (cl-letf (((symbol-function 'message)
-                 (lambda (format-string &rest args)
-                   (push (apply #'format format-string args) messages))))
-        (with-current-buffer source
-          (setq-local clutch-connection 'async-conn)
-          (clutch--execute-statements
-           '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2")))
-        (kill-buffer source)
-        (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
-        (ert-run-idle-timers)
-        (should-not (member "nil" messages))
-        (should-not (clutch-db--foreground-busy-p 'async-conn))))))
+  (let ((async-conn (make-clutch-test-conn)))
+    (let ((source (generate-new-buffer " *clutch-batch-killed*"))
+          messages)
+      (clutch-test--with-async-statements finishes
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (with-current-buffer source
+            (setq-local clutch-connection async-conn)
+            (clutch--execute-statements
+             '("UPDATE t SET n = 1 WHERE id = 1" "UPDATE t SET n = 2 WHERE id = 2")))
+          (kill-buffer source)
+          (funcall (cdar finishes) nil '(clutch-db-error "connection reset"))
+          (ert-run-idle-timers)
+          (should-not (member "nil" messages))
+          (should-not (clutch-db--foreground-busy-p async-conn)))))))
 
 (ert-deftest clutch-test-cancel-command-cancels-a-running-query-or-quits ()
   "C-g should ask once to cancel the running query and otherwise quit."
