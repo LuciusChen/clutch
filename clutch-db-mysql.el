@@ -388,9 +388,11 @@ Return schema/table pairs, or `unsupported' for the standard lookup."
      (if (clutch-db-mysql--dictionary-unavailable-p err) 'unsupported
        (signal (car err) (cdr err))))))
 
-(defun clutch-db-mysql--send-metadata (conn sql callback)
-  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK."
-  (unless (mysql-busy-p conn)
+(defun clutch-db-mysql--send-metadata (conn sql callback &optional background)
+  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK.
+BACKGROUND requests also defer while foreground work owns the connection."
+  (unless (or (mysql-busy-p conn)
+              (and background (clutch-db--foreground-busy-p conn)))
     (mysql-query-async conn sql
                        (lambda (result error)
                          (funcall callback (and result (mysql-result-rows result)) error)))
@@ -500,6 +502,83 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
   (mapcar (pcase-lambda (`(,ref-schema ,ref-table ,column ,ref-column ,constraint))
             (list :table ref-table :schema ref-schema :column column
                   :ref-column ref-column :constraint constraint)) rows))
+
+(defun clutch-db-mysql--column-names-sql (table schema)
+  "Return the column-name query for TABLE in optional SCHEMA."
+  (if schema
+      (format "SELECT column_name FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION"
+              (mysql-escape-literal schema) (mysql-escape-literal table))
+    (format "SHOW COLUMNS FROM %s" (mysql-escape-identifier table))))
+
+(defun clutch-db-mysql--table-comment-sql (table)
+  "Return the current-database comment query for TABLE."
+  (format "SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
+          (mysql-escape-literal table)))
+
+(defun clutch-db-mysql--foreign-key-sql (table schema)
+  "Return the outgoing-key query for TABLE in optional SCHEMA."
+  (clutch-db-mysql--key-column-sql
+   '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
+     "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
+   (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+           (clutch-db-mysql--schema-literal schema) (mysql-escape-literal table))))
+
+(defun clutch-db-mysql--object-sql (category)
+  "Return the metadata query for object CATEGORY, or nil when unsupported."
+  (pcase category
+    ('indexes
+     "SELECT DISTINCT INDEX_NAME, TABLE_NAME, NON_UNIQUE
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE()
+ORDER BY TABLE_NAME, INDEX_NAME")
+    ((or 'procedures 'functions)
+     (format "SELECT ROUTINE_NAME, ROUTINE_TYPE
+FROM INFORMATION_SCHEMA.ROUTINES
+WHERE ROUTINE_SCHEMA = DATABASE()
+  AND ROUTINE_TYPE = %s
+ORDER BY ROUTINE_NAME"
+             (mysql-escape-literal
+              (if (eq category 'procedures) "PROCEDURE" "FUNCTION"))))
+    ('triggers
+     "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING
+FROM INFORMATION_SCHEMA.TRIGGERS
+WHERE TRIGGER_SCHEMA = DATABASE()
+ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
+
+(defun clutch-db-mysql--object-rows (schema category rows)
+  "Convert object ROWS from SCHEMA and CATEGORY to entry plists."
+  (mapcar
+   (lambda (row)
+     (pcase category
+       ('indexes
+        (pcase-let ((`(,name ,table ,non-unique) row))
+          (list :name name :type "INDEX" :schema schema :source-schema schema
+                :target-table table :unique (equal non-unique 0))))
+       ((or 'procedures 'functions)
+        (pcase-let ((`(,name ,type) row))
+          (list :name name :type type :schema schema :source-schema schema)))
+       ('triggers
+        (pcase-let ((`(,name ,table ,event ,timing) row))
+          (list :name name :type "TRIGGER" :schema schema :source-schema schema
+                :target-table table :event event :timing timing :status "ENABLED")))))
+   rows))
+
+(defun clutch-db-mysql--column-metadata-async (conn table schema outcome continue &optional background)
+  "Read TABLE columns and key metadata on CONN in SCHEMA asynchronously.
+Deliver OUTCOME while CONTINUE allows requests, retaining keys for ER.
+BACKGROUND defers dispatch while foreground work owns the connection."
+  (clutch-db--metadata-request-series
+   (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome background))
+   (list (clutch-db-mysql--primary-key-sql table schema)
+         (clutch-db-mysql--foreign-key-sql table schema)
+         (clutch-db-mysql--column-details-sql table schema))
+   (pcase-lambda (`(,primary ,foreign ,columns))
+     (let ((primary (mapcar (lambda (row) (nth 4 row)) primary))
+           (foreign (clutch-db-mysql--foreign-key-values foreign)))
+       (list :columns
+             (mapcar (lambda (row) (clutch-db-mysql--column-details-row row primary foreign)) columns)
+             :foreign-keys foreign)))
+   outcome continue))
 
 (when (require 'mysql nil t)
 
@@ -705,7 +784,25 @@ Decline when the installed mysql.el cannot execute asynchronously."
 
 ;;;; Schema methods
 
-(clutch-db--define-idle-metadata-methods mysql-conn "MySQL")
+(cl-defmethod clutch-db-refresh-schema-async
+    ((conn mysql-conn) callback &optional errback idle-delay)
+  "Refresh MySQL CONN's tables asynchronously after optional IDLE-DELAY.
+Deliver the names to CALLBACK and failures to ERRBACK."
+  (when (fboundp 'mysql-query-async)
+    (if idle-delay
+        (run-with-idle-timer idle-delay nil
+                            (lambda () (clutch-db-refresh-schema-async conn callback errback)))
+      (clutch-db--metadata-request-series
+       (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome t))
+       '("SHOW TABLES")
+       (lambda (results) (mapcar #'car (car results)))
+       (lambda (rows error)
+         ;; SHOW TABLES without a current database means an empty schema.
+         (if (and error (string-prefix-p "[1046]" (clutch-db--error-message error)))
+             (funcall callback nil)
+           (funcall (clutch-db--metadata-outcome callback errback) rows error)))
+       (lambda () (clutch-db-live-p conn))))
+    t))
 
 (cl-defmethod clutch-db-list-tables ((conn mysql-conn))
   "Return table names for the current MySQL database on CONN.
@@ -722,21 +819,15 @@ missed a USE or a DROP that changed the database."
 
 (cl-defmethod clutch-db-list-columns-async
     ((conn mysql-conn) table callback &optional errback schema _catalog)
-  "Fetch column names for TABLE in SCHEMA on CONN asynchronously.
-Without SCHEMA, retain the current-schema idle metadata path."
-  (if schema
-      (when (fboundp 'mysql-query-async)
-        (mysql-query-async
-         conn
-         (format "SELECT column_name FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION"
-                 (mysql-escape-literal schema) (mysql-escape-literal table))
-         (lambda (result error)
-           (if error
-               (when errback (funcall errback (clutch-db--error-message error)))
-             (funcall callback (mapcar #'car (mysql-result-rows result))))))
-        t)
-    (clutch-db--schedule-idle-metadata-call
-     conn callback errback #'clutch-db-list-columns nil table)))
+  "Read TABLE's column names in SCHEMA on MySQL CONN asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome t))
+     (list (clutch-db-mysql--column-names-sql table schema))
+     (lambda (results) (mapcar #'car (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
 
 (cl-defmethod clutch-db-schema-tables-async
     ((conn mysql-conn) schema callback &optional errback)
@@ -797,61 +888,34 @@ ORDER BY TABLE_NAME"))
 (cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
   "Return column names for TABLE on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
-    (let ((result (clutch-db-mysql--metadata-query
-                   conn
-                   (format "SHOW COLUMNS FROM %s"
-                           (mysql-escape-identifier table)))))
-      (mapcar #'car (mysql-result-rows result)))))
+    (mapcar #'car (mysql-result-rows
+                   (clutch-db-mysql--metadata-query
+                    conn (clutch-db-mysql--column-names-sql table nil))))))
 
 (cl-defmethod clutch-db-list-objects ((conn mysql-conn) category)
   "Return object entry plists for CATEGORY on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
-    (let ((schema (clutch-db-database conn)))
-      (pcase category
-        ('indexes
-         (let ((result (clutch-db-mysql--metadata-query
-                        conn
-                        "SELECT DISTINCT INDEX_NAME, TABLE_NAME, NON_UNIQUE
-FROM INFORMATION_SCHEMA.STATISTICS
-WHERE TABLE_SCHEMA = DATABASE()
-ORDER BY TABLE_NAME, INDEX_NAME")))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,table-name ,non-unique) row))
-                (list :name name :type "INDEX" :schema schema :source-schema schema
-                      :target-table table-name :unique (equal non-unique 0))))
-            (mysql-result-rows result))))
-        ('sequences nil)
-        ((or 'procedures 'functions)
-         (let* ((routine-type (if (eq category 'procedures) "PROCEDURE" "FUNCTION"))
-                (result (clutch-db-mysql--metadata-query
-                         conn
-                         (format "SELECT ROUTINE_NAME, ROUTINE_TYPE
-FROM INFORMATION_SCHEMA.ROUTINES
-WHERE ROUTINE_SCHEMA = DATABASE()
-  AND ROUTINE_TYPE = %s
-ORDER BY ROUTINE_NAME"
-                                 (mysql-escape-literal routine-type)))))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,type) row))
-                (list :name name :type type :schema schema :source-schema schema)))
-            (mysql-result-rows result))))
-        ('triggers
-         (let ((result (clutch-db-mysql--metadata-query
-                        conn
-                        "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING
-FROM INFORMATION_SCHEMA.TRIGGERS
-WHERE TRIGGER_SCHEMA = DATABASE()
-ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME")))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,table-name ,event ,timing) row))
-                (list :name name :type "TRIGGER" :schema schema :source-schema schema
-                      :target-table table-name :event event :timing timing
-                      :status "ENABLED")))
-            (mysql-result-rows result))))
-        (_ nil)))))
+    (when-let* ((sql (clutch-db-mysql--object-sql category)))
+      (clutch-db-mysql--object-rows
+       (clutch-db-database conn) category
+       (mysql-result-rows (clutch-db-mysql--metadata-query conn sql))))))
+
+(cl-defmethod clutch-db-list-objects-async
+    ((conn mysql-conn) category callback &optional errback)
+  "Fetch object CATEGORY on MySQL CONN without blocking for network replies."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--translate-library-error mysql-error
+      (if-let* ((sql (clutch-db-mysql--object-sql category)))
+          (let ((schema (clutch-db-database conn)))
+            (clutch-db-mysql--send-metadata
+             conn sql
+             (lambda (rows error)
+               (if error
+                   (when errback (funcall errback (clutch-db--error-message error)))
+                 (funcall callback (clutch-db-mysql--object-rows schema category rows))))
+             t))
+        (funcall callback nil)
+        t))))
 
 (cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."
@@ -949,16 +1013,24 @@ ORDER BY ORDINAL_POSITION"
 (cl-defmethod clutch-db-table-comment ((conn mysql-conn) table &optional _schema)
   "Return the comment for TABLE on MySQL CONN, or nil if empty."
   (clutch-db--translate-library-error mysql-error
-    (let* ((result (clutch-db-mysql--metadata-query
-                      conn
-                      (format "SELECT TABLE_COMMENT \
-FROM INFORMATION_SCHEMA.TABLES \
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
-                              (mysql-escape-literal table))))
-             (row (car (mysql-result-rows result)))
-             (comment (car row)))
-      (when (and comment (not (string-empty-p comment)))
-        comment))))
+    (let ((comment (caar (mysql-result-rows
+                          (clutch-db-mysql--metadata-query
+                           conn (clutch-db-mysql--table-comment-sql table))))))
+      (unless (string-empty-p (or comment "")) comment))))
+
+(cl-defmethod clutch-db-table-comment-async
+    ((conn mysql-conn) table callback &optional errback)
+  "Read TABLE's comment on MySQL CONN without blocking."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome t))
+     (list (clutch-db-mysql--table-comment-sql table))
+     (lambda (results)
+       (let ((comment (caar (car results))))
+         (unless (string-empty-p (or comment "")) comment)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
 
 (cl-defmethod clutch-db-primary-key-columns ((conn mysql-conn) table
                                              &optional schema _catalog)
@@ -1026,17 +1098,11 @@ or costs, so neither hierarchy nor costs are inferred."
 
 (cl-defmethod clutch-db-foreign-keys ((conn mysql-conn) table
                                       &optional schema _catalog)
-  "Return foreign key info for TABLE in SCHEMA on MySQL CONN.
-Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
-:constraint K))."
+  "Return outgoing key columns for TABLE in SCHEMA on MySQL CONN."
   (clutch-db--translate-library-error mysql-error
-    (clutch-db-mysql--foreign-key-values (clutch-db-mysql--key-column-rows
-                                          conn
-                                          '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
-                                            "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
-                                          (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
-                                                  (clutch-db-mysql--schema-literal schema)
-                                                  (mysql-escape-literal table))))))
+    (clutch-db-mysql--foreign-key-values
+     (mysql-result-rows (clutch-db-mysql--metadata-query
+                         conn (clutch-db-mysql--foreign-key-sql table schema))))))
 
 (cl-defmethod clutch-db-referencing-keys ((conn mysql-conn) table
                                           &optional schema _catalog)
@@ -1077,6 +1143,30 @@ Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
        (lambda (row) (clutch-db-mysql--column-details-row row pk-cols fks))
        col-rows))))
 
+(cl-defmethod clutch-db-foreign-keys-async
+    ((conn mysql-conn) table callback &optional errback schema _catalog)
+  "Read TABLE's outgoing keys in SCHEMA on MySQL CONN asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome t))
+     (list (clutch-db-mysql--foreign-key-sql table schema))
+     (lambda (results) (clutch-db-mysql--foreign-key-values (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
+
+(cl-defmethod clutch-db-column-details-async
+    ((conn mysql-conn) table callback &optional errback schema _catalog)
+  "Read TABLE's column details in SCHEMA on CONN asynchronously."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db-mysql--column-metadata-async
+     conn table schema
+     (lambda (metadata error)
+       (funcall (clutch-db--metadata-outcome callback errback)
+                (plist-get metadata :columns) error))
+     (lambda () (clutch-db-live-p conn)) t)
+    t))
+
 (cl-defmethod clutch-db-referencing-keys-async
   ((conn mysql-conn) table callback &optional errback schema _catalog continue)
   "Read MySQL TABLE's incoming keys on CONN without blocking."
@@ -1086,37 +1176,20 @@ Returns alist of (COL-NAME . (:ref-table T :ref-column C :ref-schema S
     t))
 
 (cl-defmethod clutch-db-table-relations-async
-  ((conn mysql-conn) table callback &optional errback schema _catalog continue)
-  "Read MySQL TABLE metadata on CONN through asynchronous wire requests."
+    ((conn mysql-conn) table callback &optional errback schema _catalog continue)
+  "Read TABLE's columns and relations in SCHEMA on CONN asynchronously."
   (when (fboundp 'mysql-query-async)
-    (let ((callback (clutch-db--metadata-outcome callback errback)))
-      (clutch-db--metadata-request-series
-       (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome))
-       (list (clutch-db-mysql--primary-key-sql table schema)
-             (clutch-db-mysql--key-column-sql
-              '("COLUMN_NAME" "REFERENCED_TABLE_SCHEMA" "REFERENCED_TABLE_NAME"
-                "REFERENCED_COLUMN_NAME" "CONSTRAINT_NAME")
-              (format "TABLE_SCHEMA = %s AND TABLE_NAME = %s"
-                      (clutch-db-mysql--schema-literal schema)
-                      (mysql-escape-literal table)))
-             (clutch-db-mysql--column-details-sql table schema))
-       (pcase-lambda (`(,primary ,foreign ,columns))
-         (let ((primary (mapcar (lambda (row) (nth 4 row)) primary))
-               (foreign (clutch-db-mysql--foreign-key-values foreign)))
-           (list :columns
-                 (mapcar (lambda (row)
-                           (clutch-db-mysql--column-details-row row primary foreign))
-                         columns)
-                 :foreign-keys foreign)))
+    (let ((outcome (clutch-db--metadata-outcome callback errback)))
+      (clutch-db-mysql--column-metadata-async
+       conn table schema
        (lambda (metadata error)
-         (if error (funcall callback nil error)
-           (clutch-db-mysql--referencing-keys-async
-            conn table schema
-            (lambda (incoming error)
-              (funcall callback (and (not error)
-                                     (plist-put metadata :referencing-keys incoming))
-                       error))
-            continue)))
+         (if error (funcall outcome nil error)
+           (clutch-db-referencing-keys-async
+            conn table
+            (lambda (incoming)
+              (funcall outcome (plist-put metadata :referencing-keys incoming) nil))
+            (lambda (message) (funcall outcome nil (list 'clutch-db-error message)))
+            schema nil continue)))
        continue))
     t))
 

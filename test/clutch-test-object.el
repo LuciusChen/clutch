@@ -1198,6 +1198,21 @@ and schema ignored, so the search offered the first overload alone."
                                 :hits)
                      overloads)))))
 
+(ert-deftest clutch-test-resolve-known-object-does-not-list-schema ()
+  "Known command targets must resolve without a remote name lookup."
+  (let ((entry '(:name "goods" :type "TABLE")))
+    (dolist (source '(buffer dispatch transient))
+      (with-temp-buffer
+        (insert "goods")
+        (setq-local clutch-browser-current-object (and (eq source 'buffer) entry))
+        (let ((clutch--object-dispatch-entry (and (eq source 'dispatch) entry))
+              (transient-current-command
+               (and (eq source 'transient) 'clutch-object-actions-menu))
+              (clutch--object-action-entry (and (eq source 'transient) entry)))
+          (cl-letf (((symbol-function 'clutch--object-matches-at-point)
+                     (lambda (&rest _) (ert-fail "Unexpected schema lookup"))))
+            (should (equal (clutch--resolve-object-entry "Table: " t) entry))))))))
+
 (ert-deftest clutch-test-resolve-object-entry-effect-boundaries ()
   "The real resolver should avoid remote I/O for local and dead paths."
   (let ((entries '((:name "ORDERS" :type "TABLE")

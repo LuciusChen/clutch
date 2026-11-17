@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Native PostgreSQL and MySQL schema refresh, column metadata, comments, outgoing keys and object warmup use asynchronous wire requests. Background requests respect foreground reservations, and commands that need the session await existing metadata. Commands with a known table skip a redundant schema-wide lookup.
+
 - DuckDB UI and ER rendering reuse the remembered namespace, refreshing it after namespace-changing statements instead of synchronously querying on every update.
 - Asynchronous JDBC column details include the same primary-key and foreign-key information as synchronous reads, so warmed ER metadata retains key markers. Keys without a reported constraint name remain separate relations.
 - Metadata status notifications update the ER UI without starting another ER load, allowing other commands to finish loading metadata and execute their SQL.

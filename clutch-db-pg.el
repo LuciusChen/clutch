@@ -1016,35 +1016,53 @@ PARAMS are returned as they are until the path is settled."
                                      conn "SHOW search_path")))))))
     params))
 
-(clutch-db--define-idle-metadata-methods clutch-db-pg--connection "PostgreSQL")
+(defconst clutch-db-pg--table-names-sql
+  "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() ORDER BY tablename"
+  "Query listing current-schema PostgreSQL tables.")
+
+(defun clutch-db-pg--column-names-sql (table schema)
+  "Return the column-name query for TABLE in optional SCHEMA."
+  (format "SELECT column_name FROM information_schema.columns WHERE table_name = %s AND table_schema = %s ORDER BY ordinal_position"
+          (pgsql-escape-literal table)
+          (if schema (pgsql-escape-literal schema) "current_schema()")))
+
+(defun clutch-db-pg--table-comment-sql (table schema)
+  "Return the comment query for TABLE in optional SCHEMA."
+  (format "SELECT obj_description(%s, 'pg_class')" (clutch-db-pg--relation table schema)))
+
+(cl-defmethod clutch-db-refresh-schema-async
+    ((conn clutch-db-pg--connection) callback &optional errback idle-delay)
+  "Refresh PostgreSQL CONN's tables asynchronously after optional IDLE-DELAY.
+Deliver the names to CALLBACK and failures to ERRBACK."
+  (when (fboundp 'pgsql-exec-async)
+    (if idle-delay
+        (run-with-idle-timer idle-delay nil
+                            (lambda () (clutch-db-refresh-schema-async conn callback errback)))
+      (clutch-db--metadata-request-series
+       (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+       (list clutch-db-pg--table-names-sql)
+       (lambda (results) (mapcar #'car (car results)))
+       (clutch-db--metadata-outcome callback errback)
+       (lambda () (clutch-db-live-p conn))))
+    t))
 
 (cl-defmethod clutch-db-list-tables ((conn clutch-db-pg--connection))
   "Return table names for the current PostgreSQL database on CONN."
   (clutch-db--translate-library-error pgsql-error
-    (let ((result (clutch-db-pg--exec
-                   conn
-                   "SELECT tablename FROM pg_tables \
-WHERE schemaname = current_schema() \
-ORDER BY tablename")))
-      (mapcar #'car (clutch-db-pg--metadata-rows result)))))
+    (mapcar #'car (clutch-db-pg--metadata-rows
+                   (clutch-db-pg--exec conn clutch-db-pg--table-names-sql)))))
 
 (cl-defmethod clutch-db-list-columns-async
     ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog)
-  "Fetch column names for TABLE in SCHEMA on CONN asynchronously.
-Without SCHEMA, retain the current-schema idle metadata path."
-  (if schema
-      (when (fboundp 'pgsql-exec-async)
-        (pgsql-exec-async
-         (clutch-db-pg--connection-client conn)
-         (format "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position"
-                 (pgsql-escape-literal schema) (pgsql-escape-literal table))
-         (lambda (result error)
-           (if error
-               (when errback (funcall errback (clutch-db--error-message error)))
-             (funcall callback (mapcar #'car (clutch-db-pg--metadata-rows result))))))
-        t)
-    (clutch-db--schedule-idle-metadata-call
-     conn callback errback #'clutch-db-list-columns nil table)))
+  "Read TABLE's column names in SCHEMA on PostgreSQL CONN asynchronously."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+     (list (clutch-db-pg--column-names-sql table schema))
+     (lambda (results) (mapcar #'car (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
 
 (cl-defmethod clutch-db-schema-tables-async
     ((conn clutch-db-pg--connection) schema callback &optional errback)
@@ -1094,79 +1112,33 @@ ORDER BY objects.name")))
 (cl-defmethod clutch-db-list-columns ((conn clutch-db-pg--connection) table)
   "Return column names for TABLE on PostgreSQL CONN."
   (clutch-db--translate-library-error pgsql-error
-    (let ((result (clutch-db-pg--exec
-                   conn
-                   (format "SELECT column_name FROM information_schema.columns \
-WHERE table_name = %s AND table_schema = current_schema() \
-ORDER BY ordinal_position"
-                           (pgsql-escape-literal table)))))
-      (mapcar #'car (clutch-db-pg--metadata-rows result)))))
+    (mapcar #'car (clutch-db-pg--metadata-rows
+                   (clutch-db-pg--exec conn (clutch-db-pg--column-names-sql table nil))))))
 
-(cl-defmethod clutch-db-list-objects ((conn clutch-db-pg--connection) category)
-  "Return object entry plists for CATEGORY on PostgreSQL CONN."
-  (clutch-db--translate-library-error pgsql-error
-    (let ((schema (clutch-db-current-schema conn)))
-      (pcase category
-        ('indexes
-         (let ((result
-                (clutch-db-pg--exec
-                 conn
-                 "SELECT i.indexname, i.tablename, ix.indisunique
+(defun clutch-db-pg--object-sql (category)
+  "Return the SQL for PostgreSQL object CATEGORY, or nil when unsupported."
+  (when-let* ((sql
+              (pcase category
+                ('indexes "SELECT i.indexname, i.tablename, ix.indisunique
 FROM pg_indexes i
 JOIN pg_class c ON c.relname = i.indexname
 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
 JOIN pg_index ix ON ix.indexrelid = c.oid
 WHERE i.schemaname = current_schema()
-ORDER BY i.tablename, i.indexname")))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,table-name ,unique) row))
-                (list :name name :type "INDEX" :schema schema
-                      :source-schema schema
-                      :target-table table-name :unique unique)))
-            (clutch-db-pg--metadata-rows result))))
-        ('sequences
-         (let ((result
-                (clutch-db-pg--exec
-                 conn
-                 "SELECT sequencename, min_value, max_value, increment_by, last_value
+ORDER BY i.tablename, i.indexname")
+                ('sequences "SELECT sequencename, min_value, max_value, increment_by, last_value
 FROM pg_sequences
 WHERE schemaname = current_schema()
-ORDER BY sequencename")))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,min ,max ,increment ,last) row))
-                (list :name name :type "SEQUENCE" :schema schema
-                      :source-schema schema
-                      :min min :max max :increment increment :last last)))
-            (clutch-db-pg--metadata-rows result))))
-        ((or 'procedures 'functions)
-         (let* ((routine-type (if (eq category 'procedures)
-                                  "PROCEDURE"
-                                "FUNCTION"))
-                (prokind (if (eq category 'procedures) "p" "f"))
-                (result
-                 (clutch-db-pg--exec
-                  conn
-                  (format "SELECT p.proname, p.oid
+ORDER BY sequencename")
+                ((or 'procedures 'functions)
+                 (format "SELECT p.proname, p.oid
 FROM pg_proc p
 JOIN pg_namespace n ON p.pronamespace = n.oid
 WHERE n.nspname = current_schema()
   AND p.prokind = %s
 ORDER BY p.proname"
-                          (pgsql-escape-literal prokind)))))
-           (mapcar
-            (lambda (row)
-              (pcase-let ((`(,name ,oid) row))
-                (list :name name :type routine-type :schema schema
-                      :source-schema schema
-                      :identity (format "OID:%s" oid))))
-            (clutch-db-pg--metadata-rows result))))
-        ('triggers
-         (let ((result
-                (clutch-db-pg--exec
-                 conn
-                 "SELECT t.trigger_name, t.event_object_table, t.event_manipulation,
+                         (pgsql-escape-literal (if (eq category 'procedures) "p" "f"))))
+                ('triggers "SELECT t.trigger_name, t.event_object_table, t.event_manipulation,
         t.action_timing, pg_t.oid
 FROM information_schema.triggers t
 JOIN pg_class c ON c.relname = t.event_object_table
@@ -1175,27 +1147,64 @@ JOIN pg_trigger pg_t ON pg_t.tgrelid = c.oid
                     AND pg_t.tgname = t.trigger_name
 WHERE t.trigger_schema = current_schema()
   AND NOT pg_t.tgisinternal
-ORDER BY t.event_object_table, t.trigger_name")))
-           (let ((rows (clutch-db-pg--metadata-rows result))
-                 grouped)
-             (dolist (row rows (nreverse grouped))
-               (pcase-let ((`(,name ,table-name ,event ,timing ,oid) row))
-                 (if-let* ((existing (cl-find-if
-                                      (lambda (entry)
-                                        (and (string= (plist-get entry :name) name)
-                                             (string= (plist-get entry :target-table) table-name)))
-                                      grouped)))
-                     (unless (string-match-p (regexp-quote event)
-                                             (or (plist-get existing :event) ""))
-                       (setf (plist-get existing :event)
-                             (concat (plist-get existing :event) " OR " event)))
-                   (push (list :name name :type "TRIGGER" :schema schema
-                               :source-schema schema
-                               :target-table table-name :event event :timing timing
-                               :status "ENABLED"
-                               :identity (format "OID:%s" oid))
-                         grouped)))))))
-        (_ nil)))))
+ORDER BY t.event_object_table, t.trigger_name"))))
+    ;; Return the actual schema with each row, avoiding a separate synchronous
+    ;; namespace lookup when the connection's namespace cache is cold.
+    (concat "SELECT current_schema(), " (string-remove-prefix "SELECT " sql))))
+
+(defun clutch-db-pg--object-rows (category rows)
+  "Convert PostgreSQL object ROWS, including their schema, for CATEGORY."
+  (if (eq category 'triggers)
+      (let (entries)
+        (dolist (row rows (nreverse entries))
+          (pcase-let ((`(,schema ,name ,table ,event ,timing ,oid) row))
+            (if-let* ((existing (cl-find-if
+                                (lambda (entry)
+                                  (and (equal (plist-get entry :name) name)
+                                       (equal (plist-get entry :target-table) table)))
+                                entries)))
+                (unless (string-match-p (regexp-quote event) (plist-get existing :event))
+                  (setf (plist-get existing :event)
+                        (concat (plist-get existing :event) " OR " event)))
+              (push (list :name name :type "TRIGGER" :schema schema :source-schema schema
+                          :target-table table :event event :timing timing :status "ENABLED"
+                          :identity (format "OID:%s" oid)) entries)))))
+    (mapcar
+     (lambda (row)
+       (pcase-let ((`(,schema . ,values) row))
+         (pcase category
+           ('indexes
+            (pcase-let ((`(,name ,table ,unique) values))
+              (list :name name :type "INDEX" :schema schema :source-schema schema
+                    :target-table table :unique unique)))
+           ('sequences
+            (pcase-let ((`(,name ,min ,max ,increment ,last) values))
+              (list :name name :type "SEQUENCE" :schema schema :source-schema schema
+                    :min min :max max :increment increment :last last)))
+           ((or 'procedures 'functions)
+            (pcase-let ((`(,name ,oid) values))
+              (list :name name :type (if (eq category 'procedures) "PROCEDURE" "FUNCTION")
+                    :schema schema :source-schema schema :identity (format "OID:%s" oid)))))))
+     rows)))
+
+(cl-defmethod clutch-db-list-objects ((conn clutch-db-pg--connection) category)
+  "Return object entry plists for CATEGORY on PostgreSQL CONN."
+  (clutch-db--translate-library-error pgsql-error
+    (when-let* ((sql (clutch-db-pg--object-sql category)))
+      (clutch-db-pg--object-rows category
+       (clutch-db-pg--metadata-rows (clutch-db-pg--exec conn sql))))))
+
+(cl-defmethod clutch-db-list-objects-async
+    ((conn clutch-db-pg--connection) category callback &optional errback)
+  "Read object CATEGORY on PostgreSQL CONN without waiting for network I/O."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+     (when-let* ((sql (clutch-db-pg--object-sql category))) (list sql))
+     (lambda (results) (clutch-db-pg--object-rows category (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-db-pg--connection) entry)
   "Return detail plists for PostgreSQL object ENTRY on CONN."
@@ -1327,16 +1336,25 @@ WHERE schemaname = current_schema()
         (_ nil)))))
 
 (cl-defmethod clutch-db-table-comment ((conn clutch-db-pg--connection) table &optional schema)
-  "Return the comment for TABLE in SCHEMA on PostgreSQL CONN, or nil if none."
+  "Return TABLE's comment in SCHEMA on PostgreSQL CONN, or nil if empty."
   (clutch-db--translate-library-error pgsql-error
-    (let* ((result (clutch-db-pg--exec
-                      conn
-                      (format "SELECT obj_description(%s, 'pg_class')"
-                              (clutch-db-pg--relation table schema))))
-             (row (car (clutch-db-pg--metadata-rows result)))
-             (comment (car row)))
-      (when (and comment (not (string-empty-p comment)))
-        comment))))
+    (let ((comment (caar (clutch-db-pg--metadata-rows
+                          (clutch-db-pg--exec conn (clutch-db-pg--table-comment-sql table schema))))))
+      (unless (string-empty-p (or comment "")) comment))))
+
+(cl-defmethod clutch-db-table-comment-async
+    ((conn clutch-db-pg--connection) table callback &optional errback)
+  "Read TABLE's comment on PostgreSQL CONN without blocking."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+     (list (clutch-db-pg--table-comment-sql table nil))
+     (lambda (results)
+       (let ((comment (caar (car results))))
+         (unless (string-empty-p (or comment "")) comment)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
 
 (defun clutch-db-pg--primary-key-sql (table schema)
   "Build the metadata query for TABLE in SCHEMA."
@@ -1498,15 +1516,58 @@ each partition that inherits it."
       (mapcar (lambda (row) (clutch-db-pg--column-details-row row pk-cols fks))
               col-rows))))
 
-(defun clutch-db-pg--send-metadata (conn sql callback)
-  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK."
+(defun clutch-db-pg--send-metadata (conn sql callback &optional background)
+  "Send metadata SQL on CONN, delivering raw rows and error to CALLBACK.
+BACKGROUND requests also defer while foreground work owns the connection."
   (let ((client (clutch-db-pg--connection-client conn)))
-    (unless (pgsql-busy-p client)
+    (unless (or (pgsql-busy-p client)
+                (and background (clutch-db--foreground-busy-p conn)))
       (pgsql-exec-async
        client sql
        (lambda (result error)
          (funcall callback (and result (clutch-db-pg--metadata-rows result)) error)))
       t)))
+
+(cl-defmethod clutch-db-foreign-keys-async
+    ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog)
+  "Read TABLE's outgoing keys in SCHEMA on PostgreSQL CONN asynchronously."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+     (list (clutch-db-pg--foreign-key-sql table schema))
+     (lambda (results) (clutch-db-pg--foreign-key-values (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
+    t))
+
+(defun clutch-db-pg--column-metadata-async (conn table schema outcome continue &optional background)
+  "Read TABLE columns and key metadata on CONN in SCHEMA asynchronously.
+Deliver OUTCOME while CONTINUE allows requests, retaining keys for ER.
+BACKGROUND defers dispatch while foreground work owns the connection."
+  (clutch-db--metadata-request-series
+   (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome background))
+   (list (clutch-db-pg--primary-key-sql table schema)
+         (clutch-db-pg--foreign-key-sql table schema)
+         (clutch-db-pg--column-details-sql table schema))
+   (pcase-lambda (`(,primary ,foreign ,columns))
+     (let ((primary (mapcar #'car primary))
+           (foreign (clutch-db-pg--foreign-key-values foreign)))
+       (list :columns
+             (mapcar (lambda (row) (clutch-db-pg--column-details-row row primary foreign)) columns)
+             :foreign-keys foreign)))
+   outcome continue))
+
+(cl-defmethod clutch-db-column-details-async
+    ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog)
+  "Read TABLE's column details in SCHEMA on CONN asynchronously."
+  (when (fboundp 'pgsql-exec-async)
+    (clutch-db-pg--column-metadata-async
+     conn table schema
+     (lambda (metadata error)
+       (funcall (clutch-db--metadata-outcome callback errback)
+                (plist-get metadata :columns) error))
+     (lambda () (clutch-db-live-p conn)) t)
+    t))
 
 (cl-defmethod clutch-db-referencing-keys-async
   ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog continue)
@@ -1520,26 +1581,21 @@ each partition that inherits it."
     t))
 
 (cl-defmethod clutch-db-table-relations-async
-  ((conn clutch-db-pg--connection) table callback
-   &optional errback schema _catalog continue)
-  "Read PostgreSQL TABLE metadata on CONN through asynchronous wire requests."
+    ((conn clutch-db-pg--connection) table callback &optional errback schema _catalog continue)
+  "Read TABLE's columns and relations in SCHEMA on CONN asynchronously."
   (when (fboundp 'pgsql-exec-async)
-    (clutch-db--metadata-request-series
-     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome))
-     (list (clutch-db-pg--primary-key-sql table schema)
-           (clutch-db-pg--foreign-key-sql table schema)
-           (clutch-db-pg--column-details-sql table schema)
-           (clutch-db-pg--referencing-key-sql table schema))
-     (pcase-lambda (`(,primary ,foreign ,columns ,incoming))
-       (let ((primary (mapcar #'car primary))
-             (foreign (clutch-db-pg--foreign-key-values foreign)))
-         (list :columns
-               (mapcar (lambda (row)
-                         (clutch-db-pg--column-details-row row primary foreign))
-                       columns)
-               :foreign-keys foreign
-               :referencing-keys (clutch-db-pg--referencing-key-values incoming))))
-     (clutch-db--metadata-outcome callback errback) continue)
+    (let ((outcome (clutch-db--metadata-outcome callback errback)))
+      (clutch-db-pg--column-metadata-async
+       conn table schema
+       (lambda (metadata error)
+         (if error (funcall outcome nil error)
+           (clutch-db-referencing-keys-async
+            conn table
+            (lambda (incoming)
+              (funcall outcome (plist-put metadata :referencing-keys incoming) nil))
+            (lambda (message) (funcall outcome nil (list 'clutch-db-error message)))
+            schema nil continue)))
+       continue))
     t))
 
 ;;;; Re-entrancy guard
@@ -1787,6 +1843,16 @@ XTDB has no table comments."
               (list :name name :type "TABLE"
                     :schema schema :source-schema schema))
             (clutch-db-list-tables conn))))
+
+(clutch-db--define-idle-metadata-methods clutch-db-pg--xtdb-connection "XTDB")
+
+(cl-defmethod clutch-db-list-columns-async
+    ((conn clutch-db-pg--xtdb-connection) table callback &optional errback schema catalog)
+  "Read XTDB TABLE's fields on CONN with the existing metadata fallback."
+  (if schema
+      (cl-call-next-method conn table callback errback schema catalog)
+    (clutch-db--schedule-idle-metadata-call
+     conn callback errback #'clutch-db-list-columns nil table)))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-pg--xtdb-connection) _table
                                        &optional _schema)

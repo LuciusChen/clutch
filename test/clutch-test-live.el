@@ -169,6 +169,30 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
           (progn
             (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, a INT, b INT, UNIQUE(a,b))" parent))
             (clutch-db-query conn (format "CREATE TABLE %s(id INT PRIMARY KEY, p INT, a INT, b INT, FOREIGN KEY(p) REFERENCES %s(id), FOREIGN KEY(a,b) REFERENCES %s(a,b))" child parent parent))
+            (when (memq clutch-test-backend '(pg mysql))
+              ;; Exercise the installed background APIs on the same composite-key
+              ;; fixture as ER, retaining defaults, key flags and row ordering.
+              (dolist (request
+                       (append
+                        (list (list #'clutch-db-list-tables #'clutch-db-refresh-schema-async nil)
+                              (list #'clutch-db-list-columns #'clutch-db-list-columns-async (list child))
+                              (list #'clutch-db-column-details #'clutch-db-column-details-async (list child))
+                              (list #'clutch-db-table-comment #'clutch-db-table-comment-async (list child))
+                              (list #'clutch-db-foreign-keys #'clutch-db-foreign-keys-async (list child)))
+                        (mapcar (lambda (category)
+                                  (list #'clutch-db-list-objects #'clutch-db-list-objects-async (list category)))
+                                '(indexes sequences procedures functions triggers))))
+                (pcase-let* ((`(,sync ,async ,args) request)
+                             (expected (apply sync conn args))
+                             (done nil) (actual nil) (failure nil))
+                  (ert-info ((format "native metadata %s %s" async args))
+                    (should (apply async conn
+                                   (append args
+                                           (list (lambda (value) (setq actual value done t))
+                                                 (lambda (message) (setq failure message done t))))))
+                    (clutch-test--await (lambda () done))
+                    (should-not failure)
+                    (should (equal actual expected))))))
             (setq source (generate-new-buffer " *clutch-er-live*"))
             (with-current-buffer source
               (clutch-mode)
@@ -367,12 +391,17 @@ is on MySQL or PostgreSQL."
     (clutch-test--await (lambda () (not (clutch--connection-alive-p conn))))
     conn))
 
+(defun clutch-test--server-rows (conn sql)
+  "Read SQL rows directly from CONN after its background metadata finishes.
+Server probes bypass the public command's connection admission."
+  (clutch--await-background-request conn)
+  (clutch-db-result-rows (clutch-db-query conn sql)))
+
 (defun clutch-test--server-session-id (conn)
   "Return the server's id of the session of MySQL or PostgreSQL CONN."
-  (caar (clutch-db-result-rows
-         (clutch-db-query conn (if (eq (clutch-db-backend-key conn) 'mysql)
-                                   "SELECT CONNECTION_ID()"
-                                 "SELECT pg_backend_pid()")))))
+  (caar (clutch-test--server-rows conn (if (eq (clutch-db-backend-key conn) 'mysql)
+                                         "SELECT CONNECTION_ID()"
+                                       "SELECT pg_backend_pid()"))))
 
 (defun clutch-test--server-session-count (admin id)
   "Return how many sessions with ID the server has, asked through ADMIN."
@@ -512,7 +541,7 @@ a new connection must be where the server says the console is."
                 (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) name))
                           ((symbol-function 'yes-or-no-p) #'always))
                   (clutch-switch-schema))
-                (let ((here (clutch-db-result-rows (clutch-db-query clutch-connection where))))
+                (let ((here (clutch-test--server-rows clutch-connection where)))
                   (should (string-match-p (regexp-quote name) (format "%S" here)))
                   (let ((reopened (clutch-db-connect clutch-test-backend
                                                      clutch--connection-params)))
@@ -762,8 +791,7 @@ must not fail either."
     (let ((database (format "clutch_drop_%d" (emacs-pid)))
           (params (append (list :backend 'mysql) (clutch-test--live-connect-params))))
       (cl-flet ((server-database ()
-                  (caar (clutch-db-result-rows
-                         (clutch-db-query clutch-connection "SELECT DATABASE()"))))
+                  (caar (clutch-test--server-rows clutch-connection "SELECT DATABASE()")))
                 (schema-state ()
                   (plist-get (clutch--schema-status-entry clutch-connection) :state)))
         (unwind-protect
@@ -803,8 +831,7 @@ reconnect parameters."
       (cl-labels ((run (&rest statements)
                     (apply #'clutch-test--run-in-console statements))
                   (server-path ()
-                    (caar (clutch-db-result-rows
-                           (clutch-db-query clutch-connection "SHOW search_path"))))
+                    (caar (clutch-test--server-rows clutch-connection "SHOW search_path")))
                   (check (path namespace &optional reconnect-path)
                     (should (equal (server-path) path))
                     (should (equal (clutch-db-current-schema clutch-connection)
@@ -893,8 +920,7 @@ though the server had rolled it back with the transaction."
            (params (append (list :backend 'pg) (clutch-test--live-connect-params)))
            default-path)
       (cl-labels ((server-path ()
-                    (caar (clutch-db-result-rows
-                           (clutch-db-query clutch-connection "SHOW search_path"))))
+                    (caar (clutch-test--server-rows clutch-connection "SHOW search_path")))
                   (path-after-a-lost-connection ()
                     (let ((lost (clutch-test--end-console-session admin)))
                       (clutch-test--run-in-console "SELECT 1")
