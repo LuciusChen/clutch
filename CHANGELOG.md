@@ -4,6 +4,8 @@
 
 ### Added
 
+- Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
+
 - JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The published agent pin awaits the 0.2.28 release.
 
 - ER metadata loads asynchronously on native PostgreSQL and MySQL when their query APIs support it, with elapsed-time feedback and cancellation. Cached columns and outgoing keys are reused, and an existing background request is awaited without blocking the command.

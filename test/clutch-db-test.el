@@ -3332,6 +3332,38 @@ passes validation fails the test instead of failing on the fake client."
       (should (equal (mongodb-document-pairs command)
                      '(("ping" . 1)))))))
 
+(ert-deftest clutch-db-test-mongodb-metadata-uses-async-client-api ()
+  "Metadata dispatch defers replies and shares sampled-field conversion."
+  (let* ((conn (make-clutch-mongodb-conn :client 'client :database "app"))
+         (documents '((("_id" . 1) ("profile" . (("age" . 30))))
+                      (("_id" . 2) ("active" . t))))
+         pending)
+    (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_) t))
+              ((symbol-function 'mongodb-find) (lambda (&rest _) documents))
+              ((symbol-function 'mongodb-find-async)
+               (lambda (client database collection reply _filter _projection limit &rest _)
+                 (should (eq client 'client))
+                 (should (equal database "app"))
+                 (should (equal collection "users"))
+                 (should (= limit clutch-mongodb-schema-sample-size))
+                 (setq pending reply)))
+              ((symbol-function 'run-with-idle-timer)
+               (lambda (&rest _) (ert-fail "Synchronous idle fallback"))))
+      (dolist (case (list (cons #'clutch-db-list-columns #'clutch-db-list-columns-async)
+                         (cons #'clutch-db-column-details #'clutch-db-column-details-async)))
+        (let ((expected (funcall (car case) conn "users")) actual failure)
+          (should (funcall (cdr case) conn "users"
+                           (lambda (value) (setq actual value))
+                           (lambda (error) (setq failure error))))
+          (should-not actual)
+          (should pending)
+          (funcall pending documents nil)
+          (should (equal actual expected))
+          (should-not failure)
+          (funcall (cdr case) conn "users" #'ignore (lambda (error) (setq failure error)))
+          (funcall pending nil '(mongodb-error "denied"))
+          (should (string-match-p "denied" failure)))))))
+
 (ert-deftest clutch-db-test-mongodb-metadata-uses-public-client-api ()
   "Native MongoDB metadata should map databases and collections into Clutch objects."
   (let ((clutch-mongodb-schema-sample-size 2)
@@ -7922,6 +7954,21 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
               (should (member "_id" columns))
               (should (member "field" columns))
               (should (member "extra" columns)))
+            (dolist (request
+                     (list (list #'clutch-db-list-tables #'clutch-db-refresh-schema-async nil)
+                           (list #'clutch-db-list-columns #'clutch-db-list-columns-async (list collection))
+                           (list #'clutch-db-column-details #'clutch-db-column-details-async (list collection))
+                           (list #'clutch-db-list-objects #'clutch-db-list-objects-async '(indexes))))
+              (pcase-let* ((`(,sync ,async ,args) request)
+                           (expected (apply sync conn args))
+                           (done nil) (actual nil) (failure nil))
+                (should (apply async conn
+                               (append args (list (lambda (value) (setq actual value done t))
+                                                  (lambda (error) (setq failure error done t))))))
+                (should-not done)
+                (clutch-db-test--mongodb-live-wait-for (lambda () done))
+                (should-not failure)
+                (should (equal actual expected))))
             (let* ((indexes (clutch-db-list-objects conn 'indexes))
                    (index (seq-find
                            (lambda (entry)
@@ -7965,8 +8012,8 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
         (clutch-db-test--mongodb-live-drop-collection
          conn validation-collection)))))
 
-(ert-deftest clutch-db-test-mongodb-live-idle-metadata-serializes-one-client ()
-  "Idle metadata calls should serialize while one MongoDB find is blocked."
+(ert-deftest clutch-db-test-mongodb-live-background-metadata-serializes-and-yields ()
+  "Metadata serializes on one client and yields to foreground commands."
   :tags '(:db-live :mongodb-live)
   (clutch-db-test--with-mongodb conn
     (let ((first (clutch-db-test--mongodb-live-collection "metadata_first"))
@@ -7987,7 +8034,9 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
              '(("failCommands" . ["find"])
                ("blockConnection" . t)
                ("blockTimeMS" . 500)))
-            (cl-letf (((symbol-function 'run-with-idle-timer)
+            (cl-letf (((symbol-function 'mongodb-find)
+                       (lambda (&rest _) (ert-fail "Synchronous field sampling")))
+                      ((symbol-function 'run-with-idle-timer)
                        (lambda (secs _repeat fn &rest args)
                          (apply #'run-at-time secs nil fn args))))
               (clutch-db-list-columns-async
@@ -8001,7 +8050,23 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
               (clutch-db-test--mongodb-live-wait-for
                (lambda () (= (+ (length results) (length errors)) 2))))
             (should-not errors)
-            (should (= (length results) 2)))
+            (should (= (length results) 2))
+            (clutch-db-test--mongodb-live-set-find-failpoint
+             conn (mongodb-document '(("times" . 2)))
+             '(("failCommands" . ["listIndexes"]) ("blockConnection" . t) ("blockTimeMS" . 100)))
+            (let ((fetch (symbol-function 'mongodb-list-indexes-async))
+                  (sent 0) done failure)
+              (cl-letf (((symbol-function 'mongodb-list-indexes-async)
+                         (lambda (&rest args) (cl-incf sent) (apply fetch args))))
+                (clutch-db-list-objects-async conn 'indexes (lambda (_) (setq done t))
+                                              (lambda (error) (setq failure error done t)))
+                (clutch-db-test--mongodb-live-wait-for (lambda () (> sent 0)))
+                (clutch--run-db-query conn "db.runCommand({ping: 1})")
+                ;; The remaining metadata requests yield at this boundary.
+                (should (= sent 1))
+                (should-not done)
+                (clutch-db-test--mongodb-live-wait-for (lambda () done))
+                (should-not failure))))
         (ignore-errors
           (clutch-db-test--mongodb-live-set-find-failpoint conn "off"))
         (clutch-db-test--mongodb-live-drop-collection conn first)

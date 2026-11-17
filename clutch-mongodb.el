@@ -55,6 +55,11 @@
 (declare-function mongodb-document-p "mongodb" (value))
 (declare-function mongodb-error-labels "mongodb" (condition))
 (declare-function mongodb-explain "mongodb" (client database command &optional verbosity))
+(declare-function mongodb-find-async "mongodb"
+                  (conn database collection callback &optional filter projection limit skip sort options))
+(declare-function mongodb-list-collections-async "mongodb" (conn database callback))
+(declare-function mongodb-list-indexes-async "mongodb" (conn database collection callback))
+(declare-function mongodb-busy-p "mongodb" (conn))
 (declare-function mongodb-find "mongodb" (client database collection &optional filter projection limit skip sort options))
 (declare-function mongodb-find-command "mongodb" (collection &optional filter projection limit skip sort options))
 (declare-function mongodb-insert "mongodb" (client database collection documents &optional ordered))
@@ -1187,10 +1192,9 @@ display them in their Extended JSON spelling."
                          :descend (clutch-mongodb--index-direction
                                    (cdr pair)))))
 
-(defun clutch-mongodb--index-entry (conn collection document)
-  "Return a Clutch index entry for MongoDB index DOCUMENT on COLLECTION in CONN."
-  (let ((name (clutch-mongodb--document-value document "name"))
-        (database (clutch-mongodb-conn-database conn)))
+(defun clutch-mongodb--index-entry (database collection document)
+  "Return an index entry for DOCUMENT on COLLECTION in DATABASE."
+  (let ((name (clutch-mongodb--document-value document "name")))
     (list :name name
           :type "INDEX"
           :schema database
@@ -1262,17 +1266,44 @@ display them in their Extended JSON spelling."
             (list "MongoDB schema sample size must be a positive integer")))
   clutch-mongodb-schema-sample-size)
 
+(defun clutch-mongodb--sampled-documents (value)
+  "Validate and return sampled document VALUE."
+  (unless (clutch-mongodb--document-list-p value)
+    (signal 'clutch-db-error '("MongoDB schema sampling returned a non-document result")))
+  value)
+
 (defun clutch-mongodb--sample-documents (conn collection)
   "Return sampled documents from COLLECTION on CONN."
   (clutch-mongodb--with-mongodb-errors
-    (let ((value (mongodb-find
-                  (clutch-mongodb-conn-client conn)
-                  (clutch-mongodb-conn-database conn)
-                  collection nil nil (clutch-mongodb--schema-sample-limit))))
-      (cond
-       ((clutch-mongodb--document-list-p value) value)
-       (t (signal 'clutch-db-error
-                  (list "MongoDB schema sampling returned a non-document result")))))))
+    (clutch-mongodb--sampled-documents
+     (mongodb-find (clutch-mongodb-conn-client conn)
+                   (clutch-mongodb-conn-database conn)
+                   collection nil nil (clutch-mongodb--schema-sample-limit)))))
+
+(defun clutch-mongodb--metadata-requests (conn requests send decode outcome)
+  "Run background metadata REQUESTS on CONN through SEND and DECODE.
+Deliver OUTCOME through the shared request series, deferring to foreground work."
+  (clutch-db--metadata-request-series
+   (lambda (request reply)
+     (unless (clutch-db-in-use-p conn)
+       (funcall send request reply)
+       t))
+   requests decode outcome (lambda () (clutch-db-live-p conn))))
+
+(defun clutch-mongodb--sample-async (conn collection decode callback errback)
+  "Sample COLLECTION on CONN asynchronously, DECODE and deliver CALLBACK.
+ERRBACK receives sampling errors using the existing metadata request contract."
+  (when (fboundp 'mongodb-find-async)
+    (let ((limit (clutch-mongodb--schema-sample-limit))
+          (database (clutch-mongodb-conn-database conn)))
+      (clutch-mongodb--metadata-requests
+       conn (list collection)
+       (lambda (name reply)
+         (mongodb-find-async (clutch-mongodb-conn-client conn) database name
+                             reply nil nil limit))
+       (lambda (results) (funcall decode (clutch-mongodb--sampled-documents (car results))))
+       (clutch-db--metadata-outcome callback errback)))
+    t))
 
 (defun clutch-mongodb--profile-stat (stats path)
   "Return the mutable profile stat for PATH in STATS."
@@ -1553,6 +1584,26 @@ database too when authSource names none."
   (plist-put (copy-sequence params)
              :schema (clutch-mongodb-conn-database conn)))
 
+(cl-defmethod clutch-db-eager-schema-refresh-p ((_conn clutch-mongodb-conn))
+  "Defer MongoDB collection discovery when the async client API is available."
+  (not (fboundp 'mongodb-list-collections-async)))
+
+(cl-defmethod clutch-db-refresh-schema-async
+    ((conn clutch-mongodb-conn) callback &optional errback idle-delay)
+  "Refresh collection names on CONN asynchronously after optional IDLE-DELAY.
+Deliver CALLBACK with names and ERRBACK with errors."
+  (when (fboundp 'mongodb-list-collections-async)
+    (if idle-delay
+        (run-with-idle-timer idle-delay nil
+                            (lambda () (clutch-db-refresh-schema-async conn callback errback)))
+      (let ((database (clutch-mongodb-conn-database conn)))
+        (clutch-mongodb--metadata-requests
+         conn '(collections)
+         (lambda (_request reply)
+           (mongodb-list-collections-async (clutch-mongodb-conn-client conn) database reply))
+         #'car (clutch-db--metadata-outcome callback errback))))
+    t))
+
 (cl-defmethod clutch-db-list-tables ((conn clutch-mongodb-conn))
   "Return collection names for CONN's current MongoDB database."
   (clutch-mongodb--with-mongodb-errors
@@ -1590,9 +1641,22 @@ database too when authSource names none."
 
 (cl-defmethod clutch-db-list-columns-async
     ((conn clutch-mongodb-conn) collection callback &optional errback)
-  "Fetch field paths for COLLECTION on CONN when the main thread is idle."
-  (clutch-db--schedule-idle-metadata-call
-   conn callback errback #'clutch-db-list-columns nil collection))
+  "Read COLLECTION's sampled fields on CONN, delivering CALLBACK or ERRBACK."
+  (if (fboundp 'mongodb-find-async)
+      (clutch-mongodb--sample-async
+       conn collection
+       (lambda (docs)
+         (mapcar (lambda (stat) (plist-get stat :path))
+                 (clutch-mongodb--profile-stats-for-docs docs)))
+       callback errback)
+    (clutch-db--schedule-idle-metadata-call
+     conn callback errback #'clutch-db-list-columns nil collection)))
+
+(cl-defmethod clutch-db-column-details-async
+    ((conn clutch-mongodb-conn) collection callback &optional errback _schema _catalog)
+  "Read COLLECTION's field details on CONN, delivering CALLBACK or ERRBACK."
+  (clutch-mongodb--sample-async conn collection #'clutch-mongodb--column-details-for-docs
+                               callback errback))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-mongodb-conn) collection
                                         &optional _schema _catalog)
@@ -1851,10 +1915,36 @@ of top-level field names for field-scoped snippets."
        (cl-loop for collection in (clutch-db-list-tables conn)
                 append
                 (mapcar (lambda (document)
-                          (clutch-mongodb--index-entry conn collection document))
+                          (clutch-mongodb--index-entry (clutch-mongodb-conn-database conn) collection document))
                         (clutch-mongodb--collection-index-documents
                          conn collection))))
       (_ nil))))
+
+(cl-defmethod clutch-db-list-objects-async
+    ((conn clutch-mongodb-conn) category callback &optional errback)
+  "Read object CATEGORY on MongoDB CONN, delivering CALLBACK or ERRBACK."
+  (when (and (fboundp 'mongodb-list-collections-async)
+             (fboundp 'mongodb-list-indexes-async))
+    (if (eq category 'indexes)
+        (let ((database (clutch-mongodb-conn-database conn))
+              (client (clutch-mongodb-conn-client conn))
+              (outcome (clutch-db--metadata-outcome callback errback)))
+          (clutch-mongodb--metadata-requests
+           conn '(collections)
+           (lambda (_request reply) (mongodb-list-collections-async client database reply))
+           #'car
+           (lambda (names error)
+             (if error (funcall outcome nil error)
+               (clutch-mongodb--metadata-requests
+                conn names
+                (lambda (name reply) (mongodb-list-indexes-async client database name reply))
+                (lambda (results)
+                  (cl-loop for name in names for documents in results
+                           append (mapcar (lambda (doc) (clutch-mongodb--index-entry database name doc))
+                                          documents)))
+                outcome)))))
+      (funcall callback nil))
+    t))
 
 (cl-defmethod clutch-db-object-details ((conn clutch-mongodb-conn) entry)
   "Return MongoDB object details for ENTRY on CONN."
@@ -1889,7 +1979,13 @@ of top-level field names for field-scoped snippets."
 
 (cl-defmethod clutch-db-busy-p ((conn clutch-mongodb-conn))
   "Return non-nil when MongoDB CONN is executing a mongodb.el command."
-  (clutch-mongodb-conn-busy conn))
+  (or (clutch-mongodb-conn-busy conn)
+      (and (fboundp 'mongodb-busy-p)
+           (mongodb-busy-p (clutch-mongodb-conn-client conn)))))
+
+(cl-defmethod clutch-db-request-in-flight-p ((conn clutch-mongodb-conn))
+  "Return non-nil while MongoDB CONN owns a command or pending reply."
+  (clutch-db-busy-p conn))
 
 (cl-defmethod clutch-db-user ((conn clutch-mongodb-conn))
   "Return the effective MongoDB user for CONN, if any."
