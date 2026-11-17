@@ -295,7 +295,32 @@ connection's current one."
     (clutch-er-refresh)
     (clutch-test-er--goto "archive.public.customers.name")
     (clutch-er-follow)
-    (should (equal (plist-get clutch-er--entry :catalog) "archive"))))
+    (should (equal (plist-get clutch-er--entry :catalog) "archive"))
+    (setf (clutch-test-conn-params clutch-connection)
+          (plist-put (copy-sequence (clutch-test-conn-params clutch-connection))
+                     :catalog "shop"))
+    (dolist (catalog '("shop" "elsewhere"))
+      (push (cons (clutch--table-key "orders" nil catalog)
+                  (cdr (assoc "orders" (clutch-test-conn-tables clutch-connection))))
+            (clutch-test-conn-tables clutch-connection))
+      (should (= (if (equal catalog "shop") 1 0)
+                 (length (seq-filter
+                          (lambda (relation) (plist-get relation :stored))
+                          (clutch-er-outgoing-relations
+                           clutch-connection clutch--connection-params
+                           (list :name "orders" :catalog catalog))))))
+      (clutch-er-diagram (list :name "orders" :type "TABLE" :catalog catalog))
+      (should (= (if (equal catalog "shop") 1 0)
+                 (length (seq-filter (lambda (relation) (plist-get relation :stored))
+                                     (plist-get clutch-er--model :relations))))))
+    (let ((stored (clutch-er--read-relations (clutch-test-er--file))))
+      (push '(catalog . "shop") (alist-get 'from (car stored)))
+      (clutch-er--write-relations (clutch-test-er--file) stored))
+    (should (= 1 (length (seq-filter
+                         (lambda (relation) (plist-get relation :stored))
+                         (clutch-er-outgoing-relations
+                          clutch-connection clutch--connection-params
+                          '(:name "orders"))))))))
 
 (ert-deftest clutch-test-er-refuses-a-relations-file-it-cannot-read ()
   "A file that is not JSON, or is of another version, is reported by name

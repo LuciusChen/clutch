@@ -2115,8 +2115,9 @@ CONN's current schema then names the namespace that CONN is in, and
 
 (cl-defgeneric clutch-db-metadata-scope (conn)
   "Return the scope of CONN's metadata when its current schema is not all of it.
-Return it as CONN last reported it, without asking the server: it is read
-before each statement, to tell whether the statement moved CONN.")
+Return an alist with catalog and schema entries when applicable, as CONN
+last reported them, without asking the server.  It is read before each
+statement to tell whether the statement moved CONN.")
 
 (cl-defmethod clutch-db-metadata-scope ((_conn t))
   "Return nil, as CONN's current schema is the scope of its metadata."
