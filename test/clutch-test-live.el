@@ -2178,6 +2178,8 @@ throughout."
   (clutch-test--with-conn conn
     (let* ((table (format "clutch_obj_desc_%d" (emacs-pid)))
            (index (format "idx_clutch_obj_desc_%d" (emacs-pid)))
+           (later (concat table "_later"))
+           describe-name
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
             (clutch-test--live-create-table-sql
@@ -2206,6 +2208,7 @@ throughout."
                                :key (lambda (entry) (plist-get entry :name))
                                :test #'string=)))
                 (should table-entry)
+                (setq describe-name (format "*clutch describe: %s*" (clutch--object-fqname table-entry)))
                 (should index-entry)
                 (let ((text (clutch--object-describe-text conn table-entry)))
                   (should (string-match-p (regexp-quote table) text))
@@ -2216,7 +2219,34 @@ throughout."
                 (let ((text (clutch--object-describe-text conn index-entry)))
                   (should (string-match-p (regexp-quote index) text))
                   (should (string-match-p "^Columns (1)$" text))
-                  (should (string-match-p "^  name\\_>" text)))))
+                  (should (string-match-p "^  name\\_>" text)))
+                (clutch--refresh-schema-cache conn)
+                (save-window-excursion
+                  (with-temp-buffer
+                    (setq-local clutch-connection conn)
+                    (clutch-object-describe table-entry))
+                  (with-current-buffer describe-name
+                    (clutch-db-query conn (format "ALTER TABLE %s ADD extra INT" table))
+                    (clutch-db-query conn (format "CREATE TABLE %s (id INT)" later))
+                    (let ((inhibit-read-only t)) (erase-buffer) (insert "stale display"))
+                    (setq-local clutch--buffer-error-details '(:summary "old"))
+                    (puthash conn (list :buffer (current-buffer) :problem '(:summary "old"))
+                             clutch--problem-records-by-conn)
+                    (clutch-describe-refresh t t)
+                    (should (string-match-p "^Columns (2)$" (buffer-string)))
+                    (should-not (string-match-p "extra" (buffer-string)))
+                    (should-not clutch--buffer-error-details)
+                    (should-not (gethash conn clutch--problem-records-by-conn))
+                    (call-interactively #'clutch-describe-refresh)
+                    (clutch-test--await
+                     (lambda () (not (eq (plist-get (clutch--schema-status-entry conn) :state)
+                                         'refreshing))))
+                    (should (string-match-p "^Columns (3)$" (buffer-string)))
+                    (should (string-match-p "^  extra\\_>" (buffer-string)))
+                    (should (not (eq (gethash later (gethash conn clutch--schema-cache) 'missing)
+                                     'missing)))))))
+          (when-let* ((buffer (and describe-name (get-buffer describe-name)))) (kill-buffer buffer))
+          (ignore-errors (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" later)))
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
 (ert-deftest clutch-test-live-paged-sql-building ()
