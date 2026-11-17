@@ -749,7 +749,7 @@ Uses a layered resolution strategy:
 
 TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set."
   (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
-        (matches (clutch--object-matches-at-point table-like-only allowed-types)))
+        matches)
     (clutch--remember-current-object
      (cond
       (clutch--object-dispatch-entry
@@ -759,7 +759,9 @@ TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set."
        clutch--object-action-entry)
       (current-object
        current-object)
-      ((clutch--preferred-object-match matches table-like-only))
+      ((clutch--preferred-object-match
+        (setq matches (clutch--object-matches-at-point table-like-only allowed-types))
+        table-like-only))
       ((> (length matches) 1)
        (clutch--object-entry-reader clutch-connection
                                     prompt

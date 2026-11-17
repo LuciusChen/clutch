@@ -679,6 +679,7 @@ left to `clutch--refuse-while-running'."
 When DEFER-TRANSACTION-STATE is non-nil, leave dirty-state accounting to the
 enclosing atomic-batch workflow."
   (clutch--refuse-while-running conn)
+  (clutch--await-background-request conn)
   (when (clutch--tx-uncertain-p conn)
     (user-error
      "Transaction state is uncertain; roll back or reconnect before running another query"))
@@ -1118,7 +1119,8 @@ outcome is unknown, or nil."
   "Ensure current buffer has a live connection.
 If the connection has dropped, attempts to reconnect automatically
 using the stored params.  Signals a user-error if not recoverable, or
-while a query is running on the connection."
+while a query is running on the connection.  Existing background metadata
+finishes before the command uses the session."
   (clutch--refuse-while-running clutch-connection)
   (unless (clutch--connection-alive-p clutch-connection)
     (unless (clutch--try-reconnect)
@@ -1126,7 +1128,8 @@ while a query is running on the connection."
        (if (derived-mode-p 'clutch-result-mode 'clutch-record-mode
                            'clutch-describe-mode)
            "Connection closed.  Reconnect from the SQL buffer or REPL"
-         "Not connected.  Use C-c C-e to connect")))))
+         "Not connected.  Use C-c C-e to connect"))))
+  (clutch--await-background-request clutch-connection))
 
 ;;;; Schema and metadata status UI
 
@@ -2743,6 +2746,7 @@ with SET LOCAL when the transaction ends either way."
          (params (or clutch--connection-params
                      (plist-get context :params))))
     (clutch--refuse-while-running conn)
+    (clutch--await-background-request conn)
     (let ((namespaces (clutch-db-list-schemas conn))
           (current (clutch-db-current-schema conn)))
       (unless namespaces

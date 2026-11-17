@@ -1721,6 +1721,19 @@ to one caller instead of the shared transition shows up here."
             (funcall command 'fake-conn)
             (should (equal (nreverse steps) expected))))))))
 
+(ert-deftest clutch-test-command-admission-awaits-background-metadata ()
+  "Command admission waits for background metadata before using the session."
+  (with-temp-buffer
+    (let ((conn (make-clutch-test-conn)) (pending t) waited)
+      (setq-local clutch-connection conn)
+      (cl-letf (((symbol-function 'clutch-db-request-in-flight-p)
+                 (lambda (actual) (should (eq actual conn)) pending))
+                ((symbol-function 'accept-process-output)
+                 (lambda (&rest _) (setq pending nil waited t))))
+        (clutch--ensure-connection)
+        (should waited)
+        (should-not pending)))))
+
 (ert-deftest clutch-test-preserve-teardown-keeps-lost-transaction-evidence ()
   "Retiring a dirty connection must keep the dirty flag for later refusal.
 The flag is the only record that the server rolled back an open
