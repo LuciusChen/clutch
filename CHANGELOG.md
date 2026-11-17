@@ -4,6 +4,8 @@
 
 ### Added
 
+- The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Click or press RET to open a table, `+` expands it, `o` moves between overview and fields, and `C-u g` recenters.
+
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 
 - JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The published agent pin awaits the 0.2.28 release.
