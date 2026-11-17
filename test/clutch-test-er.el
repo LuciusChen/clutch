@@ -111,6 +111,13 @@ with TABLE.  Return the column lists offered first, in order."
   (search-forward text)
   (beginning-of-line))
 
+(defun clutch-test-er--goto-table (name &optional schema catalog)
+  "Move to the overview button for NAME in SCHEMA and CATALOG."
+  (goto-char (or (clutch-er--overview-position
+                 (clutch-er--overview-entry
+                  (list :name name :schema schema :catalog catalog) clutch-er--model))
+                (ert-fail (format "No overview node for %s" name)))))
+
 (defun clutch-test-er--highlighted ()
   "Return the highlighted lines, without properties, in buffer order."
   (sort (mapcar (lambda (overlay)
@@ -178,16 +185,33 @@ highlights its relations.  Neither changes the text."
       (should-not (clutch-test-er--highlighted))
       (should (= tick (buffer-chars-modified-tick))))))
 
-(ert-deftest clutch-test-er-follows-relations-and-returns ()
-  "Following a relation centers its other table; back returns."
+(ert-deftest clutch-test-er-navigates-only-through-overview-nodes ()
+  "Direction keys move one node, and field details do not switch tables."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (clutch-test-er--goto "customers.id")
+    (should-error (clutch-er-follow) :type 'user-error)
+    (should (equal (plist-get clutch-er--entry :name) "orders"))
+    (dolist (binding '(([left] . clutch-er-left) ([right] . clutch-er-right)
+                       ([up] . clutch-er-up) ([down] . clutch-er-down)))
+      (should (eq (key-binding (car binding)) (cdr binding))))
+    (let ((tick (buffer-chars-modified-tick)))
+      (clutch-er-right)
+      (should (looking-at "customers"))
+      (clutch-er-down)
+      (should (looking-at "regions"))
+      (clutch-er-up)
+      (should (looking-at "customers"))
+      (clutch-er-left)
+      (should (looking-at "orders"))
+      (should-error (clutch-er-left) :type 'user-error)
+      (should (= tick (buffer-chars-modified-tick))))
+    (clutch-er-right)
     (clutch-er-follow)
     (should (string-match-p "^ customers " (clutch-test-er--text)))
     (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
-    (clutch-er-back)
-    (should (string-match-p "^ orders " (clutch-test-er--text)))
-    (should-error (clutch-er-back) :type 'user-error)))
+    (clutch-er-left)
+    (clutch-er-follow)
+    (should (string-match-p "^ orders " (clutch-test-er--text)))))
 
 (ert-deftest clutch-test-er-refuses-what-it-cannot-show ()
   "A connection that cannot list referencing keys and an object that is
@@ -286,11 +310,12 @@ connection's current one."
                             (clutch-test-er--text)))
     (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
-    (clutch-test-er--goto "customers.name")
+    (clutch-test-er--goto-table "customers")
     (clutch-er-follow)
     (should (string-match-p "←   orders.customer_id$" (clutch-test-er--text)))
     (should (string-match-p "⇠   orders.note  manual$" (clutch-test-er--text)))
-    (clutch-er-back)
+    (clutch-er-left)
+    (clutch-er-follow)
     (clutch-er--write-relations
      (clutch-test-er--file)
      '(((from . ((table . "orders")))
@@ -300,7 +325,7 @@ connection's current one."
                 :columns '((:name "name" :type "text")))
           (clutch-test-conn-tables clutch-connection))
     (clutch-er-refresh)
-    (clutch-test-er--goto "archive.public.customers.name")
+    (clutch-test-er--goto-table "customers" "public" "archive")
     (clutch-er-follow)
     (should (equal (plist-get clutch-er--entry :catalog) "archive"))
     (setf (clutch-test-conn-params clutch-connection)
@@ -528,7 +553,8 @@ draws with ASCII."
       (clutch-er-refresh t)
       (should (looking-at "customers"))
       (should (string-prefix-p "\n customers" (buffer-string)))
-      (clutch-er-back)
+      (clutch-er-right)
+      (clutch-er-follow)
       (should (equal (plist-get clutch-er--entry :name) "orders"))
       (let ((tick (buffer-chars-modified-tick)))
         (goto-char (point-min))

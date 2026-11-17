@@ -95,9 +95,6 @@ shows, numbered by :id, :schema
 the namespace names are shown relative to and :current the connection's
 current schema.")
 
-(defvar-local clutch-er--history nil
-  "Entries of the tables shown before the current one, latest first.")
-
 (defvar-local clutch-er--all-columns nil
   "Non-nil when the ER view shows every column, not only key columns.")
 
@@ -536,9 +533,10 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                                                                 (car position)))))))
           (unless (eq position junction)
             (insert (propertize (if unicode "│" "|") 'face 'shadow)))))
-      (draw (entry parent lanes)
+      (draw (entry parent lanes &optional parent-position)
         (cl-decf remaining)
-        (let* ((repeated (member entry seen))
+        (let* ((node-position (point))
+               (repeated (member entry seen))
                (record (assoc entry (cdr clutch-er--overview)))
                (selected (equal entry current))
                (expanded (member entry clutch-er--overview-expanded))
@@ -551,7 +549,7 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
             label
             (max 10 (min 28 (- width (current-column) 8)))
             nil nil (if unicode "…" "..."))
-           'clutch-er-entry entry 'follow-link t
+           'clutch-er-entry entry 'clutch-er-parent parent-position 'follow-link t
            'keymap clutch-er--overview-map
            'help-echo (concat (substring-no-properties label) " — RET: show table")
            'face (if selected 'clutch-er-highlight 'clutch-er-table)
@@ -575,13 +573,13 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                        (branch (if children (if unicode " ─┬─" " -+-")
                                  (if unicode " ───" " ---"))))
                   (link branch (cdr child) 4)
-                  (draw (car child) entry (if children (cons junction lanes) lanes))
+                  (draw (car child) entry (if children (cons junction lanes) lanes) node-position)
                   (while (and children (> remaining 0))
                     (setq child (pop children))
                     (padding junction lanes)
                     (link (if unicode (if children "├─" "└─") (if children "+-" "`-"))
                           (cdr child) 2)
-                    (draw (car child) entry (if children (cons junction lanes) lanes))))
+                    (draw (car child) entry (if children (cons junction lanes) lanes) node-position)))
               (insert "\n"))
             (when children (setq omitted t))))))
      (insert " ")
@@ -1076,30 +1074,12 @@ Signal unless that relation was added by hand."
       (user-error "This relation is a foreign key of the database")))
 
 (defun clutch-er-follow ()
-  "Show the overview table or follow the relation at point."
+  "Show the overview table at point."
   (interactive)
-  (let* ((node (get-text-property (point) 'clutch-er-entry))
-         (relation (unless node (clutch-er--relation-at-point "Follow relation: ")))
-         (target (or node (clutch-er--relation-entry relation clutch-er--model)))
-         (current clutch-er--entry))
-    (unless (equal target (clutch-er--overview-entry current clutch-er--model))
-      ;; Following a field into a new part of the graph expands that source.
-      ;; Clicking an already visible table only moves the current highlight.
-      (when (and (not node) (not (clutch-er--overview-position target)))
-        (let ((source (clutch-er--overview-entry current clutch-er--model)))
-          (unless (member source clutch-er--overview-expanded)
-            (setq clutch-er--overview-expanded
-                  (append clutch-er--overview-expanded (list source))))))
-      (clutch-er--show target)
-      (push current clutch-er--history))))
-
-(defun clutch-er-back ()
-  "Show the table shown before the current one."
-  (interactive)
-  (unless clutch-er--history
-    (user-error "No earlier table"))
-  (clutch-er--show (car clutch-er--history))
-  (pop clutch-er--history))
+  (let ((target (or (get-text-property (point) 'clutch-er-entry)
+                    (user-error "Choose a table in the overview"))))
+    (unless (equal target (clutch-er--overview-entry clutch-er--entry clutch-er--model))
+      (clutch-er--show target))))
 
 (defun clutch-er-toggle-columns ()
   "Show every column of the table, or only its key columns."
@@ -1120,27 +1100,62 @@ With prefix RECENTER, start the overview at the current table."
                                        (plist-get clutch-er--entry :name))
   (clutch-er--show clutch-er--entry))
 
+(defun clutch-er--move-node (direction)
+  "Move one overview node in DIRECTION, leaving table details as they are."
+  (let* ((button (or (button-at (point))
+                     (when-let* ((position (clutch-er--overview-position
+                                            (clutch-er--overview-entry
+                                             clutch-er--entry clutch-er--model))))
+                       (button-at position))
+                     (user-error "No overview table to move from")))
+         (position (button-start button))
+         (parent (button-get button 'clutch-er-parent))
+         destination)
+    (if (eq direction 'left)
+        (setq destination parent)
+      (let* ((backward (eq direction 'up))
+             (owner (if (eq direction 'right) position parent))
+             (advance (if backward #'previous-button #'next-button))
+             (candidate (funcall advance (if backward position (button-end button)))))
+        (while (and candidate (not destination))
+          (if (equal (button-get candidate 'clutch-er-parent) owner)
+              (setq destination (button-start candidate))
+            (setq candidate (funcall advance (if backward (button-start candidate)
+                                               (button-end candidate))))))))
+    (unless destination (user-error "No table in that direction"))
+    (goto-char destination)))
+
+(defun clutch-er-left ()
+  "Move to the parent overview node."
+  (interactive)
+  (clutch-er--move-node 'left))
+
+(defun clutch-er-right ()
+  "Move to the first child overview node."
+  (interactive)
+  (clutch-er--move-node 'right))
+
+(defun clutch-er-up ()
+  "Move to the previous sibling overview node."
+  (interactive)
+  (clutch-er--move-node 'up))
+
+(defun clutch-er-down ()
+  "Move to the next sibling overview node."
+  (interactive)
+  (clutch-er--move-node 'down))
+
 (defun clutch-er-next (n)
-  "Move to the Nth next overview table or relation line."
+  "Move to the Nth next overview table."
   (interactive "p")
-  (if (get-text-property (point) 'clutch-er-overview)
-      (forward-button n)
-    (let ((step (if (< n 0) -1 1))
-          (start (point))
-          found)
-      (dotimes (_ (abs n))
-	(setq found nil)
-	(while (and (not found) (zerop (forward-line step)))
-          (setq found (text-property-not-all (line-beginning-position)
-                                             (line-end-position)
-                                             'clutch-er-ids nil))))
-      (if found
-          (goto-char found)
-	(goto-char start)
-	(user-error "No more relations")))))
+  (unless (button-at (point))
+    (goto-char (or (clutch-er--overview-position
+                    (clutch-er--overview-entry clutch-er--entry clutch-er--model))
+                   (user-error "No overview table to move from"))))
+  (forward-button n))
 
 (defun clutch-er-previous (n)
-  "Move to the Nth previous overview table or relation line."
+  "Move to the Nth previous overview table."
   (interactive "p")
   (clutch-er-next (- n)))
 
@@ -1299,11 +1314,14 @@ Only a relation added by hand can change."
     (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
     (define-key map (kbd "+") #'clutch-er-expand)
     (define-key map (kbd "o") #'clutch-er-overview)
+    (define-key map [left] #'clutch-er-left)
+    (define-key map [right] #'clutch-er-right)
+    (define-key map [up] #'clutch-er-up)
+    (define-key map [down] #'clutch-er-down)
     (define-key map (kbd "RET") #'clutch-er-follow)
     (define-key map (kbd "TAB") #'clutch-er-toggle-columns)
     (define-key map (kbd "n") #'clutch-er-next)
     (define-key map (kbd "p") #'clutch-er-previous)
-    (define-key map (kbd "l") #'clutch-er-back)
     (define-key map (kbd "g") #'clutch-er-refresh)
     (define-key map (kbd "b") #'clutch-er-browse)
     (define-key map (kbd "d") #'clutch-er-describe)
@@ -1322,11 +1340,11 @@ Only a relation added by hand can change."
               revert-buffer-function (lambda (&rest _) (clutch-er-refresh))
               clutch-er--header-base
               (concat " ["
-                      (clutch--key-hints '(("RET" "Open")
+                      (clutch--key-hints '(("↑↓←→" "Move")
+                                           ("RET" "Open")
                                            ("o" "Map")
                                            ("+" "Expand")
                                            ("TAB" "Columns")
-                                           ("l" "Back")
                                            ("a" "Add link")
                                            ("g" "Refresh")))
                       "]")
@@ -1359,10 +1377,7 @@ Without ENTRY, use the table at point or ask for one."
             (with-current-buffer buffer
               (unless (derived-mode-p 'clutch-er-mode) (clutch-er-mode))
               (clutch--bind-connection-context conn params (plist-get context :product))
-              (let ((previous clutch-er--entry))
-                (clutch-er--show entry)
-                (when (and previous (not (equal previous entry)))
-                  (push previous clutch-er--history))))
+              (clutch-er--show entry))
             (setq shown t)
             (pop-to-buffer buffer)
             (with-current-buffer buffer

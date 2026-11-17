@@ -4,7 +4,7 @@
 
 ### Added
 
-- The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Click or press RET to open a table, `+` expands it, `o` moves between overview and fields, and `C-u g` recenters.
+- The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Arrow keys move one overview node, and click or RET opens its table. Field details serve as a display. `+` expands a node, `o` moves between overview and fields, and `C-u g` recenters.
 
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 
