@@ -4357,7 +4357,7 @@ there are several."
                        clutch--result-columns clutch--result-column-defs)))
          (relations
           (with-current-buffer result-buf
-            (clutch-result--require-connection)
+            (clutch--ensure-connection)
             (clutch--refuse-while-running clutch-connection)
             (clutch-result--refuse-if-moved)
             (let ((column (nth cidx source-columns)))

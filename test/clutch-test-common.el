@@ -131,6 +131,11 @@ Without declared tables, refuse as the default method does."
   "Return CONN's configured port."
   (plist-get (clutch-test-conn-params conn) :port))
 
+(cl-defmethod clutch-db-metadata-scope ((conn clutch-test-conn))
+  "Return CONN's declared catalog scope when present."
+  (when-let* ((catalog (plist-get (clutch-test-conn-params conn) :catalog)))
+    (list (cons 'catalog catalog))))
+
 (cl-defmethod clutch-db-database ((conn clutch-test-conn))
   "Return CONN's configured database."
   (plist-get (clutch-test-conn-params conn) :database))
