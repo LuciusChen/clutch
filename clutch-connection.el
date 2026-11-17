@@ -663,15 +663,18 @@ which is set when the connection is closed under the statement.")
 
 (defun clutch--await-background-request (conn)
   "Wait for the background request holding CONN to finish.
-Metadata fetched in the background keeps CONN until the server replies, and
-the driver refuses a statement sent meanwhile.  Wait at most ten seconds;
-\\[keyboard-quit] stops the wait.  A statement already running on CONN is
-left to `clutch--refuse-while-running'."
+Reserve foreground priority during the wait so a metadata series yields
+between requests.  Wait at most ten seconds; \\[keyboard-quit] stops the
+wait.  A statement already running on CONN is left to
+`clutch--refuse-while-running'."
   (let ((deadline (+ (float-time) 10)))
-    (while (and (not (gethash conn clutch--running-queries))
-                (clutch-db-request-in-flight-p conn)
-                (< (float-time) deadline))
-      (accept-process-output nil 0.05))))
+    (clutch-db--reserve-connection conn)
+    (unwind-protect
+        (while (and (not (gethash conn clutch--running-queries))
+                    (clutch-db-request-in-flight-p conn)
+                    (< (float-time) deadline))
+          (accept-process-output nil 0.05))
+      (clutch-db--release-connection conn))))
 
 (defun clutch--run-db-query
     (conn sql &optional params defer-transaction-state)

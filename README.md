@@ -121,7 +121,7 @@ MariaDB 10.11 has been live-validated through the native `mysql` backend, includ
 - [Interactive client guide](docs/interactive-client.org) — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
 - [Backend support levels](docs/backend-support.org) — support contracts for Core SQL, basic integrations, MongoDB SQL Interface, DuckDB, and Redis.
 - [Native backend guide](docs/native-backends.md) — MySQL, PostgreSQL, XTDB, SQLite, MongoDB and Redis notes, TLS, timeouts, and native backend examples.
-- [MongoDB backend guide](docs/mongodb-backend.org) — supported helper syntax, document workflows, and native/SQL Interface boundaries.
+- [MongoDB backend guide](docs/mongodb-backend.org) — supported helper syntax, document workflows, and native/SQL Interface boundaries. Collection discovery, field sampling and index warmup run asynchronously with a current `mongodb.el`.
 - [JDBC backend guide](docs/jdbc-backend.org) — driver setup, connection examples, Oracle and DuckDB notes, transactions, and generic JDBC URLs.
 - [Architecture guide](docs/architecture.md) — module layers, backend/surface ownership, connection flow, query/object flow, and JDBC runtime diagrams.
 - [Org-Babel guide](docs/org-babel.org) — `ob-clutch` setup, source block examples, header arguments, and connection caching.

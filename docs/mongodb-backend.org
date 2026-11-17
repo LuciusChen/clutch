@@ -17,6 +17,12 @@ MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC driver
 
 =clutch-jdbc-install-driver 'mongodb= downloads the official MongoDB SQL Interface JDBC driver and stores it as =~/.emacs.d/clutch-jdbc/drivers/mongodb-jdbc.jar=.
 
+** Background Metadata
+
+With =mongodb.el= providing asynchronous command and cursor helpers, collection discovery, sampled field names and details, and index warmup use Clutch's existing background metadata scheduler. The connection runs one request at a time. A foreground command can wait for the current metadata reply, then takes priority before the next background request. Sampling still uses =clutch-mongodb-schema-sample-size= and the same field/type inference.
+
+Each MongoDB wire command retains =mongodb-timeout-seconds= as its response deadline, including cursor continuation. A timeout or broken transport closes the connection. Older =mongodb.el= versions use the existing idle-scheduled synchronous metadata readers, whose network waits can occupy Emacs.
+
 ** Connection Examples
 
 #+begin_src emacs-lisp
