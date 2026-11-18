@@ -24,7 +24,7 @@
 
 ### Fixed
 
-- Record actions stay on the displayed row after client-side filtering or sorting. Reopen the Record if its row is hidden or its result was replaced.
+- Record actions stay on the displayed row after client-side filtering or sorting. Reopen the Record if its row is hidden or its result was replaced. An open cell editor refuses to stage changes against a replacement result.
 
 - Describe and definition buffers keep same-named objects from different connections separate and label the connection.
 

@@ -263,11 +263,7 @@ without its filter, \\`W' and row editing."
       ;; Submitting an edit refreshes the result the same way.
       (let ((row (car clutch--result-rows)))
         (clutch-result--apply-edit
-         0 1 "bea"
-         (list :identity (clutch-db-row-identity-values
-                          row clutch--row-identity)
-               :original (nth 1 row)
-               :original-state (cons nil (nth 1 row)))))
+         0 1 "bea" row (cons nil (nth 1 row))))
       (cl-letf (((symbol-function 'yes-or-no-p)
                  (lambda (&rest _) t)))
         (clutch-result-submit)

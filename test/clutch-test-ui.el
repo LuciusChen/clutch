@@ -2462,10 +2462,12 @@ Point left behind made the next cell command scroll back to it."
           (when (buffer-live-p record-buf) (kill-buffer record-buf)))))))
 
 (ert-deftest clutch-test-record-edit-stays-with-row-after-result-filter ()
-  "A filtered Record can only edit the row it originally displayed."
+  "A Record editor may stage only against the result it opened from."
   (clutch-test--with-sqlite-result (conn result)
       '("CREATE TABLE orders (id INTEGER PRIMARY KEY, name TEXT)"
-        "INSERT INTO orders VALUES (1, 'apple'), (2, 'banana')")
+        "INSERT INTO orders VALUES (1, 'apple'), (2, 'banana')"
+        "CREATE TABLE archive (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO archive VALUES (1, 'apple')")
       "SELECT id, name FROM orders ORDER BY id"
     (let (record editor)
       (unwind-protect
@@ -2506,7 +2508,28 @@ Point left behind made the next cell command scroll back to it."
                 (call-interactively (key-binding (kbd "C-c C-c")))))
             (should (equal (clutch-db-result-rows
                             (clutch-db-query conn "SELECT id, name FROM orders ORDER BY id"))
-                           '((1 "apple") (2 "pear")))))
+                           '((1 "apple") (2 "pear"))))
+            (with-current-buffer result
+              (clutch--goto-cell 0 1)
+              (call-interactively (key-binding (kbd "RET"))))
+            (goto-char (point-min))
+            (search-forward "name")
+            (beginning-of-line)
+            (call-interactively (key-binding (kbd "C-c '")))
+            (setq editor (current-buffer))
+            (should (equal (buffer-string) "apple"))
+            (erase-buffer)
+            (insert "edited")
+            (with-current-buffer result
+              (clutch--execute "SELECT id, name FROM archive")
+              (should (equal clutch--result-source-table "archive")))
+            (with-current-buffer editor
+              (let ((err (should-error
+                          (call-interactively (key-binding (kbd "C-c C-c")))
+                          :type 'user-error)))
+                (should-not (buffer-local-value 'clutch--pending-edits result))
+                (should (string-match-p "Edited row changed" (error-message-string err))))
+              (should (equal (buffer-string) "edited"))))
         (when (buffer-live-p editor) (kill-buffer editor))
         (when (buffer-live-p record) (kill-buffer record))))))
 

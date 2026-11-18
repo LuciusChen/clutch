@@ -3426,12 +3426,7 @@ drawn."
                            (lambda (&rest _) t)))
                   (let ((row (car clutch--result-rows)))
                     (clutch-result--apply-edit
-                     0 0 "after"
-                     (list
-                      :identity (clutch-db-row-identity-values
-                                 row clutch--row-identity)
-                      :original (car row)
-                      :original-state (cons nil (car row)))))
+                     0 0 "after" row (cons nil (car row))))
                   (should clutch--pending-edits)
                   (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
@@ -3465,11 +3460,7 @@ the schema's table."
                         (cidx (cl-position column clutch--result-columns
                                            :test #'string=)))
                     (clutch-result--apply-edit
-                     0 cidx value
-                     (list :identity (clutch-db-row-identity-values
-                                      row clutch--row-identity)
-                           :original (nth cidx row)
-                           :original-state (cons nil (nth cidx row))))
+                     0 cidx value row (cons nil (nth cidx row))))
                     (cl-letf (((symbol-function 'yes-or-no-p)
                                (lambda (&rest _) t)))
                       (clutch-result-submit)
@@ -3837,11 +3828,7 @@ A quote inside the CTE's quoted name must not hide the modification."
                                  clutch--result-source-table table))
                         (let ((row (car clutch--result-rows)))
                           (clutch-result--apply-edit
-                           0 0 value
-                           (list :identity (clutch-db-row-identity-values
-                                            row clutch--row-identity)
-                                 :original (car row)
-                                 :original-state (cons nil (car row)))))
+                           0 0 value row (cons nil (car row))))
                         (cl-letf (((symbol-function 'yes-or-no-p)
                                    (lambda (&rest _) t)))
                           (clutch-result-submit)
