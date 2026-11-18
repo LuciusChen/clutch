@@ -420,9 +420,19 @@ read each time."
          (outgoing (clutch--ensure-foreign-keys conn key)))
     (clutch-er--metadata-model conn params entry columns outgoing incoming)))
 
+(defun clutch-er--press-overview-button ()
+  "Activate the button at point, including just after a table name."
+  (interactive)
+  (or (push-button)
+      (when-let* (((not (bolp)))
+                  (button (button-at (1- (point))))
+                  ((not (button-get button 'skip))))
+        (button-activate button))))
+
 (defvar clutch-er--overview-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map button-map)
+    (define-key map (kbd "RET") #'clutch-er--press-overview-button)
     (define-key map [left] #'clutch-er-left)
     (define-key map [right] #'clutch-er-right)
     (define-key map [up] #'clutch-er-up)
@@ -1240,16 +1250,6 @@ With prefix RECENTER, start the overview at the current table."
   (interactive "p")
   (clutch-er-next (- n)))
 
-(defun clutch-er-browse ()
-  "Browse the rows of the table at the center of the view."
-  (interactive)
-  (clutch-object-browse clutch-er--entry))
-
-(defun clutch-er-describe ()
-  "Describe the table at the center of the view."
-  (interactive)
-  (clutch-object-describe clutch-er--entry))
-
 ;;;; Editing relations
 
 (defun clutch-er--read-columns (prompt names defaults)
@@ -1400,11 +1400,9 @@ Only a relation added by hand can change."
     (define-key map (kbd "n") #'clutch-er-next)
     (define-key map (kbd "p") #'clutch-er-previous)
     (define-key map (kbd "g") #'clutch-er-refresh)
-    (define-key map (kbd "b") #'clutch-er-browse)
-    (define-key map (kbd "d") #'clutch-er-describe)
     (define-key map (kbd "a") #'clutch-er-add-relation)
     (define-key map (kbd "e") #'clutch-er-edit-relation)
-    (define-key map (kbd "k") #'clutch-er-delete-relation)
+    (define-key map (kbd "d") #'clutch-er-delete-relation)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
     map)
   "Keymap for `clutch-er-mode'.")

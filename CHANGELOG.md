@@ -20,9 +20,13 @@
 
 - `clutch-er-diagram`, `C-c C-v` in a SQL buffer, `v` under Objects in the main menu (`C-c ?`) or `r` in the object actions, shows the ER view of a table: its primary-key columns and the columns of its relations, each beside the table its foreign key references or the tables whose foreign keys reference it. A key over several adjacent columns is one bracketed relation. Moving point highlights the relation at point and the columns it joins without drawing the view again. Native PostgreSQL, MySQL and SQLite connections show it, as do JDBC connections with incoming-key metadata and agent 0.2.28 or later. It draws the same characters in graphical frames and terminals, with colors from the theme, and with ASCII where its symbols are two columns wide; `clutch-er-charset` chooses.
 - `r` in the record view follows a relation from the field at point, a foreign key or one added by hand, and asks when several start there.
-- Relations the database does not declare can be added by hand, for browsing only: `a` in the ER view and `R` in a result buffer start one from the column at point, `e` changes one and `k` deletes it. The prompts show the referencing columns and the direction toward the referenced table; columns in a composite relation pair in input order. Target columns default to matching source names when all exist, otherwise start empty. The ER view shows them at both of their tables with a dashed arrow. They are kept in a versioned JSON file for each connection in `clutch-er-relations-directory`, written in a stable order for Git with a non-secret connection-identity hash as its filename, or in the file a connection's `:relations-file` names, such as one shared in a project.
+- Relations the database does not declare can be added by hand, for browsing only: `a` in the ER view and `R` in a result buffer start one from the column at point, `e` changes one and `d` deletes it. The prompts show the referencing columns and the direction toward the referenced table; columns in a composite relation pair in input order. Target columns default to matching source names when all exist, otherwise start empty. The ER view shows them at both of their tables with a dashed arrow. They are kept in a versioned JSON file for each connection in `clutch-er-relations-directory`, written in a stable order for Git with a non-secret connection-identity hash as its filename, or in the file a connection's `:relations-file` names, such as one shared in a project.
 
 ### Fixed
+
+- In the ER overview, `RET` also opens a table when point is immediately after its name.
+
+- Pressing `C-c C-c` in the Record view now opens the result table's confirmation for all staged changes.
 
 - Record actions stay on the displayed row after client-side filtering or sorting. Reopen the Record if its row is hidden or its result was replaced. An open cell editor refuses to stage changes against a replacement result.
 

@@ -4276,6 +4276,13 @@ previous window layout."
 
 ;;;; Record buffer
 
+(defun clutch-record-submit ()
+  "Submit the staged INSERT, UPDATE, and DELETE batch for this Record."
+  (interactive)
+  (clutch-record--resolve-row-index)
+  (clutch-result--show-buffer clutch-record--result-buffer)
+  (clutch-result-submit))
+
 (defvar clutch-record-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
@@ -4285,6 +4292,7 @@ previous window layout."
     (define-key map "v" #'clutch-record-view-value)
     (define-key map "r" #'clutch-record-follow-relation)
     (define-key map (kbd "C-c '") #'clutch-result-edit-cell)
+    (define-key map (kbd "C-c C-c") #'clutch-record-submit)
     (define-key map (kbd "C-c C-k") #'clutch-result-discard-pending-at-point)
     (define-key map "I" #'clutch-clone-row-to-insert)
     (define-key map "q" #'quit-window)
@@ -4301,6 +4309,7 @@ previous window layout."
   \\[clutch-record-next-row]	Next row
   \\[clutch-record-prev-row]	Previous row
   \\[clutch-result-edit-cell]	Edit / re-edit field
+  \\[clutch-record-submit]	Submit all staged changes in the result
   \\[clutch-result-discard-pending-at-point]	Discard staged field or row change
   \\[clutch-record-view-value]	View current field once
   \\[clutch-record-refresh]	Refresh"

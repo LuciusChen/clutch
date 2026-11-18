@@ -241,6 +241,7 @@ Typical flow:
 | =r=         | Follow a relation from the field, asking when several start there |
 | =n= / =p=  | Next row / previous row       |
 | =C-c '=     | Edit / re-edit current field  |
+| =C-c C-c=   | Submit all staged changes in the result |
 | =C-c C-k=   | Discard staged change at field |
 | =C-c C-m=   | Commit the current server transaction |
 | =C-c C-u=   | Roll back the current server transaction |
@@ -253,7 +254,7 @@ Typical flow:
 
 The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a field.
 
-Staging a field edit with =C-c C-c= returns to the same field in the Record view. The Record stays with its row when a client-side filter or sort moves it. If the row is filtered out or a new query or page replaces the result, reopen the Record from the result table before editing or following a relation. If a query replaces the result while the cell editor is already open, Clutch refuses to stage the edit and keeps your input in the editor.
+Staging a field edit with =C-c C-c= returns to the same field in the Record view. Press =C-c C-c= again there to switch to the result table and confirm submission of all its staged changes. The Record stays with its row when a client-side filter or sort moves it. If the row is filtered out or a new query or page replaces the result, reopen the Record from the result table before editing, submitting or following a relation. If a query replaces the result while the cell editor is already open, Clutch refuses to stage the edit and keeps your input in the editor.
 
 * Describe View (clutch-describe-mode) Key Bindings
 
@@ -266,7 +267,7 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 
 * ER View (clutch-er-mode) Key Bindings
 
-A compact relationship overview appears above the current table's name, rule and field details, all in the same buffer. The highlighted table is described below. Within the overview, arrow keys move to a nearby node in the corresponding visual direction, including nodes on other branches. Left/Right prefer the same row, and Up/Down prefer the nearest row and then the closest column. Movement changes focus only. In the field area, arrow keys retain ordinary cursor movement so columns and manual relations can be selected. Click or press =RET= on a table to load its details through the existing asynchronous reader. Ordinary node navigation keeps the overview root, branch order, labels and cursor position stable during loading and after completion. The compact header shows =RET=, =o=, =TAB= and =a=; =o Fields= changes to =o Overview= in the field area. =C-h m= lists the remaining commands. =o= moves between the displayed table's node and its last visited field, and =n=/=p= move through overview table buttons in display order. A bare =+= beside a table marks an unopened branch. =[+N]= counts the neighbouring tables folded by the width or node limit. Click the =+= or =[+N]= marker to expand it, or press =+= on the table or marker. A folded branch redraws the overview starting with those neighbours. Repeat the action to see the next group if more remain folded. This uses the loaded relations and keeps the field card as it was. If an unopened branch cannot fit, the overview starts from that table and shows its fields. =C-u g= starts the overview at the displayed table. A destination outside the window or twelve-node limit also becomes the new root so it remains visible. Multiple keys between the same tables share a link, with a double arrow for references in both directions. A cycle or cross-link ends with =(shown)=. Further relations remain available in the field details. Manual links are dotted. Graph drawing and cursor movement use already loaded data.
+A compact relationship overview appears above the current table's name, rule and field details, all in the same buffer. The highlighted table is described below. Within the overview, arrow keys move to a nearby node in the corresponding visual direction, including nodes on other branches. Left/Right prefer the same row, and Up/Down prefer the nearest row and then the closest column. Movement changes focus only. In the field area, arrow keys retain ordinary cursor movement so columns and manual relations can be selected. Click a table or press =RET= on or immediately after its name to load its details through the existing asynchronous reader. Ordinary node navigation keeps the overview root, branch order, labels and cursor position stable during loading and after completion. The compact header shows =RET=, =o=, =TAB= and =a=; =o Fields= changes to =o Overview= in the field area. =C-h m= lists the remaining commands. =o= moves between the displayed table's node and its last visited field, and =n=/=p= move through overview table buttons in display order. A bare =+= beside a table marks an unopened branch. =[+N]= counts the neighbouring tables folded by the width or node limit. Click the =+= or =[+N]= marker to expand it, or press =+= on the table or marker. A folded branch redraws the overview starting with those neighbours. Repeat the action to see the next group if more remain folded. This uses the loaded relations and keeps the field card as it was. If an unopened branch cannot fit, the overview starts from that table and shows its fields. =C-u g= starts the overview at the displayed table. A destination outside the window or twelve-node limit also becomes the new root so it remains visible. Multiple keys between the same tables share a link, with a double arrow for references in both directions. A cycle or cross-link ends with =(shown)=. Further relations remain available in the field details. Manual links are dotted. Graph drawing and cursor movement use already loaded data.
 
 =C-c C-v=, =v= under Objects in the main menu (=C-c ?=), =r= in the object actions (=C-c C-o=), or =M-x clutch-er-diagram= opens the ER view of a table: its name over a rule, then its primary-key columns and the columns of its relations, each with its type and, beside it, the relation it ends.  =→ customers.id= is a foreign key of the column to another table, =← refunds.order_id= a foreign key of another table to the column, and a column that ends several relations takes a line for each.  A key over adjacent columns brackets them and names the other end once, as =─┐= beside =region= and =─┴→ regions (code, country)= beside =country=.  =◆= marks a primary-key column, =●= a column with a foreign key and =○= one with only relations added by hand.  Names in the table's own schema are not qualified.  Moving point onto a line highlights its relations and the columns they join; moving point never redraws the view.
 
@@ -278,7 +279,7 @@ The view is available on native PostgreSQL, MySQL and SQLite connections, and on
 
 | Key         | Action                                         |
 |-------------+------------------------------------------------|
-| =RET=       | Open the overview table at point              |
+| =RET=       | Open the overview table at point or just before it |
 | Left / Right | Nearby overview node left/right; ordinary cursor movement in fields            |
 | Up / Down   | Nearby overview node above/below; ordinary cursor movement in fields         |
 | =o=         | Move between the current table node and fields |
@@ -287,9 +288,7 @@ The view is available on native PostgreSQL, MySQL and SQLite connections, and on
 | =n= / =p=   | Next / previous overview table in display order |
 | =a=         | Add a relation from the table, starting at the column at point |
 | =e=         | Change the relation at point, added by hand    |
-| =k=         | Delete the relation at point, added by hand    |
-| =b=         | Browse the table's rows                        |
-| =d=         | Describe the table                             |
+| =d=         | Delete the relation at point, added by hand    |
 | =g=         | Reload metadata; =C-u g= also recenters the overview |
 | =C-c C-o=   | Show object actions                            |
 
