@@ -1026,6 +1026,7 @@ unsupported, or the renderer returns nil/empty."
     (db2        . ((mdicon  . "nf-md-database")             ""  :color "#1F70C1"))
     (redshift   . ((mdicon  . "nf-md-database")             ""  :color "#8C4FFF"))
     (clickhouse . ((faicon  . "nf-fa-barcode")              ""  :color "#FFCC00"))
+    (cassandra  . ((devicon . "nf-dev-cassandra")          ""  :color "#1287B1"))
     (mongodb    . ((devicon . "nf-dev-mongodb")             ""  :color "#47A248"))
     (redis      . ((devicon . "nf-dev-redis")               ""  :color "#DC382D")))
   "Alist mapping backend symbols to icon specs.
