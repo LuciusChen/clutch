@@ -67,6 +67,8 @@ Only kept for backends that search objects by name; dropped together with
   "Embark actions for clutch objects.")
 (defvar clutch-embark-target-object-actions nil
   "Embark actions for clutch objects with explicit targets.")
+(defvar clutch-embark-cassandra-object-actions nil
+  "Embark actions for Cassandra objects.")
 
 (defun clutch--object-type-allowed-p (entry allowed-types)
   "Return non-nil when ENTRY is permitted by ALLOWED-TYPES.
@@ -578,7 +580,8 @@ SELECTION-ONLY suppresses object actions when selecting on another connection."
                 (complete (str pred action)
                   (if (eq action 'metadata)
                       `(metadata
-                        ,@(unless selection-only '((category . clutch-object)))
+                        ,@(unless selection-only
+                            `((category . ,(clutch--embark-target-type nil conn))))
                         (annotation-function . ,#'annotation)
                         (group-function . ,#'group)
                         (affixation-function . ,#'affixate)
@@ -982,6 +985,10 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
 (defun clutch--object-display-name (entry)
   "Return a display name for ENTRY."
   (or (plist-get entry :name) ""))
+
+(defun clutch--object-definitions-available-p (conn)
+  "Return non-nil when CONN supports object definitions."
+  (not (eq (clutch-db-backend-key conn) 'cassandra)))
 
 (defun clutch--object-supports-definition-p (entry)
   "Return non-nil when ENTRY supports DDL/source display."
@@ -1400,7 +1407,7 @@ or starting another schema refresh."
                    (user-error "No active connection")))
          (name (clutch--object-display-name entry))
          (type (clutch--object-type-string entry)))
-    (unless (clutch--object-supports-definition-p entry)
+    (unless (clutch--object-action-available-p entry 'show-definition conn)
       (user-error "%s %s does not expose a definition"
                   type name))
     (clutch--with-object-error-capture source-buffer conn entry "show-definition"
@@ -1520,7 +1527,9 @@ When COLUMNS-ONLY is non-nil, label the comparison's limited scope."
                          thereis (buffer-local-value 'clutch--console-name buffer))
                 (clutch--connection-display-key source)))
            (names (mapcar #'car clutch-connection-alist)))
-      (unless (and dialect (clutch--table-entry-p entry))
+      (unless dialect
+        (user-error "Source %s: table definition comparison is unavailable" source-label))
+      (unless (clutch--table-entry-p entry)
         (user-error "Source %s: select a SQL table to compare" source-label))
       (unless names (user-error "Save a target connection to compare table definitions"))
       (clutch--await-background-request source)
@@ -1780,11 +1789,13 @@ When ENTRY is nil, use the current table-like object."
      :key "s"
      :label "Show definition"
      :command clutch-object-show-ddl-or-source
+     :requires-definition t
      :predicate clutch--object-supports-definition-p)
     (:id compare-definition
      :key "c"
      :label "Compare table definition"
      :command clutch-compare-table-definition
+     :requires-definition t
      :predicate clutch--table-entry-p)
     (:id browse
      :key "b"
@@ -1867,11 +1878,14 @@ When ENTRY is nil, use the current table-like object."
   (let* ((spec (clutch--object-action-spec action-id))
          (predicate (plist-get spec :predicate))
          (backend-action (plist-get spec :backend-action))
+         (requires-definition (plist-get spec :requires-definition))
          (conn (or conn
-                   (and backend-action
-                        (clutch--object-action-current-connection)))))
+                   (when (or backend-action requires-definition)
+                     (clutch--object-action-current-connection)))))
     (and (or (null predicate)
              (funcall predicate entry))
+         (or (not requires-definition)
+             (clutch--object-definitions-available-p conn))
          (or (not backend-action)
              (and conn
                   (clutch-db-object-action-supported-p conn entry action-id))))))
@@ -1921,10 +1935,11 @@ When ENTRY is nil, use the current table-like object."
     ("d" (lambda () (clutch--object-action-label 'describe))
      clutch-object-describe)
     ("s" (lambda () (clutch--object-action-label 'show-definition))
-     clutch-object-show-ddl-or-source)
+     clutch-object-show-ddl-or-source
+     :if (lambda () (clutch--object-act-backend-action-p 'show-definition)))
     ("c" (lambda () (clutch--object-action-label 'compare-definition))
      clutch-compare-table-definition
-     :if (lambda () (clutch--table-entry-p clutch--object-action-entry)))
+     :if (lambda () (clutch--object-act-backend-action-p 'compare-definition)))
     ("r" (lambda () (clutch--object-action-label 'er-diagram))
      clutch-er-diagram
      :if (lambda () (clutch--table-entry-p clutch--object-action-entry)))]
@@ -2003,11 +2018,12 @@ When PREDICATE is non-nil, keep only action specs matching it."
               (funcall predicate spec))))
    clutch--object-action-registry))
 
-(defun clutch--embark-target-type (entry)
-  "Return the Embark target type for ENTRY."
-  (if (clutch--object-supports-jump-target-p entry)
-      'clutch-target-object
-    'clutch-object))
+(defun clutch--embark-target-type (entry conn)
+  "Return the Embark target type for ENTRY on CONN."
+  (cond
+   ((not (clutch--object-definitions-available-p conn)) 'clutch-cassandra-object)
+   ((clutch--object-supports-jump-target-p entry) 'clutch-target-object)
+   (t 'clutch-object)))
 
 ;;;; Embark integration (optional)
 
@@ -2016,17 +2032,17 @@ When PREDICATE is non-nil, keep only action specs matching it."
   (when (or clutch--object-dispatch-entry
             (clutch-db-live-p clutch-connection))
     (if clutch--object-dispatch-entry
-        `(,(clutch--embark-target-type clutch--object-dispatch-entry)
+        `(,(clutch--embark-target-type clutch--object-dispatch-entry clutch-connection)
           ,clutch--object-dispatch-entry)
       (pcase major-mode
         ((or 'clutch-mode 'clutch-repl-mode)
          (when-let* ((entry (clutch-object-at-point))
                      (bounds (bounds-of-thing-at-point 'symbol)))
-           `(,(clutch--embark-target-type entry)
+           `(,(clutch--embark-target-type entry clutch-connection)
              ,entry ,(car bounds) . ,(cdr bounds))))
         (_
          (when clutch-browser-current-object
-           `(,(clutch--embark-target-type clutch-browser-current-object)
+           `(,(clutch--embark-target-type clutch-browser-current-object clutch-connection)
              ,clutch-browser-current-object)))))))
 
 (cl-defun clutch--embark-with-resolved-entry
@@ -2051,16 +2067,18 @@ Clears the map after resolution to prevent stale cross-session matches."
             (when run (apply run rest))))
       (setq clutch--object-completion-entry-map nil))))
 
-(defun clutch--embark-actions-keymap (&optional include-jump-target)
+(defun clutch--embark-actions-keymap (&optional include-jump-target omit-definitions)
   "Return a keymap of clutch object actions for Embark.
-INCLUDE-JUMP-TARGET non-nil keeps the jump-target action."
+INCLUDE-JUMP-TARGET non-nil keeps the jump-target action.
+OMIT-DEFINITIONS non-nil removes definition actions."
   (let ((map (make-sparse-keymap))
-        (predicate (unless include-jump-target
-                     (lambda (spec)
-                       (not (eq (plist-get spec :id) 'jump-target))))))
+        (predicate
+         (lambda (spec)
+           (and (or include-jump-target
+                    (not (eq (plist-get spec :id) 'jump-target)))
+                (not (and omit-definitions (plist-get spec :requires-definition)))))))
     (dolist (spec (clutch--embark-action-specs predicate))
-      (define-key map
-                  (kbd (plist-get spec :key))
+      (define-key map (kbd (plist-get spec :key))
                   (cons (plist-get spec :label)
                         (plist-get spec :command))))
     map))
@@ -2071,16 +2089,22 @@ INCLUDE-JUMP-TARGET non-nil keeps the jump-target action."
     (setq clutch--embark-setup-done t
           clutch-embark-object-actions (clutch--embark-actions-keymap)
           clutch-embark-target-object-actions
-          (clutch--embark-actions-keymap t))
+          (clutch--embark-actions-keymap t)
+          clutch-embark-cassandra-object-actions
+          (clutch--embark-actions-keymap nil t))
     (add-to-list 'embark-default-action-overrides
                  '(clutch-object . clutch-object-default-action))
     (add-to-list 'embark-default-action-overrides
                  '(clutch-target-object . clutch-object-default-action))
+    (add-to-list 'embark-default-action-overrides
+                 '(clutch-cassandra-object . clutch-object-default-action))
     (add-to-list 'embark-target-finders #'clutch--embark-object-target)
     (add-to-list 'embark-keymap-alist
                  '(clutch-object . clutch-embark-object-actions))
     (add-to-list 'embark-keymap-alist
                  '(clutch-target-object . clutch-embark-target-object-actions))
+    (add-to-list 'embark-keymap-alist
+                 '(clutch-cassandra-object . clutch-embark-cassandra-object-actions))
     ;; Resolve minibuffer candidate to entry plist before running actions.
     ;; Covers both explicit keymap actions and the default action (RET / embark-dwim).
     (dolist (cmd (cons 'clutch-object-default-action

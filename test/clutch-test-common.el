@@ -209,15 +209,18 @@ the default, which is what a user who just presses RET gets."
              ,@body)
          (delete-directory ,dir t)))))
 
-(defun clutch-test--transient-menu-text (prefix)
-  "Return the text of PREFIX's menu, opened from the current buffer.
+(defun clutch-test--transient-menu-text (entry)
+  "Return the text of the menu opened by ENTRY from the current buffer.
+ENTRY is a command symbol or a key sequence in `kbd' notation.
 Open the menu and quit it with keys, as a user would: its descriptions
 then see this buffer, and Transient's command and quit handling does not
 outlast the caller."
   (save-window-excursion
     (switch-to-buffer (current-buffer))
     (let ((suggest-key-bindings nil))
-      (execute-kbd-macro (vconcat [?\M-x] (symbol-name prefix) [return])))
+      (execute-kbd-macro (if (symbolp entry)
+                             (vconcat [?\M-x] (symbol-name entry) [return])
+                           (kbd entry))))
     (unwind-protect
         (with-current-buffer " *transient*"
           (buffer-string))

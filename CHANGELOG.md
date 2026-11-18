@@ -26,6 +26,8 @@
 
 - Manually refreshing a table description waits for the schema request it starts before reloading table metadata, avoiding a busy-connection error on asynchronous native backends.
 
+- Cassandra keeps an explicit `LIMIT` after a table named `partition`, and its object menus hide unavailable table-definition actions.
+
 - Native PostgreSQL and MySQL schema refresh, column metadata, comments, outgoing keys and object warmup use asynchronous wire requests. Background requests respect foreground reservations, and commands that need the session await existing metadata. Commands with a known table skip a redundant schema-wide lookup.
 
 - DuckDB UI and ER rendering reuse the remembered namespace, refreshing it after namespace-changing statements instead of synchronously querying on every update.

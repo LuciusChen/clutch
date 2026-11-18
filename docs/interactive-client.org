@@ -539,7 +539,8 @@ If [[https://github.com/oantolin/embark][embark]] is installed, clutch registers
 | Key | Action |
 |-----+--------|
 | =d= | Describe object |
-| =s= | Show definition |
+| =s= | Show definition (where available) |
+| =c= | Compare table definition (supported SQL tables) |
 | =r= | ER diagram (tables) |
 | =i= | Show index insight (MongoDB collections) |
 | =e= | Explain sample query (MongoDB collections) |
