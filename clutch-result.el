@@ -4277,9 +4277,10 @@ previous window layout."
 ;;;; Record buffer
 
 (defun clutch-record-submit ()
-  "Submit the staged INSERT, UPDATE, and DELETE batch for this Record."
+  "Submit the staged mutation batch for the Record's result buffer."
   (interactive)
-  (clutch-record--resolve-row-index)
+  (unless (buffer-live-p clutch-record--result-buffer)
+    (user-error "Result buffer no longer exists"))
   (clutch-result--show-buffer clutch-record--result-buffer)
   (clutch-result-submit))
 

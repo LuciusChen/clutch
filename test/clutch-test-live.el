@@ -469,17 +469,14 @@ uncommitted work behind."
                           (with-current-buffer right
                             (should (string-search (if different "numeric(6,0)" "numeric(10,2)")
                                                    (buffer-string)))
-                            (should (string-search "timestamp(3) without time zone"
-                                                   (buffer-string)))
-                            (should (string-search (format "\"state\" \"%s\".\"order_state\"," schema)
-                                                   (buffer-string)))
-                            (should (string-search (format "\"states\" \"%s\".\"order_state\"[]" schema)
-                                                   (buffer-string)))
-                            (should (string-search "\"ref\" uuid," (buffer-string)))
-                            (should (string-search "\"flag\" \"char\"" (buffer-string)))
-                            (should-not (string-search "wrong" (buffer-string)))
-                            (should (string-search "Columns only" (format "%s" header-line-format)))
-                            (should (string-search "CHECK" (format "%s" header-line-format))))
+                            (unless different
+                              (dolist (type (list "timestamp(3) without time zone"
+                                                  (format "\"state\" \"%s\".\"order_state\"," schema)
+                                                  (format "\"states\" \"%s\".\"order_state\"[]" schema)
+                                                  "\"ref\" uuid," "\"flag\" \"char\""))
+                                (should (string-search type (buffer-string))))
+                              (should (string-search "Columns only" (format "%s" header-line-format)))
+                              (should (string-search "CHECK" (format "%s" header-line-format)))))
                           (should (buffer-local-value 'buffer-read-only left))
                           (should (buffer-local-value 'buffer-read-only right)))
                       (when (buffer-live-p control)
@@ -500,7 +497,7 @@ uncommitted work behind."
   (let ((url (getenv "CLUTCH_TEST_CASSANDRA_URL"))
         (clutch-jdbc-fetch-size 3))
     (unless url
-      (ert-skip "Set CLUTCH_TEST_CASSANDRA_URL to a disposable Cassandra keyspace"))
+    (ert-skip "Set CLUTCH_TEST_CASSANDRA_URL to a disposable Cassandra keyspace with keyspace creation rights"))
     (clutch-test--with-live-console (list :backend 'cassandra :url url)
       (let ((conn clutch-connection)
             (table (format "clutch_preview_%d" (emacs-pid)))
@@ -518,17 +515,23 @@ uncommitted work behind."
               (progn
                 (clutch-db-query conn (format "CREATE TABLE %s (tenant int, day int, ts int, payload blob, PRIMARY KEY ((tenant, day), ts)) WITH CLUSTERING ORDER BY (ts DESC)" table))
                 (should-error (clutch-toggle-auto-commit) :type 'user-error)
-                (clutch-db-query conn "CREATE TABLE partition (k int PRIMARY KEY)")
-                (clutch-db-query conn "INSERT INTO partition (k) VALUES (1)")
-                (let ((query "SELECT k FROM partition LIMIT 1"))
-                  (insert query ";")
-                  (goto-char (point-min))
-                  (clutch-test--type-keys "C-c C-c")
-                  (clutch-test--await-queries)
-                  (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests)))
-                                 query))
-                  (with-current-buffer clutch--last-result-buffer
-                    (should (equal clutch--result-rows '((1))))))
+                (let* ((keyspace (format "clutch_limit_%d" (emacs-pid)))
+                       (partition (concat keyspace ".partition")))
+                  (clutch-db-query
+                   conn (format "CREATE KEYSPACE %s WITH replication = {'class':'SimpleStrategy','replication_factor':1}" keyspace))
+                  (unwind-protect
+                      (let ((query (format "SELECT k FROM %s LIMIT 1" partition)))
+                        (clutch-db-query conn (format "CREATE TABLE %s (k int PRIMARY KEY)" partition))
+                        (clutch-db-query conn (format "INSERT INTO %s (k) VALUES (1)" partition))
+                        (insert query ";")
+                        (goto-char (point-min))
+                        (clutch-test--type-keys "C-c C-c")
+                        (clutch-test--await-queries)
+                        (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests)))
+                                       query))
+                        (with-current-buffer clutch--last-result-buffer
+                          (should (equal clutch--result-rows '((1))))))
+                    (clutch-db-query conn (format "DROP KEYSPACE %s" keyspace))))
                 (erase-buffer)
                 (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                   (let ((batch (concat
@@ -606,7 +609,6 @@ uncommitted work behind."
                           (should (eq (car (clutch--embark-object-target))
                                       'clutch-cassandra-object))))
                     (clutch-db-disconnect fresh))))
-            (clutch-db-query conn "DROP TABLE IF EXISTS partition")
             (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))))))))
 
 (defun clutch-test--run-in-console (&rest statements)

@@ -4,13 +4,13 @@
 
 ### Added
 
-- The BLOB viewer supports SQLite values and bounded JDBC byte previews. Clutch pins the published agent 0.2.30 and verifies its SHA-256. Press `x` to switch between text and hexadecimal using the existing result.
+- The BLOB viewer supports SQLite values and bounded JDBC byte previews. Press `x` to switch between text and hexadecimal using the existing result.
 
 - Table object actions can compare definitions across saved SQL connections in Ediff, with a same-schema match offered by default.
 
 - Cassandra JDBC profiles run CQL, browse tables and columns, and show bounded read-only result previews with a truncation notice. The connection chooser shows a Cassandra icon when `nerd-icons` is available.
 
-- The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Arrow keys move one overview node, and click or RET opens its table. Field details serve as a display. `+` expands a node, `o` moves between overview and fields, and `C-u g` recenters. Direction keys move between visually adjacent overview nodes across branches; in the field area they retain ordinary cursor movement for selecting columns and managing manual links.
+- The ER view shows a clickable relationship overview above the table's fields and keeps the layout stable while you switch tables. See the [ER guide](docs/interactive-client.org#er-view-clutch-er-mode-key-bindings) for navigation.
 
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 
@@ -28,7 +28,7 @@
 
 - In the ER overview, `RET` also opens a table when point is immediately after its name.
 
-- Pressing `C-c C-c` in the Record view now opens the result table's confirmation for all staged changes.
+- Pressing `C-c C-c` in the Record view opens the result table's confirmation for all staged changes, even when the displayed row is filtered out.
 
 - Record actions stay on the displayed row after client-side filtering or sorting. Reopen the Record if its row is hidden or its result was replaced. An open cell editor refuses to stage changes against a replacement result.
 
@@ -36,7 +36,7 @@
 
 - Large raw BLOBs open in hexadecimal when their text preview contains invalid UTF-8. The check reads only the preview bytes already in memory.
 
-- Composite foreign-key brackets stay connected when another relation ends on the same field. The ER overview keeps sibling branches visible when deeper branches reach the node limit. An ER overview node shows `[+N]` when some of its neighbours are folded. Click the marker or press `+` to show those neighbours using the relations already loaded.
+- Composite foreign-key brackets stay connected when another relation ends on the same field. The ER overview keeps sibling branches visible and shows a clickable `[+N]` for folded neighbours.
 
 - Manually refreshing a table description waits for the schema request it starts before reloading table metadata, avoiding a busy-connection error on asynchronous native backends.
 
