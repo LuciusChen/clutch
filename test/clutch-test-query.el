@@ -555,7 +555,10 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
               "UNION ALL SELECT CAST('[\"' || printf('%0*d', 65536, 0) || '\"]' AS BLOB) "
               "UNION ALL SELECT X'5B22FF225D' "
               "UNION ALL SELECT CAST(X'5B22' || printf('%0*d', 600, 0) || X'FF225D' AS BLOB) "
-              "UNION ALL SELECT X'5B696E666F5D'")
+              "UNION ALL SELECT X'5B696E666F5D' "
+              "UNION ALL SELECT CAST(X'5B22FF' || printf('%0*d', 65536, 0) || X'225D' AS BLOB) "
+              "UNION ALL SELECT CAST(X'5B22' || printf('%0*d', 1021, 0) || "
+              "X'E4B8AD' || printf('%0*d', 65536, 0) || X'225D' AS BLOB)")
     (clutch-db-disconnect conn)
     (clutch--goto-cell 0 0)
     (clutch-test--with-pop-to-buffer-capture viewer
@@ -566,7 +569,9 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                        ("5b 22 30 30" "showing first 256 bytes"))
                     (3 ("Hex preview:" "5b 22 ff 22 5d") ("Text preview:"))
                     (4 ("Hex preview:" "5b 22 30 30") ("Text preview:"))
-                    (5 ("Text preview:\n[info]") ("5b 69 6e 66 6f 5d"))))
+                    (5 ("Text preview:\n[info]") ("5b 69 6e 66 6f 5d"))
+                    (6 ("Hex preview:" "5b 22 ff") ("Text preview:"))
+                    (7 ("Text preview:") ("Hex preview:"))))
       (pcase-let ((`(,row ,initial ,alternate) case))
         (ert-info ((format "SQLite result row %d" row))
           (clutch--goto-cell row 0)

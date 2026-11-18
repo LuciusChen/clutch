@@ -24,6 +24,8 @@
 
 ### Fixed
 
+- Large raw BLOBs open in hexadecimal when their text preview contains invalid UTF-8. The check reads only the preview bytes already in memory.
+
 - Composite foreign-key brackets stay connected when another relation ends on the same field. The ER overview keeps sibling branches visible when deeper branches reach the node limit. An ER overview node shows `[+N]` when some of its neighbours are folded. Click the marker or press `+` to show those neighbours using the relations already loaded.
 
 - Manually refreshing a table description waits for the schema request it starts before reloading table metadata, avoiding a busy-connection error on asynchronous native backends.

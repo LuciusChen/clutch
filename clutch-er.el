@@ -572,7 +572,6 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                               (if parent 8 (+ 1 branch-width (length badge))))))
             nil nil (if unicode "…" "..."))
            'clutch-er-entry entry 'follow-link t
-           'keymap clutch-er--overview-map
            'help-echo (concat (substring-no-properties label) " — RET: show table")
            'face (if selected 'clutch-er-highlight 'clutch-er-table)
            'action (lambda (button)
@@ -1459,11 +1458,12 @@ Without ENTRY, use the table at point or ask for one."
             (setq shown t)
             (pop-to-buffer buffer)
             (with-current-buffer buffer
-              (when clutch-er--model
-                (clutch-er--render)
-                (goto-char (point-min))
-                (clutch-er-overview))
-              (clutch-er--align-arrows)))
+              (if clutch-er--model
+                  (progn
+                    (clutch-er--render)
+                    (goto-char (point-min))
+                    (clutch-er-overview))
+                (clutch-er--align-arrows))))
         (unless (or shown existing)
           (kill-buffer buffer))))))
 

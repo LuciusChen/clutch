@@ -2554,6 +2554,20 @@ When QUIET is non-nil, suppress informational fallback messages."
 (defconst clutch--blob-structured-view-max-bytes (* 64 1024)
   "Largest raw BLOB eligible for full JSON or XML formatting.")
 
+(defconst clutch--blob-text-preview-max-bytes 1024
+  "Maximum number of bytes displayed in a BLOB text preview.")
+
+(defun clutch--invalid-utf8-p (bytes &optional limit)
+  "Return non-nil when BYTES contain invalid UTF-8.
+With LIMIT, check only that many leading bytes, finishing a codepoint
+that straddles the limit."
+  (when (and limit (< limit (length bytes)))
+    (let ((end (min (+ limit 3) (length bytes))))
+      (while (and (< limit end) (<= #x80 (aref bytes limit) #xbf))
+        (cl-incf limit)))
+    (setq bytes (substring bytes 0 limit)))
+  (memq 'eight-bit (find-charset-string (decode-coding-string bytes 'utf-8))))
+
 (defun clutch--blob-view-data (val)
   "Return (PREFIX . SIZE) for a BLOB value VAL already in the result."
   (cond
@@ -2561,13 +2575,15 @@ When QUIET is non-nil, suppress informational fallback messages."
     (cons (clutch-db-value-preview-bytes val)
           (clutch-db-value-preview-length val)))
    ((vectorp val)
-    (cons (apply #'unibyte-string (append (seq-take val 1024) nil))
+    (cons (apply #'unibyte-string
+                 (append (seq-take val clutch--blob-text-preview-max-bytes) nil))
           (length val)))
    (t
     (let ((bytes (if (and (stringp val) (not (multibyte-string-p val)))
                      val
                    (encode-coding-string (clutch--format-value val) 'binary))))
-      (cons (substring bytes 0 (min (length bytes) 1024)) (length bytes))))))
+      (cons (substring bytes 0 (min (length bytes) clutch--blob-text-preview-max-bytes))
+            (length bytes))))))
 
 (defun clutch--blob-hexdump-lines (bytes limit)
   "Return hex dump lines for the first LIMIT bytes of BYTES."
@@ -2605,7 +2621,8 @@ When QUIET is non-nil, suppress informational fallback messages."
 
 (defun clutch--blob-view-string (bytes size text-p)
   "Render BLOB prefix BYTES of total SIZE as text when TEXT-P, or hex."
-  (let ((shown (min (length bytes) (if text-p 1024 256))))
+  (let ((shown (min (length bytes)
+                    (if text-p clutch--blob-text-preview-max-bytes 256))))
     (concat
      (format "BLOB size: %d bytes\n\n" size)
      (if text-p
@@ -2675,8 +2692,7 @@ BLOB-P indicates that VAL is a BLOB."
        ;; Emacs 29 reports invalid UTF-8 as a generic parse error.
        (when (and blob-p
                   (not (multibyte-string-p val))
-                  (memq 'eight-bit
-                        (find-charset-string (decode-coding-string val 'utf-8))))
+                  (clutch--invalid-utf8-p val))
          'invalid-utf8)))))
 
 (defun clutch--view-format-value (val)
@@ -2707,7 +2723,8 @@ When QUIET is non-nil, suppress nonessential viewer messages."
            (not (multibyte-string-p val))
            (> (length val) clutch--blob-structured-view-max-bytes)
            blob-p)
-      (clutch--blob-view-spec val quiet))
+      (clutch--blob-view-spec
+       val quiet (clutch--invalid-utf8-p val clutch--blob-text-preview-max-bytes)))
      ((or (eq cat 'json)
           (eq (setq json-kind (clutch--json-view-kind val blob-p)) 'json))
       (list :kind "JSON"
@@ -3329,7 +3346,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
            ((or 'csv 'tsv)
             (clutch--delimited-lines-for-rows
              rows (clutch--column-names-for-indices col-indices)
-             (if (eq kind 'tsv) ?\t clutch-csv-delimiter) col-indices))
+             (if (eq kind 'tsv) ?\t clutch-csv-delimiter) col-indices omit-header))
            ('org-table (clutch--org-table-lines-for-rows rows col-indices))
            ('insert
             (clutch-result--build-insert-statements-for-rows rows col-indices))
@@ -3349,11 +3366,8 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
               (clutch-result--require-action kind op)
               (clutch-db-document-mutation-snippets
                clutch-connection action collection documents fields))))))
-    (if omit-header
-        (pcase kind
-          ((or 'tsv 'csv) (cdr lines))
-          ('org-table (cddr lines))
-          (_ lines))
+    (if (and omit-header (eq kind 'org-table))
+        (cddr lines)
       lines)))
 
 (defun clutch-result--copy-rows (kind &optional rect omit-header)
@@ -3408,25 +3422,26 @@ is quoted."
      (t s))))
 
 (defun clutch--delimited-lines-for-rows
-    (rows columns delimiter &optional col-indices)
+    (rows columns delimiter &optional col-indices omit-header)
   "Return delimited lines for ROWS with header COLUMNS, using DELIMITER.
 COL-INDICES selects the cells in each row in header order.  By default,
-use the first (length COLUMNS) cells."
-  (let ((separator (char-to-string delimiter))
-        (col-indices (or col-indices (number-sequence 0 (1- (length columns))))))
-    (cons (mapconcat
-           (lambda (val) (clutch--delimited-escape val delimiter))
-           columns separator)
-          (cl-loop for row in rows
-                   for values = (vconcat row)
-                   for vals = (mapcar (lambda (i)
-                                        (and (< i (length values))
-                                             (aref values i)))
-                                      col-indices)
-                   collect
-                   (mapconcat
-                    (lambda (val) (clutch--delimited-escape val delimiter))
-                    vals separator)))))
+use the first (length COLUMNS) cells.  OMIT-HEADER skips column labels."
+  (let* ((separator (char-to-string delimiter))
+         (col-indices (or col-indices (number-sequence 0 (1- (length columns)))))
+         (lines (cl-loop for row in rows
+                         for values = (vconcat row)
+                         for vals = (mapcar (lambda (i)
+                                              (and (< i (length values))
+                                                   (aref values i)))
+                                            col-indices)
+                         collect (mapconcat
+                                  (lambda (val) (clutch--delimited-escape val delimiter))
+                                  vals separator))))
+    (if omit-header
+        lines
+      (cons (mapconcat (lambda (val) (clutch--delimited-escape val delimiter))
+                       columns separator)
+            lines))))
 
 (defun clutch--org-table-lines-for-rows (rows col-indices)
   "Return aligned Org table lines for ROWS using COL-INDICES."
@@ -3561,9 +3576,7 @@ to Clipboard; switch it to File before choosing an export format."
 COL-INDICES selects the cells in header order, defaulting to the leading cells.
 When OMIT-HEADER is non-nil, omit the column header."
   (let ((lines (clutch--delimited-lines-for-rows
-                rows columns delimiter col-indices)))
-    (when omit-header
-      (setq lines (cdr lines)))
+                rows columns delimiter col-indices omit-header)))
     (if lines
         (concat (mapconcat #'identity lines "\n") "\n")
       "")))
