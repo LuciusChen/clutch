@@ -2569,21 +2569,18 @@ that straddles the limit."
   (memq 'eight-bit (find-charset-string (decode-coding-string bytes 'utf-8))))
 
 (defun clutch--blob-view-data (val)
-  "Return (PREFIX . SIZE) for a BLOB value VAL already in the result."
-  (cond
-   ((clutch-db-value-preview-p val)
-    (cons (clutch-db-value-preview-bytes val)
-          (clutch-db-value-preview-length val)))
-   ((vectorp val)
-    (cons (apply #'unibyte-string
-                 (append (seq-take val clutch--blob-text-preview-max-bytes) nil))
-          (length val)))
-   (t
-    (let ((bytes (if (and (stringp val) (not (multibyte-string-p val)))
-                     val
-                   (encode-coding-string (clutch--format-value val) 'binary))))
-      (cons (substring bytes 0 (min (length bytes) clutch--blob-text-preview-max-bytes))
-            (length bytes))))))
+  "Return (PREFIX . SIZE) for BLOB VAL, capping PREFIX for text previews."
+  (let* ((preview-p (clutch-db-value-preview-p val))
+         (bytes (cond (preview-p (clutch-db-value-preview-bytes val))
+                      ((or (vectorp val)
+                           (and (stringp val) (not (multibyte-string-p val))))
+                       val)
+                      (t (encode-coding-string (clutch--format-value val) 'binary))))
+         (prefix (if (> (length bytes) clutch--blob-text-preview-max-bytes)
+                     (substring bytes 0 clutch--blob-text-preview-max-bytes)
+                   bytes)))
+    (cons (if (vectorp prefix) (apply #'unibyte-string (append prefix nil)) prefix)
+          (if preview-p (clutch-db-value-preview-length val) (length bytes)))))
 
 (defun clutch--blob-hexdump-lines (bytes limit)
   "Return hex dump lines for the first LIMIT bytes of BYTES."
@@ -2621,13 +2618,11 @@ that straddles the limit."
 
 (defun clutch--blob-view-string (bytes size text-p)
   "Render BLOB prefix BYTES of total SIZE as text when TEXT-P, or hex."
-  (let ((shown (min (length bytes)
-                    (if text-p clutch--blob-text-preview-max-bytes 256))))
+  (let ((shown (if text-p (length bytes) (min 256 (length bytes)))))
     (concat
      (format "BLOB size: %d bytes\n\n" size)
      (if text-p
-         (let ((preview (decode-coding-string (substring bytes 0 shown)
-                                              'utf-8 t)))
+         (let ((preview (decode-coding-string bytes 'utf-8 t)))
            (concat "Text preview:\n"
                    (if (string-empty-p preview) "<empty>" preview)))
        (concat "Hex preview:\n"
