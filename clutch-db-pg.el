@@ -1277,14 +1277,24 @@ ORDER BY position" oid)))
                             (plist-get entry :source-schema)))
                 (result (clutch-db-pg--exec
                          conn
-                         ;; format_type qualifies only hidden names.  Prefix
-                         ;; visible custom types too, using the element for arrays.
+                         ;; Give custom types a fixed qualified name while
+                         ;; keeping format_type's modifiers and array suffix.
+                         ;; Drop optional quotes on ordinary built-in names.
                          (format "SELECT c.column_name,
        CASE WHEN n.nspname <> 'pg_catalog'
-                 AND pg_catalog.pg_type_is_visible(COALESCE(e.oid, y.oid))
-            THEN pg_catalog.quote_ident(n.nspname) || '.'
-            ELSE ''
-       END || pg_catalog.format_type(a.atttypid, a.atttypmod),
+            THEN pg_catalog.format('\"%%s\".\"%%s\"%%s',
+                   pg_catalog.replace(n.nspname, '\"', '\"\"'),
+                   pg_catalog.replace(typ.name, '\"', '\"\"'),
+                   pg_catalog.substr(typ.rendered,
+                     pg_catalog.length(pg_catalog.format_type(typ.oid, NULL)) + 1))
+            WHEN pg_catalog.left(typ.rendered, pg_catalog.length(typ.name) + 2)
+                   = '\"' || typ.name || '\"'
+                 AND typ.name ~ '^[a-z_][a-z_0-9]*$'
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_get_keywords() k
+                                  WHERE k.word = typ.name AND k.catcode <> 'U')
+            THEN typ.name || pg_catalog.substr(typ.rendered, pg_catalog.length(typ.name) + 3)
+            ELSE typ.rendered
+       END,
        c.column_default, c.is_nullable
 FROM information_schema.tables t
 LEFT JOIN information_schema.columns c USING (table_catalog, table_schema, table_name)
@@ -1295,6 +1305,9 @@ LEFT JOIN pg_catalog.pg_type y ON y.oid = a.atttypid
 LEFT JOIN pg_catalog.pg_type e
   ON e.oid = y.typelem AND e.typarray = y.oid AND y.typstorage <> 'p'
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = COALESCE(e.typnamespace, y.typnamespace)
+CROSS JOIN LATERAL (SELECT COALESCE(e.oid, y.oid) AS oid,
+                          COALESCE(e.typname, y.typname) AS name,
+                          pg_catalog.format_type(a.atttypid, a.atttypmod) AS rendered) typ
 WHERE t.table_name = %s AND t.table_schema = %s AND t.table_type IN ('BASE TABLE', 'LOCAL TEMPORARY')
 ORDER BY c.ordinal_position"
                                  (pgsql-escape-literal name)

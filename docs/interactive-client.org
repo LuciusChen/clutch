@@ -530,7 +530,7 @@ From a table's object actions (=C-c C-o=), press =c=, or use =M-x clutch-compare
 
 Ediff compares the two definitions returned by Clutch's existing DDL readers. Each side shows its connection and qualified table name. Those readers may reconstruct DDL from column metadata on PostgreSQL and JDBC. Press =q= in Ediff to return to where you started. The comparison reads metadata using the source session and opens a temporary target connection for the lookup.
 
-PostgreSQL's comparison is labeled =Columns only=. The native reader preserves column types with their precision and scale, defaults, and =NOT NULL=. It uses schema-qualified custom type names, including array element types, regardless of the connection's search path. The comparison omits primary keys, unique constraints, foreign keys, check constraints, exclusion constraints, and indexes.
+PostgreSQL's comparison is labeled =Columns only=. The native reader preserves column types with their precision and scale, defaults, and =NOT NULL=. It uses a consistent schema-qualified spelling for custom types, including array elements, across connections with different search paths and identifier quoting preferences. The comparison omits primary keys, unique constraints, foreign keys, check constraints, exclusion constraints, and indexes.
 
 * Embark Integration (optional)
 

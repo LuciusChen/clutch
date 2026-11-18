@@ -402,7 +402,7 @@ uncommitted work behind."
   (require 'ediff)
   (clutch-test--with-conn admin
     (let* ((schema (format "ddl_compare_%d" (emacs-pid)))
-           (columns (format "created timestamp(3), state %s.order_state, states %s.order_state[]"
+           (columns (format "created timestamp(3), state %s.order_state, states %s.order_state[], ref uuid, flag pg_catalog.\"char\""
                             schema schema))
            (create-type (format "CREATE TYPE %s.order_state AS ENUM ('open', 'shipped')"
                                 schema))
@@ -419,6 +419,8 @@ uncommitted work behind."
             (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer PRIMARY KEY, amount numeric(10,2), %s)" schema columns))
             (clutch-db-query admin (format "ALTER DATABASE %s SET search_path TO public, %s"
                                            schema schema))
+            (clutch-db-query admin (format "ALTER DATABASE %s SET quote_all_identifiers TO on"
+                                           schema))
             (let ((conn (clutch-open-connection target)))
               (unwind-protect
                   (progn
@@ -469,10 +471,12 @@ uncommitted work behind."
                                                    (buffer-string)))
                             (should (string-search "timestamp(3) without time zone"
                                                    (buffer-string)))
-                            (should (string-search (format "\"state\" %s.order_state," schema)
+                            (should (string-search (format "\"state\" \"%s\".\"order_state\"," schema)
                                                    (buffer-string)))
-                            (should (string-search (format "\"states\" %s.order_state[]" schema)
+                            (should (string-search (format "\"states\" \"%s\".\"order_state\"[]" schema)
                                                    (buffer-string)))
+                            (should (string-search "\"ref\" uuid," (buffer-string)))
+                            (should (string-search "\"flag\" \"char\"" (buffer-string)))
                             (should-not (string-search "wrong" (buffer-string)))
                             (should (string-search "Columns only" (format "%s" header-line-format)))
                             (should (string-search "CHECK" (format "%s" header-line-format))))
