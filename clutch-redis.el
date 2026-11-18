@@ -437,7 +437,7 @@ first-seen order."
         :schema (clutch-db-current-schema conn)
         :type "KEY"))
 
-(cl-defmethod clutch-db-list-table-entries ((conn clutch-redis-conn))
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-redis-conn) &optional _all-schemas)
   "Return Redis key entries for CONN."
   (clutch-db--translate-library-error redis-error
     (mapcar (lambda (key)

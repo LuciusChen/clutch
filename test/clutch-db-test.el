@@ -3757,8 +3757,8 @@ passes validation fails the test instead of failing on the fake client."
                (lambda (_conn sql)
                  (setq captured-sql sql)
                  (make-clutch-db-result
-                  :rows '(("events" "MergeTree")
-                          ("daily_mv" "View"))))))
+                  :rows '(("events" "MergeTree" "default")
+                          ("daily_mv" "View" "default"))))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "events" :type "TABLE" :schema "default"
@@ -6081,8 +6081,8 @@ out, which broke the Oracle statement and left SQL Server unpaged."
                (lambda (_conn sql)
                  (setq captured-sql sql)
                  (make-mysql-result
-                  :rows '(("orders" "BASE TABLE" "订单")
-                          ("audit_log" "BASE TABLE" nil))))))
+                  :rows '(("orders" "BASE TABLE" "订单" "app")
+                          ("audit_log" "BASE TABLE" nil "app"))))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "orders" :type "TABLE" :schema "app"
@@ -6158,14 +6158,12 @@ out, which broke the Oracle statement and left SQL Server unpaged."
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "app"))
           captured-sql)
-      (cl-letf (((symbol-function 'clutch-db-current-schema)
-                 (lambda (_conn) "public"))
-                ((symbol-function 'pgsql-exec)
+      (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq captured-sql sql)
                    (clutch-db-test--make-pg-result
-                    :rows `(("orders" "TABLE" "订单")
-                            ("audit_log" "TABLE" ,pgsql-null))))))
+                    :rows `(("orders" "TABLE" "订单" "public")
+                            ("audit_log" "TABLE" ,pgsql-null "public"))))))
         (should
          (equal (clutch-db-list-table-entries conn)
                 '((:name "orders" :type "TABLE" :schema "public"

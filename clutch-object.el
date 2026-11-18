@@ -515,8 +515,9 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
          (list cand "" suffix)))
      cands)))
 
-(defun clutch--object-entry-reader (conn prompt entries &optional initial-input)
-  "Read an object entry from ENTRIES on CONN using PROMPT."
+(defun clutch--object-entry-reader (conn prompt entries &optional initial-input default-entry)
+  "Read an entry from ENTRIES on CONN using PROMPT.
+Offer INITIAL-INPUT for editing and DEFAULT-ENTRY on empty input."
   (let* ((sorted
           (sort (copy-sequence entries)
                 (lambda (a b)
@@ -592,7 +593,9 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
              (completing-read
               prompt
               #'complete
-              nil (not key-value-p) initial-input)))
+              nil (not key-value-p) initial-input nil
+              (and default-entry
+                   (clutch--object-entry-candidate default-entry duplicate-counts)))))
         (or (gethash choice entry-map)
             (and key-value-p
                  (clutch-db-find-table-entry conn choice))
@@ -1407,6 +1410,139 @@ or starting another schema refresh."
         (clutch--show-object-text-buffer
          conn entry text params product)))))
 
+(defun clutch--table-compare-dialect (backend params)
+  "Return BACKEND's SQL dialect for comparison, using PARAMS for generic JDBC."
+  (when (clutch-backend-sql-execution-p backend params)
+    (pcase backend
+      ('pg "postgresql")
+      ('jdbc (when-let* ((url (plist-get params :url))
+                        ((string-match "\\`jdbc:\\([^:]+\\):" url)))
+               (downcase (match-string 1 url))))
+      (_ (symbol-name backend)))))
+
+(defun clutch--table-compare-target (conn label source)
+  "Select a comparison table on CONN labeled LABEL for SOURCE."
+  (let* ((entries (condition-case err
+                      (seq-filter #'clutch--table-entry-p
+                                  (clutch-db-list-table-entries conn t))
+                    (clutch-db-error
+                     (user-error "Target %s: cannot list tables for %s: %s"
+                                 label (clutch--object-fqname source)
+                                 (error-message-string err)))))
+         (name (plist-get source :name))
+         (schema (or (plist-get source :schema) (plist-get source :source-schema)))
+         (matches (seq-filter (lambda (entry) (equal name (plist-get entry :name))) entries))
+         (same-schema
+          (seq-filter (lambda (entry)
+                        (equal schema (or (plist-get entry :schema)
+                                          (plist-get entry :source-schema))))
+                      matches))
+         (default (cond ((= (length same-schema) 1) (car same-schema))
+                        ((= (length matches) 1) (car matches)))))
+    (unless entries
+      (user-error "Target %s: table %s not found" label (clutch--object-fqname source)))
+    (clutch--object-entry-reader
+     conn
+     (format "Target table on %s%s: " label
+             (cond (default (format " (default %s)" (clutch--object-fqname default)))
+                   ((null matches) (format " (%s not found)" name))
+                   (t "")))
+     entries nil default)))
+
+(defun clutch--table-compare-definition (conn entry side label)
+  "Read ENTRY's definition on CONN, identifying failures by SIDE and LABEL."
+  (let* ((name (clutch--object-fqname entry))
+         (ddl (condition-case err
+                  (clutch-db-object-definition conn entry)
+                ((clutch-db-error user-error)
+                 (user-error "%s %s: cannot read definition of %s: %s"
+                             side label name (error-message-string err))))))
+    (when (or (null ddl) (string-blank-p ddl))
+      (user-error "%s %s: definition unavailable for %s" side label name))
+    ddl))
+
+(defun clutch--table-compare-ediff (left right product)
+  "Compare (LABEL . DDL) pairs LEFT and RIGHT using SQL PRODUCT."
+  (let ((windows (current-window-configuration))
+        (origin (point-marker))
+        buffers started)
+    (cl-labels ((finish ()
+                  (mapc #'kill-buffer (seq-filter #'buffer-live-p buffers))
+                  (when (marker-buffer origin)
+                    (set-window-configuration windows)
+                    (when (eq (current-buffer) (marker-buffer origin))
+                      (goto-char origin)))
+                  (set-marker origin nil)))
+      (unwind-protect
+          (progn
+            (dolist (side (list left right))
+              (let ((buffer (generate-new-buffer (format "*clutch DDL: %s*" (car side)))))
+                (push buffer buffers)
+                (with-current-buffer buffer
+                  (sql-mode)
+                  (when product (sql-set-product product))
+                  (setq-local header-line-format (list " " (car side)))
+                  (insert (cdr side))
+                  (set-buffer-modified-p nil)
+                  (setq buffer-read-only t))))
+            (ediff-buffers
+             (cadr buffers) (car buffers)
+             (list (lambda ()
+                     (setq-local ediff-keep-variants t)
+                     ;; Restore after Ediff finishes disposing of its windows.
+                     (add-hook 'ediff-cleanup-hook
+                               (lambda () (run-at-time 0 nil #'finish)) nil t))))
+            (setq started t))
+        (unless started (finish))))))
+
+;;;###autoload
+(defun clutch-compare-table-definition (&optional entry)
+  "Compare the definition of table ENTRY with a table on a saved connection."
+  (interactive)
+  (let* ((context (clutch--command-connection-context))
+         (source (plist-get context :connection))
+         (params (plist-get context :params)))
+    (unless (and source (clutch-db-live-p source))
+      (user-error "Table comparison requires a live source connection"))
+    (clutch--refuse-while-running source)
+    (let* ((dialect (clutch--table-compare-dialect (clutch-db-backend-key source) params))
+           (entry (or entry (clutch--resolve-object-entry "Compare definition of: " t '("TABLE"))))
+           (source-label
+            (or (cl-loop for buffer in (buffer-list)
+                         when (eq (buffer-local-value 'clutch-connection buffer) source)
+                         thereis (buffer-local-value 'clutch--console-name buffer))
+                (clutch--connection-display-key source)))
+           (names (mapcar #'car clutch-connection-alist)))
+      (unless (and dialect (clutch--table-entry-p entry))
+        (user-error "Source %s: select a SQL table to compare" source-label))
+      (unless names (user-error "Save a target connection to compare table definitions"))
+      (clutch--await-background-request source)
+      (let* ((left (clutch--table-compare-definition source entry "Source" source-label))
+             (target-label (clutch--read-saved-connection-choice "Compare with connection: " names))
+             (target-params (clutch-saved-connection-params target-label))
+             target right)
+        (unless target-params (user-error "Select a saved target connection"))
+        (unless (equal dialect (clutch--table-compare-dialect
+                                (clutch--backend-key-from-params target-params) target-params))
+          (user-error "Target %s: choose a %s connection to compare %s"
+                      target-label dialect (clutch--object-fqname entry)))
+        (unwind-protect
+            (progn
+              (setq target (condition-case err
+                               (clutch-open-connection target-params)
+                             ((clutch-db-error user-error)
+                              (user-error "Target %s: cannot connect to compare %s: %s"
+                                          target-label (clutch--object-fqname entry)
+                                          (error-message-string err)))))
+              (let ((table (clutch--table-compare-target target target-label entry)))
+                (setq right
+                      (cons (format "%s · %s" target-label (clutch--object-fqname table))
+                            (clutch--table-compare-definition target table "Target" target-label)))))
+          (when target (clutch-close-connection target)))
+        (clutch--table-compare-ediff
+         (cons (format "%s · %s" source-label (clutch--object-fqname entry)) left)
+         right (plist-get context :product))))))
+
 ;;;###autoload
 (defun clutch-object-describe (&optional entry)
   "Show a describe buffer for ENTRY."
@@ -1637,6 +1773,11 @@ When ENTRY is nil, use the current table-like object."
      :label "Show definition"
      :command clutch-object-show-ddl-or-source
      :predicate clutch--object-supports-definition-p)
+    (:id compare-definition
+     :key "c"
+     :label "Compare table definition"
+     :command clutch-compare-table-definition
+     :predicate clutch--table-entry-p)
     (:id browse
      :key "b"
      :label "Browse rows"
@@ -1773,6 +1914,9 @@ When ENTRY is nil, use the current table-like object."
      clutch-object-describe)
     ("s" (lambda () (clutch--object-action-label 'show-definition))
      clutch-object-show-ddl-or-source)
+    ("c" (lambda () (clutch--object-action-label 'compare-definition))
+     clutch-compare-table-definition
+     :if (lambda () (clutch--table-entry-p clutch--object-action-entry)))
     ("r" (lambda () (clutch--object-action-label 'er-diagram))
      clutch-er-diagram
      :if (lambda () (clutch--table-entry-p clutch--object-action-entry)))]

@@ -2033,14 +2033,17 @@ system.tables because its JDBC metadata does not reliably enumerate the
 current database."
   (clutch-jdbc--table-entry-names (clutch-db-list-table-entries conn)))
 
-(defun clutch-jdbc--clickhouse-table-entries (conn)
-  "Return ClickHouse table entries for CONN from system.tables."
-  (let* ((database (or (clutch-db-database conn) "default"))
-         (sql (format "SELECT name, engine FROM system.tables WHERE database = %s ORDER BY name"
-                      (clutch-db-escape-literal conn database))))
+(defun clutch-jdbc--clickhouse-table-entries (conn &optional all-schemas)
+  "Return ClickHouse tables on CONN, across databases if ALL-SCHEMAS."
+  (let ((sql (concat "SELECT name, engine, database FROM system.tables WHERE "
+                     (if all-schemas
+                         "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')"
+                       (format "database = %s" (clutch-db-escape-literal
+                                                conn (or (clutch-db-database conn) "default"))))
+                     " ORDER BY name, database")))
     (mapcar
      (lambda (row)
-       (pcase-let ((`(,name ,engine . ,_) row))
+       (pcase-let ((`(,name ,engine ,database) row))
          (list :name name
                :type (if (and (stringp engine)
                               (string-match-p "View\\'" engine))
@@ -2050,15 +2053,24 @@ current database."
                :source-schema database)))
      (clutch-db-result-rows (clutch-db-query conn sql)))))
 
-(cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn))
-  "Return table entry plists for JDBC CONN."
-  (if (clutch-jdbc--clickhouse-conn-p conn)
-      (clutch-jdbc--clickhouse-table-entries conn)
-    (let* ((result  (clutch-jdbc--rpc
-                     conn "get-tables"
-                     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                       ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (clutch-jdbc--collect-table-entries conn result))))
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn) &optional all-schemas)
+  "Return JDBC table entries on CONN, across visible schemas if ALL-SCHEMAS."
+  (cl-flet ((read-tables (scope)
+              (clutch-jdbc--collect-table-entries
+               conn
+               (clutch-jdbc--rpc conn "get-tables"
+                                 `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                                   ,@scope)))))
+    (cond
+     ((clutch-jdbc--clickhouse-conn-p conn)
+      (clutch-jdbc--clickhouse-table-entries conn all-schemas))
+     ((and all-schemas (clutch-jdbc--oracle-conn-p conn))
+      ;; Oracle's default listing collapses objects with the same name.
+      (cl-mapcan (lambda (schema) (read-tables `((schema . ,schema))))
+                 (clutch-db-list-schemas conn)))
+     (t
+      (let ((scope (clutch-jdbc--metadata-scope-params conn)))
+        (read-tables (if all-schemas (assq-delete-all 'schema scope) scope)))))))
 
 (defun clutch-jdbc--literal-metadata-pattern (conn name)
   "Return the literal metadata pattern for NAME on CONN.
@@ -2595,28 +2607,35 @@ schemas reports an empty one, which is left out."
                         ,@(clutch-jdbc--metadata-scope-params conn)))))
          (plist-get result :source)))
       ((or "TABLE" "COLLECTION")
-       (let* ((driver (clutch-jdbc--conn-driver conn))
-              (result (clutch-jdbc--rpc
-                       conn "get-columns"
-                       (clutch-jdbc--table-metadata-params conn name nil nil t)))
-              (cols (plist-get result :columns))
-              (display-ident
-               (if (eq driver 'oracle)
-                   #'clutch-jdbc--oracle-display-identifier
-                 (lambda (identifier)
-                   (clutch-db-escape-identifier conn identifier)))))
-         (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
-                 (funcall display-ident name)
-                 (mapconcat
-                  (lambda (col)
-                    (format "    %s %s%s"
-                            (funcall display-ident (plist-get col :name))
-                            (plist-get col :type)
-                            (if (clutch-jdbc--json-bool (plist-get col :nullable))
-                                ""
-                              " NOT NULL")))
-                  cols
-                  ",\n"))))
+       (let ((oracle (clutch-jdbc--oracle-conn-p conn))
+             (schema (or (plist-get entry :schema)
+                         (plist-get entry :source-schema))))
+         ;; The agent folds these metadata names.  It could otherwise read
+         ;; the uppercase namesake of a quoted table.
+         (when (and oracle (or (not (equal name (upcase name)))
+                               (and schema (not (equal schema (upcase schema))))))
+           (signal 'clutch-db-error
+                   '("Oracle JDBC table definitions require uppercase metadata names")))
+         (when-let* ((result (clutch-jdbc--rpc
+                              conn "get-columns"
+                              (clutch-jdbc--table-metadata-params
+                               conn name (unless (equal schema "") schema)
+                               (plist-get entry :catalog) t)))
+                     (cols (plist-get result :columns)))
+           (format "-- DDL reconstructed from DatabaseMetaData\nCREATE TABLE %s (\n%s\n);"
+                   (if oracle (clutch-jdbc--oracle-display-identifier name)
+                     (clutch-db-escape-identifier conn name))
+                   (mapconcat
+                    (lambda (col)
+                      (let ((column (plist-get col :name)))
+                        (format "    %s %s%s"
+                                (if oracle (clutch-jdbc--oracle-display-identifier column)
+                                  (clutch-db-escape-identifier conn column))
+                                (plist-get col :type)
+                                (if (clutch-jdbc--json-bool (plist-get col :nullable))
+                                    ""
+                                  " NOT NULL"))))
+                    cols ",\n")))))
       (_
        (let* ((result (clutch-jdbc--rpc
                        conn "get-object-ddl"

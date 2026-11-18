@@ -498,6 +498,7 @@ The main navigation path is object-centric rather than tree-centric.  =C-c C-j= 
 
 - =d=: describe object
 - =s=: show DDL / source
+- =c=: compare a table definition with a saved connection
 - =r=: open the ER view of a table
 - =j=: jump to the target object for objects with explicit target metadata such as indexes, triggers, and synonyms
 - =n=: copy object name
@@ -520,6 +521,12 @@ Default actions only depend on the object type:
 For JDBC/Oracle connections, =C-c C-j= shows annotated object candidates in the minibuffer.  The object name remains the primary candidate text; source/type is shown as a gray annotation on the right (for example =PUBLIC/synonym= or =APP/synonym=).  When duplicate names need disambiguation, the target owner is appended as extra detail.
 
 If you use [[https://github.com/oantolin/orderless][orderless]], annotation search works naturally here: =&public=, =&synonym=, =&view=, etc.
+
+** Compare table definitions
+
+From a table's object actions (=C-c C-o=), press =c=, or use =M-x clutch-compare-table-definition=. Choose a saved connection for the same SQL dialect. The target picker defaults to the same schema and name when available, or to a unique match in another schema. Choose an annotated candidate to change the schema or table, or to resolve duplicate names without a same-schema match.
+
+Ediff compares the two definitions returned by Clutch's existing DDL readers. Each side shows its connection and qualified table name. Those readers may reconstruct DDL from column metadata on PostgreSQL and JDBC. Press =q= in Ediff to return to where you started. The comparison reads metadata using the source session and opens a temporary target connection for the lookup.
 
 * Embark Integration (optional)
 

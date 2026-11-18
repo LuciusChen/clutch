@@ -1078,29 +1078,27 @@ Deliver the names to CALLBACK and failures to ERRBACK."
          (funcall callback (mapcar #'car (clutch-db-pg--metadata-rows result))))))
     t))
 
-(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--connection))
-  "Return table/view entry plists for the current PostgreSQL schema on CONN."
+(cl-defmethod clutch-db-list-table-entries
+    ((conn clutch-db-pg--connection) &optional all-schemas)
+  "Return table and view entries on CONN, across visible schemas if ALL-SCHEMAS."
   (clutch-db--translate-library-error pgsql-error
-    (let* ((schema (clutch-db-current-schema conn))
-           (result (clutch-db-pg--exec
-                    conn
-                    "SELECT objects.name, objects.type, obj_description(c.oid, 'pg_class')
-FROM (
-  SELECT tablename AS name, 'TABLE' AS type
-  FROM pg_tables
-  WHERE schemaname = current_schema()
-  UNION ALL
-  SELECT viewname AS name, 'VIEW' AS type
-  FROM pg_views
-  WHERE schemaname = current_schema()
-) objects
-JOIN pg_class c ON c.relname = objects.name
+    (let ((result
+           (clutch-db-pg--exec
+            conn
+            (concat "SELECT c.relname, CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE 'TABLE' END,
+       obj_description(c.oid, 'pg_class'), n.nspname
+FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-  AND n.nspname = current_schema()
-ORDER BY objects.name")))
+WHERE c.relkind IN ('r', 'p', 'v') AND "
+                    (if all-schemas
+                        "n.nspname IN (SELECT schema_name FROM information_schema.schemata
+                                      WHERE schema_name <> 'information_schema'
+                                        AND left(schema_name, 3) <> 'pg_')"
+                      "n.nspname = current_schema()")
+                    " ORDER BY c.relname, n.nspname"))))
       (mapcar
        (lambda (row)
-         (pcase-let ((`(,name ,type ,comment) row))
+         (pcase-let ((`(,name ,type ,comment ,schema) row))
            (list :name name
                  :type type
                  :schema schema
@@ -1276,20 +1274,25 @@ ORDER BY position" oid)))
           (name (plist-get entry :name)))
       (pcase type
         ("TABLE"
-         (let* ((cols-result
-                 (clutch-db-pg--exec
-                  conn
-                  (format "SELECT column_name, data_type, \
-character_maximum_length, column_default, is_nullable \
-FROM information_schema.columns \
-WHERE table_name = %s AND table_schema = current_schema() \
+         (let* ((schema (or (plist-get entry :schema)
+                            (plist-get entry :source-schema)))
+                (result (clutch-db-pg--exec
+                         conn
+                         (format "SELECT column_name, data_type,
+       character_maximum_length, column_default, is_nullable
+FROM information_schema.tables t
+LEFT JOIN information_schema.columns USING (table_catalog, table_schema, table_name)
+WHERE t.table_name = %s AND t.table_schema = %s AND t.table_type IN ('BASE TABLE', 'LOCAL TEMPORARY')
 ORDER BY ordinal_position"
-                          (pgsql-escape-literal name))))
-                (lines (mapcar #'clutch-db-pg--format-column-ddl
-                               (clutch-db-pg--metadata-rows cols-result))))
-           (format "CREATE TABLE %s (\n%s\n);"
-                   (pgsql-escape-identifier name)
-                   (mapconcat #'identity lines ",\n"))))
+                                 (pgsql-escape-literal name)
+                                 (if schema (pgsql-escape-literal schema)
+                                   "current_schema()"))))
+                (rows (clutch-db-pg--metadata-rows result)))
+           (when rows
+             (format "CREATE TABLE %s (\n%s\n);"
+                     (pgsql-escape-identifier name)
+                     (mapconcat #'clutch-db-pg--format-column-ddl
+                                (seq-filter #'car rows) ",\n")))))
         ((or "PROCEDURE" "FUNCTION")
          (let ((oid (substring (plist-get entry :identity) 4)))
            (caar (clutch-db-pg--metadata-rows
@@ -1835,7 +1838,7 @@ ORDER BY ordinal_position"
              detail)))
        (clutch-db-pg--metadata-rows result)))))
 
-(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--xtdb-connection))
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-pg--xtdb-connection) &optional _all-schemas)
   "Return table entry plists for the current XTDB schema on CONN.
 XTDB has no table comments."
   (let ((schema (clutch-db-current-schema conn)))

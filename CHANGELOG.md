@@ -4,6 +4,8 @@
 
 ### Added
 
+- Table object actions can compare definitions across saved SQL connections in Ediff, with a same-schema match offered by default.
+
 - The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Arrow keys move one overview node, and click or RET opens its table. Field details serve as a display. `+` expands a node, `o` moves between overview and fields, and `C-u g` recenters. Direction keys move between visually adjacent overview nodes across branches; in the field area they retain ordinary cursor movement for selecting columns and managing manual links.
 
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
