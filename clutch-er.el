@@ -1051,8 +1051,9 @@ Warm columns and outgoing keys are reused; incoming keys are always fresh."
                (funcall outcome nil (list 'clutch-db-error message)))
              (plist-get entry :schema) (plist-get entry :catalog) continue)))
 
-(defun clutch-er--load-async (entry)
-  "Start loading ENTRY in the current ER buffer, or return nil if unsupported."
+(defun clutch-er--load-async (entry omit-loading)
+  "Start loading ENTRY asynchronously, or return nil if unsupported.
+OMIT-LOADING skips the loading text."
   (let* ((conn clutch-connection)
          (buffer (current-buffer))
          (activity (clutch--begin-query-activity conn))
@@ -1084,19 +1085,21 @@ Warm columns and outgoing keys are reused; incoming keys are always fresh."
           (erase-buffer)
           (insert "\n")
           (clutch-er--insert-overview overview-entry)
-          (insert (format "Loading relations for %s...\n" (plist-get entry :name)))
+          (unless omit-loading
+            (insert (format "Loading relations for %s...\n" (plist-get entry :name))))
           (goto-char (or (clutch-er--overview-position overview-entry) (point-min))))
       (clutch--end-query-activity activity))
     started))
 
-(defun clutch-er--show (entry &optional model)
+(defun clutch-er--show (entry &optional model omit-loading)
   "Show ENTRY in the current ER buffer, loading asynchronously when supported.
-MODEL, when provided, is ready to render."
+MODEL, when provided, is ready to render.
+OMIT-LOADING skips the loading text during an asynchronous load."
   (unless model
     (unless (clutch--connection-alive-p clutch-connection)
       (user-error "Connection closed.  Reconnect from the SQL buffer or REPL"))
     (clutch--refuse-while-running clutch-connection))
-  (unless (and (not model) (clutch-er--load-async entry))
+  (unless (and (not model) (clutch-er--load-async entry omit-loading))
     (let ((model (or model
                      (clutch--with-object-error-capture
                       (current-buffer) clutch-connection entry "er-diagram"
@@ -1178,7 +1181,7 @@ With prefix RECENTER, start the overview at the current table."
      (clutch-er--overview-entry clutch-er--entry clutch-er--model)))
   (clutch--clear-table-metadata-caches clutch-connection
                                        (plist-get clutch-er--entry :name))
-  (clutch-er--show clutch-er--entry))
+  (clutch-er--show clutch-er--entry nil t))
 
 (defun clutch-er--move-node (direction)
   "Move one overview node in DIRECTION, leaving table details as they are."

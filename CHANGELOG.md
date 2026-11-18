@@ -24,6 +24,8 @@
 
 ### Fixed
 
+- Refreshing an ER diagram with `g` omits the loading message.
+
 - In the ER overview, `RET` also opens a table when point is immediately after its name.
 
 - Pressing `C-c C-c` in the Record view now opens the result table's confirmation for all staged changes.
