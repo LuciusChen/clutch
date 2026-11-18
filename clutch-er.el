@@ -433,8 +433,8 @@ read each time."
   "Button bindings for tables in the overview.")
 
 (defvar-local clutch-er--overview nil
-  "Connection followed by visited tables and their known relations.
-Each table record is (ENTRY . RELATIONS).  No columns are retained here.")
+  "Connection followed by visited tables and their merged neighbouring links.
+Each record is (ENTRY . NEIGHBOURS), with one link per target table.")
 
 (defvar-local clutch-er--overview-expanded nil
   "Tables expanded in the overview, with its fixed root first.")
@@ -463,35 +463,25 @@ An unqualified manual endpoint uses the connection's current namespace."
          :current-catalog (plist-get model :current-catalog))))
 
 (defun clutch-er--remember-overview ()
-  "Update the current table's overview from the successfully loaded model."
+  "Record the current table's neighbouring links from its loaded model."
   (unless (eq (car clutch-er--overview) clutch-connection)
     (setq clutch-er--overview (list clutch-connection)
           clutch-er--overview-expanded nil
           clutch-er--overview-first nil))
   (let* ((entry (clutch-er--overview-entry clutch-er--entry clutch-er--model))
-         (relations
-          (mapcar (lambda (relation)
-                    (let ((target (clutch-er--relation-entry relation clutch-er--model))
-                          (copy (copy-sequence relation)))
-                      (setf (plist-get copy :schema) (plist-get target :schema)
-                            (plist-get copy :catalog) (plist-get target :catalog))
-                      copy))
-                  (plist-get clutch-er--model :relations)))
+         (neighbors (clutch-er--overview-neighbors clutch-er--model))
          (record (assoc entry (cdr clutch-er--overview))))
     (unless clutch-er--overview-expanded
       (setq clutch-er--overview-expanded (list entry)))
     (if record
-        (setcdr record relations)
-      (push (cons entry relations) (cdr clutch-er--overview)))))
+        (setcdr record neighbors)
+      (push (cons entry neighbors) (cdr clutch-er--overview)))))
 
-(defun clutch-er--overview-neighbors (relations)
-  "Return the neighbours in RELATIONS, merging links to the same table."
+(defun clutch-er--overview-neighbors (model)
+  "Return the neighbours of MODEL, merging links to the same table."
   (let ((by-table (make-hash-table :test 'equal)) neighbors)
-    (dolist (relation relations)
-      (let* ((target (clutch-er--overview-entry
-                      (list :name (plist-get relation :table)
-                            :schema (plist-get relation :schema)
-                            :catalog (plist-get relation :catalog))))
+    (dolist (relation (plist-get model :relations))
+      (let* ((target (clutch-er--relation-entry relation model))
              (known (gethash target by-table)))
         (if known
             (progn
@@ -559,8 +549,9 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                (expanded (member entry clutch-er--overview-expanded))
                (slots (- remaining reserved))
                (children (when (and expanded (not repeated))
-                           (cl-remove parent (clutch-er--overview-neighbors (cdr record))
-                                      :key #'car :test #'equal)))
+                           (if parent
+                               (cl-remove parent (cdr record) :key #'car :test #'equal)
+                             (cdr record))))
                (offset (and (not parent) clutch-er--overview-first
                             (cl-position clutch-er--overview-first children
                                          :key #'car :test #'equal)))
