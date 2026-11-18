@@ -1277,13 +1277,24 @@ ORDER BY position" oid)))
                             (plist-get entry :source-schema)))
                 (result (clutch-db-pg--exec
                          conn
-                         (format "SELECT c.column_name, pg_catalog.format_type(a.atttypid, a.atttypmod),
+                         ;; format_type qualifies only hidden names.  Prefix
+                         ;; visible custom types too, using the element for arrays.
+                         (format "SELECT c.column_name,
+       CASE WHEN n.nspname <> 'pg_catalog'
+                 AND pg_catalog.pg_type_is_visible(COALESCE(e.oid, y.oid))
+            THEN pg_catalog.quote_ident(n.nspname) || '.'
+            ELSE ''
+       END || pg_catalog.format_type(a.atttypid, a.atttypmod),
        c.column_default, c.is_nullable
 FROM information_schema.tables t
 LEFT JOIN information_schema.columns c USING (table_catalog, table_schema, table_name)
 LEFT JOIN pg_catalog.pg_attribute a
   ON a.attrelid = pg_catalog.to_regclass(pg_catalog.format('%%I.%%I', t.table_schema, t.table_name))
  AND a.attnum = c.ordinal_position
+LEFT JOIN pg_catalog.pg_type y ON y.oid = a.atttypid
+LEFT JOIN pg_catalog.pg_type e
+  ON e.oid = y.typelem AND e.typarray = y.oid AND y.typstorage <> 'p'
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = COALESCE(e.typnamespace, y.typnamespace)
 WHERE t.table_name = %s AND t.table_schema = %s AND t.table_type IN ('BASE TABLE', 'LOCAL TEMPORARY')
 ORDER BY c.ordinal_position"
                                  (pgsql-escape-literal name)
