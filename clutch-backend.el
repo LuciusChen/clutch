@@ -650,14 +650,27 @@ semicolon inside one is not a break.  A CQL batch's inner separators
 are skipped.  START, when non-nil, is an offset
 known to be top-level code outside any literal, such as the position just
 past a top-level semicolon; scanning begins there instead of at 0."
+  (if (plist-get dialect :cql)
+      (clutch-db-sql--cql-statement-breaks sql dialect start)
+    (let (breaks)
+      (clutch-db-sql-scan-code
+       sql (or start 0) nil
+       (lambda (pos _ch depth)
+         (when (zerop depth)
+           (push pos breaks))
+         nil)
+       dialect ";")
+      (nreverse breaks))))
+
+(defun clutch-db-sql--cql-statement-breaks (sql dialect start)
+  "Return CQL statement breaks in SQL using DIALECT, scanning from START.
+The inner semicolons of a batch stay in its statement."
   (let* ((statement-start (or start 0))
-         (interest (if (plist-get dialect :cql)
-                       (clutch-db-sql-code-match-positions
-                        sql statement-start nil ";\\|\\_<\\(?:BEGIN\\|APPLY\\)\\_>")
-                     ";"))
+         (interest (clutch-db-sql-code-match-positions
+                    sql statement-start nil ";\\|\\_<\\(?:BEGIN\\|APPLY\\)\\_>"))
          batch breaks)
     (clutch-db-sql-scan-code
-     sql (or start 0) nil
+     sql statement-start nil
      (lambda (pos ch depth)
        (when (zerop depth)
          (pcase ch
