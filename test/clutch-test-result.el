@@ -329,9 +329,11 @@ without its filter, \\`W' and row editing."
               coding-label)
           (unwind-protect
               (clutch-test--with-sqlite-result (conn result)
-                  '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
-                    "INSERT INTO users VALUES (1, 'a,b')")
-                  "SELECT id, name FROM users"
+                  '("CREATE TABLE users (id INTEGER PRIMARY KEY, extra TEXT, name TEXT)"
+                    "INSERT INTO users VALUES (1, 'hidden', 'a,b')")
+                  "SELECT id, extra, name FROM users"
+                (setf (plist-get (nth 1 clutch--result-column-defs) :hidden) t)
+                (clutch--render-result)
                 (cl-letf (((symbol-function 'completing-read)
                            (lambda (prompt choices &rest _args)
                              (if (string-match
@@ -381,35 +383,35 @@ presents Header as enabled by default."
 
 (ert-deftest clutch-test-csv-content-escaping ()
   "CSV content should include header and escaped values."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("id" "display,name"))
+  (let ((columns '("id" "display,name")))
     (let ((csv (clutch--export-csv-content
                 '((1 "a,b") (2 "x\"y") (3 "x\ry")
-                  (4 nil) (5 "") (6 "NULL")))))
+                  (4 nil) (5 "") (6 "NULL"))
+                columns)))
       (should (string-match-p "^id,\"display,name\"\n" csv))
       (should (string-match-p "1,\"a,b\"" csv))
       (should (string-match-p "2,\"x\"\"y\"" csv))
       (should (string-match-p "3,\"x\ry\"" csv))
       (should (string-suffix-p "4,\n5,\"\"\n6,NULL\n" csv)))
-    (should (equal (clutch--export-csv-content '((1 "a,b")) t)
+    (should (equal (clutch--export-csv-content '((1 "a,b")) columns t)
                    "1,\"a,b\"\n"))
     (let ((clutch-csv-delimiter ?\;))
-      (should (equal (clutch--export-csv-content '((1 "a;b") (2 "c,d")))
+      (should (equal (clutch--export-csv-content '((1 "a;b") (2 "c,d")) columns)
                      "id;display,name\n1;\"a;b\"\n2;c,d\n")))
-    (setq-local clutch--result-columns '("null" "empty" "marker" "comma" "quote"))
     (let ((clutch-export-null-value-text "NULL"))
       (should (equal (clutch--export-csv-content
-                      '((nil "" "NULL" "a,b" "a\"b")) t)
+                      '((nil "" "NULL" "a,b" "a\"b"))
+                      '("null" "empty" "marker" "comma" "quote") t)
                      "NULL,,\"NULL\",\"a,b\",\"a\"\"b\"\n")))))
 
 (ert-deftest clutch-test-tsv-content-includes-header-and-escapes-fields ()
   "TSV content should preserve its tabular shape around special characters."
-  (with-temp-buffer
-    (setq-local clutch--result-columns '("id" "display\tname"))
+  (let ((columns '("id" "display\tname")))
     (should
      (equal (clutch--export-tsv-content
              '((1 "a,b") (2 "x\ty") (3 "x\"y") (4 "x\ny")
-               (5 nil) (6 "") (7 "NULL")))
+               (5 nil) (6 "") (7 "NULL"))
+             columns)
             (concat
              "id\t\"display\tname\"\n"
              "1\ta,b\n"
@@ -417,7 +419,7 @@ presents Header as enabled by default."
              "3\t\"x\"\"y\"\n"
              "4\t\"x\ny\"\n"
              "5\t\n6\t\"\"\n7\tNULL\n")))
-    (should (equal (clutch--export-tsv-content '((1 "a,b")) t)
+    (should (equal (clutch--export-tsv-content '((1 "a,b")) columns t)
                    "1\ta,b\n"))))
 
 (ert-deftest clutch-test-insert-content-builds-full-row-sql ()
@@ -700,7 +702,7 @@ It should explain an ended session and work on a lost one."
       (should (equal (current-kill 0)
                      "UPDATE \"users\" SET \"name\" = 'beta' WHERE \"id\" = 2"))
       (should (equal (clutch--delimited-lines-for-rows
-                      (clutch-result--rows-for-display-indices '(0)) '(1) ?,)
+                      (clutch-result--rows-for-display-indices '(0)) '("name") ?, '(1))
                      '("name" "beta")))
       (should (equal (clutch-result--build-insert-statements-for-rows
                       (clutch-result--rows-for-display-indices '(0))
@@ -1176,15 +1178,18 @@ Without a region, choosing a format with refinement is refused."
                (3 "cam" 30))
        :render t)
     (let (kill-ring kill-ring-yank-pointer)
-      (clutch-test--select-cells '(0 1) '(2 2))
-      (clutch-test--type-keys "c -r c")
-      (should clutch-refine-mode)
-      (should (equal clutch--refine-rect '((0 1 2) . (1 2))))
-      (clutch--goto-cell 1 1)
-      (clutch-refine-toggle-row)
-      (clutch-refine-toggle-col)
-      (clutch-refine-confirm)
-      (should (equal (current-kill 0) "score\n10\n30"))
+      (dolist (case '(("c -r c" "id,score\n1,10\n3,30")
+                      ("c -r t" "id\tscore\n1\t10\n3\t30")))
+        (pcase-let ((`(,keys ,expected) case))
+          (clutch-test--select-cells '(0 0) '(2 2))
+          (clutch-test--type-keys keys)
+          (should clutch-refine-mode)
+          (should (equal clutch--refine-rect '((0 1 2) . (0 1 2))))
+          (clutch--goto-cell 1 1)
+          (clutch-refine-toggle-row)
+          (clutch-refine-toggle-col)
+          (clutch-refine-confirm)
+          (should (equal (current-kill 0) expected))))
       (ert-info ("without a region")
         (let ((err (should-error (clutch-test--type-keys "c -r c")
                                  :type 'user-error)))

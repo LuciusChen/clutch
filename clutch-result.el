@@ -3244,9 +3244,10 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
         (clutch-db-require-complete-value (nth cidx row)))))
   (let ((lines
          (pcase kind
-           ('tsv (clutch--delimited-lines-for-rows rows col-indices ?\t))
-           ('csv (clutch--delimited-lines-for-rows
-                  rows col-indices clutch-csv-delimiter))
+           ((or 'csv 'tsv)
+            (clutch--delimited-lines-for-rows
+             rows (clutch--column-names-for-indices col-indices)
+             (if (eq kind 'tsv) ?\t clutch-csv-delimiter) col-indices))
            ('org-table (clutch--org-table-lines-for-rows rows col-indices))
            ('insert
             (clutch-result--build-insert-statements-for-rows rows col-indices))
@@ -3324,13 +3325,16 @@ is quoted."
       (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s)))
      (t s))))
 
-(defun clutch--delimited-lines-for-rows (rows col-indices delimiter)
-  "Return lines for ROWS using COL-INDICES and DELIMITER."
-  (let ((col-names (clutch--column-names-for-indices col-indices))
-        (separator (char-to-string delimiter)))
+(defun clutch--delimited-lines-for-rows
+    (rows columns delimiter &optional col-indices)
+  "Return delimited lines for ROWS with header COLUMNS, using DELIMITER.
+COL-INDICES selects the cells in each row in header order.  By default,
+use the first (length COLUMNS) cells."
+  (let ((separator (char-to-string delimiter))
+        (col-indices (or col-indices (number-sequence 0 (1- (length columns))))))
     (cons (mapconcat
            (lambda (val) (clutch--delimited-escape val delimiter))
-           col-names separator)
+           columns separator)
           (cl-loop for row in rows
                    for values = (vconcat row)
                    for vals = (mapcar (lambda (i)
@@ -3469,26 +3473,29 @@ to Clipboard; switch it to File before choosing an export format."
          (clutch-result--export-kind-available-p 'document-insert-many))
    ("M" "Insert many" clutch-result--export-document-insert-many)])
 
-(defun clutch--export-delimited-content (rows delimiter &optional omit-header)
-  "Return export text for ROWS separated by DELIMITER.
+(defun clutch--export-delimited-content
+    (rows columns delimiter &optional omit-header col-indices)
+  "Return export text for ROWS and COLUMNS separated by DELIMITER.
+COL-INDICES selects the cells in header order, defaulting to the leading cells.
 When OMIT-HEADER is non-nil, omit the column header."
   (let ((lines (clutch--delimited-lines-for-rows
-                rows (clutch--visible-columns) delimiter)))
+                rows columns delimiter col-indices)))
     (when omit-header
       (setq lines (cdr lines)))
     (if lines
         (concat (mapconcat #'identity lines "\n") "\n")
       "")))
 
-(defun clutch--export-csv-content (rows &optional omit-header)
-  "Return CSV export text for ROWS using current visible result columns.
-When OMIT-HEADER is non-nil, omit the column header."
-  (clutch--export-delimited-content rows clutch-csv-delimiter omit-header))
+(defun clutch--export-csv-content (rows columns &optional omit-header col-indices)
+  "Return CSV text for ROWS with header COLUMNS.
+Pass OMIT-HEADER and COL-INDICES to the delimited formatter."
+  (clutch--export-delimited-content rows columns clutch-csv-delimiter
+                                  omit-header col-indices))
 
-(defun clutch--export-tsv-content (rows &optional omit-header)
-  "Return TSV export text for ROWS using current visible result columns.
-When OMIT-HEADER is non-nil, omit the column header."
-  (clutch--export-delimited-content rows ?\t omit-header))
+(defun clutch--export-tsv-content (rows columns &optional omit-header col-indices)
+  "Return TSV text for ROWS with header COLUMNS.
+Pass OMIT-HEADER and COL-INDICES to the delimited formatter."
+  (clutch--export-delimited-content rows columns ?\t omit-header col-indices))
 
 (defconst clutch--delimited-export-coding-choices
   '(("utf-8-bom" . utf-8-with-signature)
@@ -3767,7 +3774,7 @@ Each `write-region' opens the file and creates and deletes its lock file,
 so writing each part of a stream, as small as a network read, is slow.")
 
 (cl-defun clutch-result--write-export-file
-    (kind spec path done &key coding omit-header
+    (kind spec path done &key coding omit-header columns col-indices
           (map-batches #'clutch-result--map-export-batches))
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
 Format one batch at a time, write the text whenever
@@ -3779,7 +3786,9 @@ with the exported row count.  Pages are fetched without blocking, so DONE
 may run after this function returns; a failure leaves PATH as it was.
 MAP-BATCHES calls a batch consumer and a completion callback, defaulting
 to the current result's export batches.  The consumer takes rows, or
-text already formatted and the number of rows it holds."
+text already formatted and the number of rows it holds.  For CSV/TSV rows,
+provide COLUMNS and optional COL-INDICES, or pass the batch's column names
+as the third argument to the consumer."
   (let* ((path (expand-file-name path))
          (target (file-truename path))
          transformed
@@ -3816,12 +3825,13 @@ text already formatted and the number of rows it holds."
              (setq pending nil
                    pending-size 0
                    written t)))
-         (write-batch (rows &optional count)
+         (write-batch (rows &optional count batch-columns)
            ;; ROWS may be text a backend already formatted, holding COUNT rows.
            (let ((text (cond ((stringp rows) rows)
                              ((memq kind '(csv tsv))
                               (funcall (plist-get spec :content)
-                                       rows (or omit-header (not first))))
+                                       rows (or batch-columns columns)
+                                       (or omit-header (not first)) col-indices))
                              (t (funcall (plist-get spec :content) rows)))))
              (push text pending)
              (cl-incf pending-size (length text))
@@ -3922,13 +3932,12 @@ stops it.  Replace the destination only after the whole export succeeds."
             (unless (clutch-db-sql-has-top-level-row-limit-p sql) page-size)
             (lambda (rows columns)
               ;; Keep the first page's layout: Oracle appends RN on later pages.
-              (unless export-columns (setq export-columns columns))
-              ;; Shared CSV/TSV formatters read these buffer-local variables;
-              ;; bind the export's columns while writing from a SQL buffer.
-              (let ((clutch--result-columns
-                     (mapcar (lambda (c) (plist-get c :name)) export-columns))
-                    (clutch--result-column-defs export-columns))
-                (clutch-result--emit-export-batches rows page-size emit)))
+              (unless export-columns
+                (setq export-columns
+                      (mapcar (lambda (c) (plist-get c :name)) columns)))
+              (clutch-result--emit-export-batches
+               rows page-size (lambda (batch)
+                                (funcall emit batch nil export-columns))))
             done
             ;; A stream writes formatted text itself; the rows it ends with
             ;; add nothing.
@@ -3942,19 +3951,21 @@ stops it.  Replace the destination only after the whole export succeeds."
   "Export result rows as KIND to DESTINATION.
 When OMIT-HEADER is non-nil, omit headers from delimited formats."
   (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
-         (content (plist-get spec :content)))
+         (content (plist-get spec :content))
+         (delimited (eq (plist-get spec :file-coding) 'delimited))
+         (col-indices (when delimited (clutch--visible-columns)))
+         (columns (when delimited (clutch--column-names-for-indices col-indices))))
     (pcase destination
       ('clipboard
        (clutch-result--collect-all-export-rows
         (lambda (rows)
-          (kill-new (if (memq kind '(csv tsv))
-                        (funcall content rows omit-header)
+          (kill-new (if delimited
+                        (funcall content rows columns omit-header col-indices)
                       (funcall content rows)))
           (message (plist-get spec :copy-message)
                    (length rows) (if (= (length rows) 1) "" "s")))))
       ('file
-       (let* ((delimited (eq (plist-get spec :file-coding) 'delimited))
-              (coding (when delimited
+       (let* ((coding (when delimited
                         (clutch--read-delimited-export-coding-system kind)))
               (path (read-file-name
                      (plist-get spec :file-prompt) clutch-export-default-directory
@@ -3967,7 +3978,8 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
             (apply #'message (plist-get spec :file-message)
                    (append (list row-count (if (= row-count 1) "" "s") path)
                            (when coding (list coding)))))
-          :coding coding :omit-header omit-header))))))
+          :coding coding :omit-header omit-header
+          :columns columns :col-indices col-indices))))))
 
 ;;;; Column navigation and metadata
 

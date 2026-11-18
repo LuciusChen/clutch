@@ -2016,7 +2016,8 @@ alias, quoted, qualified or through a CTE."
       (should-error (clutch-result--copy-lines format (list (list value)) '(0))
                     :type 'user-error))
     (dolist (export '(clutch--export-csv-content clutch--export-tsv-content))
-      (should-error (funcall export (list (list value))) :type 'user-error))))
+      (should-error (funcall export (list (list value)) '("body"))
+                    :type 'user-error))))
 
 (ert-deftest clutch-test-insert-explicit-values-survive-validation-and-reopen ()
   "NULL, empty text, default and literal text remain distinct in the form."
