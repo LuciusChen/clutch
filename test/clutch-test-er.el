@@ -622,6 +622,7 @@ draws with ASCII."
           clutch-er--model
           (list :schema "a" :current "public" :relations
                 (append '((:table "people" :schema "b" :direction out)
+                          (:table "people" :schema "b" :direction in :stored t)
                           (:table "people" :schema "a" :direction out)
                           (:table "people" :direction out :stored t))
                         (cl-loop for i below 1000 collect
@@ -629,7 +630,7 @@ draws with ASCII."
     (clutch-er--remember-overview)
     (let ((inhibit-read-only t)) (clutch-er--insert-overview))
     (should (< (count-lines (point-min) (point-max)) 16))
-    (should (string-match-p (regexp-quote "b.people +") (buffer-string)))
+    (should (string-match-p (regexp-quote "─┬─↔ b.people +") (buffer-string)))
     (should (string-match-p (regexp-quote "public.people +") (buffer-string)))
     (should (string-match-p "people (shown)" (buffer-string)))
     (should (string-match-p (regexp-quote "people [+992]") (buffer-string)))
@@ -637,10 +638,12 @@ draws with ASCII."
                           (cdr clutch-er--overview)) '("people")))
     (let ((initial-root (car clutch-er--overview-expanded))
           (neighbor (clutch-er--overview-entry '(:name "people" :schema "b"))))
-      (push (cons neighbor
-                  (cl-loop for i below 20 collect
-                           (list :table (format "t%d" i) :schema "b" :direction 'in)))
-            (cdr clutch-er--overview))
+      (let ((clutch-er--entry neighbor)
+            (clutch-er--model
+             (list :schema "b" :relations
+                   (cl-loop for i below 20 collect
+                            (list :table (format "t%d" i) :schema "b" :direction 'in)))))
+        (clutch-er--remember-overview))
       (clutch-test-er--goto-table "people" "b")
       (goto-char (1+ (button-end (button-at (point)))))
       (should (eq (char-after) ?+))
