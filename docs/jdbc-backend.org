@@ -65,7 +65,7 @@ SQL Server installs use Microsoft's classifier-based Maven artifacts (for exampl
 
 ** Cassandra
 
-Download =cassandra-jdbc-wrapper-5.0.5-bundle.jar= from the [[https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5][ING JDBC wrapper release]] and place it in the JDBC drivers directory. Use the bundle, which contains the driver's dependencies. Create a saved connection such as:
+Download =cassandra-jdbc-wrapper-5.0.5-bundle.jar= from the [[https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5][ING JDBC wrapper release]] and place it in the JDBC drivers directory. Use the bundle, which contains the driver's dependencies. Cassandra BLOB results require agent 0.2.29 or later. Create a saved connection such as:
 
 #+begin_src emacs-lisp
 ("cassandra-local" . (:backend cassandra

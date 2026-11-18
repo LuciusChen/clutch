@@ -6,13 +6,13 @@
 
 - Table object actions can compare definitions across saved SQL connections in Ediff, with a same-schema match offered by default.
 
-- Cassandra JDBC profiles run CQL, browse tables and columns, and show bounded read-only result previews with a truncation notice.
+- Cassandra JDBC profiles run CQL, browse tables and columns, and show bounded read-only result previews with a truncation notice. Clutch pins the published agent 0.2.29 and verifies its SHA-256. This agent handles Cassandra BLOB results.
 
 - The ER view includes a compact, clickable overview above its current table details. It reuses asynchronous navigation and loaded relations, keeps its layout stable during ordinary table switches, and handles cycles as terminal references. Arrow keys move one overview node, and click or RET opens its table. Field details serve as a display. `+` expands a node, `o` moves between overview and fields, and `C-u g` recenters. Direction keys move between visually adjacent overview nodes across branches; in the field area they retain ordinary cursor movement for selecting columns and managing manual links.
 
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 
-- JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL. The default agent version and verified release checksum are updated to 0.2.28.
+- JDBC ER metadata loads asynchronously with agent 0.2.28 or later, preserving composite key order and primary/metadata session isolation. Cancellation stops subsequent metadata requests after the current reply without interrupting primary SQL.
 
 - ER metadata loads asynchronously on native PostgreSQL and MySQL when their query APIs support it, with elapsed-time feedback and cancellation. Cached columns and outgoing keys are reused, and an existing background request is awaited without blocking the command.
 
