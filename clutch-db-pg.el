@@ -606,13 +606,12 @@ differ, so such text gains the offset of Emacs's time zone at that time."
 
 (defun clutch-db-pg--format-column-ddl (col)
   "Format a single column COL row as a DDL line."
-  (pcase-let ((`(,name ,dtype ,max-len ,default-val ,nullable) col))
-    (let* ((type-str (if max-len (format "%s(%s)" dtype max-len) dtype))
-           (parts (append (list (pgsql-escape-identifier name) type-str)
-                          (when default-val
-                            (list (format "DEFAULT %s" default-val)))
-                          (when (equal nullable "NO")
-                            '("NOT NULL")))))
+  (pcase-let ((`(,name ,type ,default-val ,nullable) col))
+    (let ((parts (append (list (pgsql-escape-identifier name) type)
+                         (when default-val
+                           (list (format "DEFAULT %s" default-val)))
+                         (when (equal nullable "NO")
+                           '("NOT NULL")))))
       (format "    %s" (mapconcat #'identity parts " ")))))
 
 (defun clutch-db-pg--unique-not-null-identities (conn table &optional schema)
@@ -1278,12 +1277,39 @@ ORDER BY position" oid)))
                             (plist-get entry :source-schema)))
                 (result (clutch-db-pg--exec
                          conn
-                         (format "SELECT column_name, data_type,
-       character_maximum_length, column_default, is_nullable
+                         ;; Give custom types a fixed qualified name while
+                         ;; keeping format_type's modifiers and array suffix.
+                         ;; Drop optional quotes on ordinary built-in names.
+                         (format "SELECT c.column_name,
+       CASE WHEN n.nspname <> 'pg_catalog'
+            THEN pg_catalog.format('\"%%s\".\"%%s\"%%s',
+                   pg_catalog.replace(n.nspname, '\"', '\"\"'),
+                   pg_catalog.replace(typ.name, '\"', '\"\"'),
+                   pg_catalog.substr(typ.rendered,
+                     pg_catalog.length(pg_catalog.format_type(typ.oid, NULL)) + 1))
+            WHEN pg_catalog.left(typ.rendered, pg_catalog.length(typ.name) + 2)
+                   = '\"' || typ.name || '\"'
+                 AND typ.name ~ '^[a-z_][a-z_0-9]*$'
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_get_keywords() k
+                                  WHERE k.word = typ.name AND k.catcode <> 'U')
+            THEN typ.name || pg_catalog.substr(typ.rendered, pg_catalog.length(typ.name) + 3)
+            ELSE typ.rendered
+       END,
+       c.column_default, c.is_nullable
 FROM information_schema.tables t
-LEFT JOIN information_schema.columns USING (table_catalog, table_schema, table_name)
+LEFT JOIN information_schema.columns c USING (table_catalog, table_schema, table_name)
+LEFT JOIN pg_catalog.pg_attribute a
+  ON a.attrelid = pg_catalog.to_regclass(pg_catalog.format('%%I.%%I', t.table_schema, t.table_name))
+ AND a.attnum = c.ordinal_position
+LEFT JOIN pg_catalog.pg_type y ON y.oid = a.atttypid
+LEFT JOIN pg_catalog.pg_type e
+  ON e.oid = y.typelem AND e.typarray = y.oid AND y.typstorage <> 'p'
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = COALESCE(e.typnamespace, y.typnamespace)
+CROSS JOIN LATERAL (SELECT COALESCE(e.oid, y.oid) AS oid,
+                          COALESCE(e.typname, y.typname) AS name,
+                          pg_catalog.format_type(a.atttypid, a.atttypmod) AS rendered) typ
 WHERE t.table_name = %s AND t.table_schema = %s AND t.table_type IN ('BASE TABLE', 'LOCAL TEMPORARY')
-ORDER BY ordinal_position"
+ORDER BY c.ordinal_position"
                                  (pgsql-escape-literal name)
                                  (if schema (pgsql-escape-literal schema)
                                    "current_schema()"))))

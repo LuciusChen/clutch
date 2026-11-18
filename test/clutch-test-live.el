@@ -402,6 +402,10 @@ uncommitted work behind."
   (require 'ediff)
   (clutch-test--with-conn admin
     (let* ((schema (format "ddl_compare_%d" (emacs-pid)))
+           (columns (format "created timestamp(3), state %s.order_state, states %s.order_state[], ref uuid, flag pg_catalog.\"char\""
+                            schema schema))
+           (create-type (format "CREATE TYPE %s.order_state AS ENUM ('open', 'shipped')"
+                                schema))
            (params (append '(:backend pg) (clutch-test--live-connect-params)))
            (target (plist-put (copy-sequence params) :database schema))
            (clutch-connection-alist (list (cons "Test" target)))
@@ -411,14 +415,20 @@ uncommitted work behind."
       (unwind-protect
           (progn
             (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
-            (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer)" schema))
+            (clutch-db-query admin create-type)
+            (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer PRIMARY KEY, amount numeric(10,2), %s)" schema columns))
+            (clutch-db-query admin (format "ALTER DATABASE %s SET search_path TO public, %s"
+                                           schema schema))
+            (clutch-db-query admin (format "ALTER DATABASE %s SET quote_all_identifiers TO on"
+                                           schema))
             (let ((conn (clutch-open-connection target)))
               (unwind-protect
                   (progn
                     (clutch-db-query conn (format "CREATE SCHEMA %s" schema))
-                    (clutch-db-query conn (format "CREATE TABLE %s.orders (id integer)" schema))
+                    (clutch-db-query conn create-type)
+                    (clutch-db-query conn (format "CREATE TABLE %s.orders (id integer NOT NULL, amount numeric(10,2), %s)" schema columns))
                     (clutch-db-query conn "CREATE SCHEMA staging")
-                    (clutch-db-query conn "CREATE TABLE staging.orders (id integer, note text)")
+                    (clutch-db-query conn (format "CREATE TABLE staging.orders (id integer NOT NULL, amount numeric(6,0), %s)" columns))
                     (clutch-db-query conn "CREATE TABLE public.orders (id integer, wrong bigint)"))
                 (clutch-close-connection conn)))
             (clutch-test--with-live-console params
@@ -457,9 +467,19 @@ uncommitted work behind."
                           (should (string-match-p (concat "Test · " (if different "staging" schema) "\\.orders")
                                                   (buffer-name right)))
                           (with-current-buffer right
-                            (should (eq (not (null (string-search "\"note\" text" (buffer-string))))
-                                        different))
-                            (should-not (string-search "wrong" (buffer-string))))
+                            (should (string-search (if different "numeric(6,0)" "numeric(10,2)")
+                                                   (buffer-string)))
+                            (should (string-search "timestamp(3) without time zone"
+                                                   (buffer-string)))
+                            (should (string-search (format "\"state\" \"%s\".\"order_state\"," schema)
+                                                   (buffer-string)))
+                            (should (string-search (format "\"states\" \"%s\".\"order_state\"[]" schema)
+                                                   (buffer-string)))
+                            (should (string-search "\"ref\" uuid," (buffer-string)))
+                            (should (string-search "\"flag\" \"char\"" (buffer-string)))
+                            (should-not (string-search "wrong" (buffer-string)))
+                            (should (string-search "Columns only" (format "%s" header-line-format)))
+                            (should (string-search "CHECK" (format "%s" header-line-format))))
                           (should (buffer-local-value 'buffer-read-only left))
                           (should (buffer-local-value 'buffer-read-only right)))
                       (when (buffer-live-p control)

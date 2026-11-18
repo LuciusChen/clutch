@@ -5756,11 +5756,11 @@ Listing them should send no catalog query."
                  (lambda (name) (format "\"%s\"" name))))
         (should
          (equal (clutch-db-pg--format-column-ddl
-                 (metadata-row "id" "integer" pgsql-null pgsql-null "NO"))
+                 (metadata-row "id" "integer" pgsql-null "NO"))
                 "    \"id\" integer NOT NULL"))
         (should
          (equal (clutch-db-pg--format-column-ddl
-                 '("name" "character varying" 20 "'guest'::text" "YES"))
+                 '("name" "character varying(20)" "'guest'::text" "YES"))
                 "    \"name\" character varying(20) DEFAULT 'guest'::text"))))))
 
 (ert-deftest clutch-db-test-pg-wrap-result-normalizes-public-value-model ()

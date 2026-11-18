@@ -30,6 +30,9 @@
 
 - DuckDB UI and ER rendering reuse the remembered namespace, refreshing it after namespace-changing statements instead of synchronously querying on every update.
 - Asynchronous JDBC column details include the same primary-key and foreign-key information as synchronous reads, so warmed ER metadata retains key markers. Keys without a reported constraint name remain separate relations.
+
+- PostgreSQL table comparison retains column type precision and labels the comparison as column-only, with table constraints and indexes excluded.
+
 - Metadata status notifications update the ER UI without starting another ER load, allowing other commands to finish loading metadata and execute their SQL.
 
 - Relation navigation restores a lost connection before reading metadata, then verifies the result's original namespace. Explicit current-catalog names and omitted catalog names identify the same table when matching and deduplicating manual relations.
