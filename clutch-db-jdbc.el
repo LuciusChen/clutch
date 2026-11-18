@@ -2065,9 +2065,11 @@ current database."
      ((clutch-jdbc--clickhouse-conn-p conn)
       (clutch-jdbc--clickhouse-table-entries conn all-schemas))
      ((and all-schemas (clutch-jdbc--oracle-conn-p conn))
-      ;; Oracle's default listing collapses objects with the same name.
-      (cl-mapcan (lambda (schema) (read-tables `((schema . ,schema))))
-                 (clutch-db-list-schemas conn)))
+      ;; Per-schema queries keep same-name objects that the default list
+      ;; collapses.  The login schema can still return other owners' tables.
+      (delete-dups
+       (cl-mapcan (lambda (schema) (read-tables `((schema . ,schema))))
+                  (clutch-db-list-schemas conn))))
      (t
       (let ((scope (clutch-jdbc--metadata-scope-params conn)))
         (read-tables (if all-schemas (assq-delete-all 'schema scope) scope)))))))

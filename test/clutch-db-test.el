@@ -2649,15 +2649,26 @@ order, and a table is found as referenced however its name is cased."
                            (plist-get case :fetch-cursor)))))))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-keeps-object-types ()
-  "JDBC list-table-entries should preserve view and synonym metadata."
+  "Oracle table discovery preserves object types and distinct schema matches."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver oracle :user "scott"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_conn _op _params &optional _timeout)
-                 '(:rows (("USERS" "TABLE" "SCOTT" "SCOTT")
-                          ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
-                          ("USER_SYM" "SYNONYM" "SCOTT" "APP"))
-                         :done t))))
+               (lambda (_conn op params &optional _timeout)
+                 (pcase op
+                   ("get-schemas" '(:schemas ("SCOTT" "APP" "HISTORY")))
+                   ("get-tables"
+                    (list :done t :rows
+                          (pcase (alist-get 'schema params)
+                            ("APP" '(("ORDERS" "TABLE" "APP" "APP")))
+                            ("HISTORY"
+                             '(("ORDERS" "TABLE" "HISTORY" "HISTORY")))
+                            ((or "SCOTT" 'nil)
+                             '(("USERS" "TABLE" "SCOTT" "SCOTT")
+                               ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
+                               ("USER_SYM" "SYNONYM" "SCOTT" "APP")
+                               ("ORDERS" "TABLE" "APP" "APP")))
+                            (schema (ert-fail (list "Unexpected schema" schema))))))
+                   (_ (ert-fail (list "Unexpected operation" op)))))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "USERS" :type "TABLE" :schema "SCOTT"
@@ -2665,7 +2676,15 @@ order, and a table is found as referenced however its name is cased."
                 (:name "USER_VIEW" :type "VIEW" :schema "SCOTT"
                        :source-schema "SCOTT")
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
-                       :source-schema "APP")))))))
+                       :source-schema "APP")
+                (:name "ORDERS" :type "TABLE" :schema "APP"
+                       :source-schema "APP"))))
+      (let ((matches (seq-filter
+                      (lambda (entry) (equal (plist-get entry :name) "ORDERS"))
+                      (clutch-db-list-table-entries conn t))))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :schema))
+                               matches)
+                       '("APP" "HISTORY")))))))
 
 (ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
   "ClickHouse JDBC metadata should use :database as the default catalog."
