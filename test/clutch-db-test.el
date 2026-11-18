@@ -2649,11 +2649,12 @@ order, and a table is found as referenced however its name is cased."
                            (plist-get case :fetch-cursor)))))))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-keeps-object-types ()
-  "JDBC list-table-entries should preserve view and synonym metadata."
+  "Oracle table discovery preserves object types and distinct schema matches."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver oracle :user "scott"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_conn _op _params &optional _timeout)
+               (lambda (_conn op _params &optional _timeout)
+                 (should (equal op "get-tables"))
                  '(:rows (("USERS" "TABLE" "SCOTT" "SCOTT")
                           ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
                           ("USER_SYM" "SYNONYM" "SCOTT" "APP"))
@@ -2665,7 +2666,23 @@ order, and a table is found as referenced however its name is cased."
                 (:name "USER_VIEW" :type "VIEW" :schema "SCOTT"
                        :source-schema "SCOTT")
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
-                       :source-schema "APP")))))))
+                       :source-schema "APP")))))
+    (let ((queries 0))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op _params &optional _timeout)
+                   (ert-fail (list "Unexpected metadata operation" op))))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (cl-incf queries)
+                   (make-clutch-db-result
+                    :rows '(("ORDERS" "TABLE" "APP" "APP")
+                            ("ORDERS" "TABLE" "HISTORY" "HISTORY"))))))
+        (should (equal (clutch-db-list-table-entries conn t)
+                       '((:name "ORDERS" :type "TABLE" :schema "APP"
+                                :source-schema "APP")
+                         (:name "ORDERS" :type "TABLE" :schema "HISTORY"
+                                :source-schema "HISTORY"))))
+        (should (= queries 1))))))
 
 (ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
   "ClickHouse JDBC metadata should use :database as the default catalog."
@@ -3757,8 +3774,8 @@ passes validation fails the test instead of failing on the fake client."
                (lambda (_conn sql)
                  (setq captured-sql sql)
                  (make-clutch-db-result
-                  :rows '(("events" "MergeTree")
-                          ("daily_mv" "View"))))))
+                  :rows '(("events" "MergeTree" "default")
+                          ("daily_mv" "View" "default"))))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "events" :type "TABLE" :schema "default"
@@ -6081,8 +6098,8 @@ out, which broke the Oracle statement and left SQL Server unpaged."
                (lambda (_conn sql)
                  (setq captured-sql sql)
                  (make-mysql-result
-                  :rows '(("orders" "BASE TABLE" "订单")
-                          ("audit_log" "BASE TABLE" nil))))))
+                  :rows '(("orders" "BASE TABLE" "订单" "app")
+                          ("audit_log" "BASE TABLE" nil "app"))))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "orders" :type "TABLE" :schema "app"
@@ -6158,14 +6175,12 @@ out, which broke the Oracle statement and left SQL Server unpaged."
   (clutch-db-test--with-pgsql-results
     (let ((conn (clutch-db-test--make-pg-connection :database "app"))
           captured-sql)
-      (cl-letf (((symbol-function 'clutch-db-current-schema)
-                 (lambda (_conn) "public"))
-                ((symbol-function 'pgsql-exec)
+      (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq captured-sql sql)
                    (clutch-db-test--make-pg-result
-                    :rows `(("orders" "TABLE" "订单")
-                            ("audit_log" "TABLE" ,pgsql-null))))))
+                    :rows `(("orders" "TABLE" "订单" "public")
+                            ("audit_log" "TABLE" ,pgsql-null "public"))))))
         (should
          (equal (clutch-db-list-table-entries conn)
                 '((:name "orders" :type "TABLE" :schema "public"

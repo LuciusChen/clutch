@@ -251,7 +251,7 @@ SQLite metadata needs no network wait, so retain synchronous completion."
                      (format "SELECT sql FROM sqlite_master \
 WHERE type='table' AND name=%s"
                              (clutch-db-sqlite--escape-lit table)))))
-         (or (caar rows) (format "-- No DDL found for %s" table))))
+         (caar rows)))
       (_ nil))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table

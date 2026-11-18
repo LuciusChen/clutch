@@ -2138,12 +2138,13 @@ Return nil when the parameters recorded for the session lead back there.")
   "Default to switching the namespace within the existing connection."
   nil)
 
-(cl-defgeneric clutch-db-list-table-entries (conn)
+(cl-defgeneric clutch-db-list-table-entries (conn &optional all-schemas)
   "Return browseable table-like object entries for CONN.
+With ALL-SCHEMAS, include tables in other visible schemas when supported.
 Each entry is a plist containing at least :name and :type, and may also
 include :schema, :source-schema, :target-schema, :target-name, and :comment.")
 
-(cl-defmethod clutch-db-list-table-entries ((conn t))
+(cl-defmethod clutch-db-list-table-entries ((conn t) &optional _all-schemas)
   "Default table-entry implementation for CONN.
 Derived from `clutch-db-list-tables'."
   (mapcar (lambda (table)
