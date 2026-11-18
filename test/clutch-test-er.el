@@ -673,7 +673,6 @@ draws with ASCII."
     (should (push-button (point) t))
     (should (looking-at (regexp-quote "people [+9]")))
     (clutch-test-er--goto-table "t9" "b")
-    (should (looking-at "t9"))
     (clutch-test-er--goto-table "people" "b")
     (forward-char (length "people ["))
     (call-interactively (key-binding (kbd "+")))

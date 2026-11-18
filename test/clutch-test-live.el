@@ -523,16 +523,12 @@ uncommitted work behind."
                       (let ((query (format "SELECT k FROM %s LIMIT 1" partition)))
                         (clutch-db-query conn (format "CREATE TABLE %s (k int PRIMARY KEY)" partition))
                         (clutch-db-query conn (format "INSERT INTO %s (k) VALUES (1)" partition))
-                        (insert query ";")
-                        (goto-char (point-min))
-                        (clutch-test--type-keys "C-c C-c")
-                        (clutch-test--await-queries)
+                        (clutch-test--run-in-console query)
                         (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests)))
                                        query))
                         (with-current-buffer clutch--last-result-buffer
                           (should (equal clutch--result-rows '((1))))))
                     (clutch-db-query conn (format "DROP KEYSPACE %s" keyspace))))
-                (erase-buffer)
                 (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                   (let ((batch (concat
                                 "BEGIN UNLOGGED BATCH "

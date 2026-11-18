@@ -24,19 +24,13 @@
 
 ### Fixed
 
-- Refreshing an ER diagram with `g` omits the loading message.
-
-- In the ER overview, `RET` also opens a table when point is immediately after its name.
-
-- Pressing `C-c C-c` in the Record view opens the result table's confirmation for all staged changes, even when the displayed row is filtered out.
-
-- Record actions stay on the displayed row after client-side filtering or sorting. Reopen the Record if its row is hidden or its result was replaced. An open cell editor refuses to stage changes against a replacement result.
+- Record actions stay on the displayed row after client-side filtering or sorting. `C-c C-c` confirms the result table's staged changes even when the row is filtered out. An open cell editor refuses to stage changes against a replacement result.
 
 - Describe and definition buffers keep same-named objects from different connections separate and label the connection.
 
 - Large raw BLOBs open in hexadecimal when their text preview contains invalid UTF-8. The check reads only the preview bytes already in memory.
 
-- Composite foreign-key brackets stay connected when another relation ends on the same field. The ER overview keeps sibling branches visible and shows a clickable `[+N]` for folded neighbours.
+- Composite foreign-key brackets stay connected when another relation ends on the same field. The ER overview keeps sibling branches visible and shows a clickable `[+N]` for folded neighbours. `RET` works immediately after the table name, and `g` refreshes without a loading message.
 
 - Manually refreshing a table description waits for the schema request it starts before reloading table metadata, avoiding a busy-connection error on asynchronous native backends.
 
