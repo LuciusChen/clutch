@@ -91,7 +91,7 @@ Without an explicit SQL row limit, paged query export and all-row result export 
 | =C-c C-p=      | Preview execution (staged batch if any; otherwise effective query) |
 | =c=            | Open copy transient menu (choose TSV / CSV / aligned Org table / INSERT / UPDATE; =-r= controls refinement and =-h= controls tabular headers) |
 | =k=            | Copy SQL, table metadata, and bounded result sample for an external agent |
-| =v=            | Open the full cell value (JSON / XML / BLOB — auto-detected) |
+| =v=            | Inspect the cell value (JSON / XML / BLOB — auto-detected) |
 | =|=            | Pipe the current cell through a shell command |
 | =e=            | Open export transient menu (choose CSV / TSV / INSERT / UPDATE; =-h= controls headers and =-f= switches Clipboard / File) |
 | =f=            | Toggle fullscreen                             |
@@ -141,7 +141,9 @@ An untouched blank insert field is omitted, allowing the database to supply its 
 
 INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
-JDBC binary values that contain only BLOB length metadata appear as =<BLOB>= in the table and =<BLOB preview; N total>= in the viewer. They are unavailable as complete data and are refused by copy/export and mutation paths. Select an explicit hex or text conversion in SQL to export those bytes, for example =RAWTOHEX(col)= on Oracle or =CONVERT(VARCHAR(MAX), col, 2)= on SQL Server. Decoded complete JSON/XML text BLOBs remain usable.
+Press =v= on a BLOB cell, then =x= to switch between the text and hexadecimal views when bytes are available. The hex view shows at most 256 leading bytes. A JSON-looking BLOB with invalid UTF-8 opens in hex. Raw BLOBs larger than 64 KiB open directly in the bounded viewer, with up to 1024 bytes in text mode when those bytes are available. SQLite can identify BLOB cells even when the same result column also contains text. Both views use the result already in memory.
+
+With an agent that provides JDBC byte previews, Clutch receives up to 256 bytes and displays the original size. JDBC LOB locators larger than 64 KiB and results from older agents can carry only the length, displayed as =<BLOB preview; N total>=. JDBC previews are refused by copy/export and mutation paths. To export binary content as text, select an explicit database conversion in SQL. Complete decoded JSON/XML BLOBs still open in their structured viewers and can show the exact byte prefix when supplied by the agent.
 
 ** Edit Buffer Keys
 
@@ -244,7 +246,7 @@ Typical flow:
 | =C-c C-u=   | Roll back the current server transaction |
 | =C-c C-a=   | Toggle auto-commit when supported |
 | =I=         | Clone current record into a prefilled insert form (without PK values) |
-| =v=         | Open the full field value (JSON / XML / BLOB) |
+| =v=         | Inspect the field value (JSON / XML / BLOB) |
 | =g=         | Refresh                       |
 | =q=         | Quit                          |
 | =C-c ?=     | Transient menu                |

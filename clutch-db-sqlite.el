@@ -105,7 +105,10 @@ Use \":memory:\" for a transient in-memory database."
              for value = (and first-row (nth i first-row))
              collect (list :name name
                            :type-category
-                           (clutch-db-sqlite--infer-category value)))))
+                           (clutch-db-sqlite--infer-category value)
+                           ;; SQLite stores a type per cell.  Emacs returns
+                           ;; BLOB as unibyte and TEXT as multibyte strings.
+                           :unibyte-blob t))))
 
 ;;;; Query helpers
 

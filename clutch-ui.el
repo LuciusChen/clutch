@@ -779,14 +779,18 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
        (or (clutch--json-like-string-p val)
            (clutch--xml-like-string-p val))))
 
+(defun clutch--blob-value-p (val col-def)
+  "Return non-nil when VAL belongs to the BLOB viewer for COL-DEF."
+  (or (eq (plist-get col-def :type-category) 'blob)
+      (and (plist-get col-def :unibyte-blob)
+           (stringp val)
+           (not (multibyte-string-p val)))))
+
 (defun clutch--value-placeholder (val col-def)
   "Return compact placeholder text for VAL/COL-DEF in result grid."
-  (let ((cat (plist-get col-def :type-category)))
-    (cond
-     ((and (eq cat 'blob)
-           (not (clutch--blob-text-display-value-p val)))
-      "<BLOB>")
-     (t nil))))
+  (when (and (clutch--blob-value-p val col-def)
+             (not (clutch--blob-text-display-value-p val)))
+    "<BLOB>"))
 
 (defun clutch--cell-placeholder-value (val)
   "Return display placeholder text for special cell VAL, or nil."

@@ -178,7 +178,7 @@
                             '("Text preview:")
                             '("Hex preview:"))))
     (pcase-let ((`(,value ,size-line ,present ,absent) case))
-      (let ((s (clutch--blob-view-string value)))
+      (let ((s (plist-get (clutch--view-spec value '(:type-category blob)) :content)))
         (should (string-match-p size-line s))
         (dolist (needle present)
           (should (string-match-p needle s)))
@@ -205,7 +205,7 @@
   (should-not (clutch--xml-like-string-p "just <text> marker")))
 
 (ert-deftest clutch-test-view-xml-value-enables-fontification ()
-  "XML viewer should invoke fontification and show byte size in header."
+  "XML viewer should fontify BLOB text and retain its byte-size header."
   (let ((fontified nil))
     (clutch-test--with-pop-to-buffer-capture buf
       (cl-letf (((symbol-function 'executable-find) (lambda (_cmd) nil))
@@ -214,11 +214,16 @@
                  (lambda (&rest _args) (setq fontified t)))
                 ((symbol-function 'jit-lock-fontify-now)
                  (lambda (&rest _args) nil)))
-        (clutch--dispatch-view "<root><a>1</a></root>" '(:type-category text))
+        (clutch--dispatch-view (encode-coding-string "<root><a>1</a></root>" 'utf-8)
+                               '(:type-category blob))
         (should fontified)
         (with-current-buffer buf
-          (should (string-match-p "XML" (format "%s" header-line-format)))
-          (should (string-match-p "bytes" (format "%s" header-line-format))))))))
+          (should (eq (key-binding (kbd "x")) #'clutch-blob-view-toggle))
+          (should (string-search "21 bytes" (format "%s" header-line-format)))
+          (call-interactively (key-binding (kbd "x")))
+          (should (string-search "3c 72 6f 6f 74" (buffer-string)))
+          (call-interactively (key-binding (kbd "x")))
+          (should (string-search "21 bytes" (format "%s" header-line-format))))))))
 
 (ert-deftest clutch-test-view-xml-value-decodes-numeric-char-refs-for-display ()
   "XML viewer should display numeric character references as UTF-8 text."
