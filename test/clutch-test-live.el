@@ -2596,7 +2596,7 @@ throughout."
     (let* ((table (format "clutch_obj_desc_%d" (emacs-pid)))
            (index (format "idx_clutch_obj_desc_%d" (emacs-pid)))
            (later (concat table "_later"))
-           describe-name
+           describe-buffer
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
             (clutch-test--live-create-table-sql
@@ -2625,7 +2625,6 @@ throughout."
                                :key (lambda (entry) (plist-get entry :name))
                                :test #'string=)))
                 (should table-entry)
-                (setq describe-name (format "*clutch describe: %s*" (clutch--object-fqname table-entry)))
                 (should index-entry)
                 (let ((text (clutch--object-describe-text conn table-entry)))
                   (should (string-match-p (regexp-quote table) text))
@@ -2641,8 +2640,8 @@ throughout."
                 (save-window-excursion
                   (with-temp-buffer
                     (setq-local clutch-connection conn)
-                    (clutch-object-describe table-entry))
-                  (with-current-buffer describe-name
+                    (setq describe-buffer (clutch-object-describe table-entry)))
+                  (with-current-buffer describe-buffer
                     (clutch-db-query conn (format "ALTER TABLE %s ADD extra INT" table))
                     (clutch-db-query conn (format "CREATE TABLE %s (id INT)" later))
                     (let ((inhibit-read-only t)) (erase-buffer) (insert "stale display"))
@@ -2662,7 +2661,7 @@ throughout."
                     (should (string-match-p "^  extra\\_>" (buffer-string)))
                     (should (not (eq (gethash later (gethash conn clutch--schema-cache) 'missing)
                                      'missing)))))))
-          (when-let* ((buffer (and describe-name (get-buffer describe-name)))) (kill-buffer buffer))
+          (when (buffer-live-p describe-buffer) (kill-buffer describe-buffer))
           (ignore-errors (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" later)))
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 

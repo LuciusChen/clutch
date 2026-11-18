@@ -100,6 +100,9 @@ the header cell was rendered.")
 (defvar clutch--pending-edits)
 (defvar clutch--pending-inserts)
 (defvar clutch--query-elapsed)
+(defvar clutch-record--result-buffer)
+(defvar clutch-record--row-idx)
+(defvar clutch-record--row)
 (defvar clutch--result-source-table)
 (defvar clutch--result-source-schema)
 (defvar clutch--result-source-catalog)
@@ -2588,6 +2591,21 @@ metadata comes from the table the result shows."
 If point is on a pipe separator or padding space, scans left then
 right on the current line to find the nearest cell."
   (clutch--cell-at-or-near (point)))
+
+(defun clutch-record--resolve-row-index ()
+  "Return the position of the displayed row in the current result.
+Client filtering and sorting reuse row objects.  A replacement result
+must be reopened so that its row and column positions are both current."
+  (unless (buffer-live-p clutch-record--result-buffer)
+    (user-error "Result buffer no longer exists"))
+  (let ((row clutch-record--row)
+        (index clutch-record--row-idx))
+    (with-current-buffer clutch-record--result-buffer
+      (let ((rows (clutch--result-display-rows)))
+        (or (and row (if (eq row (nth index rows))
+                         index
+                       (cl-position row rows :test #'eq)))
+            (user-error "The displayed row is no longer in this result.  Reopen the record from the result table"))))))
 
 (defun clutch--render-result ()
   "Render the result buffer content as one horizontally scrollable table.

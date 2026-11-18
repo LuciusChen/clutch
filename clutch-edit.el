@@ -30,7 +30,6 @@
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch-record--result-buffer)
-(defvar clutch-record--row-idx)
 
 (defvar-local clutch--fk-info nil
   "Foreign key info for the current result.")
@@ -777,6 +776,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                     (user-error "No cell at point"))))
       (if (eq result-buffer return-buffer)
           (clutch-result-edit--open-cell cell return-buffer)
+        (setcar cell (clutch-record--resolve-row-index))
         (let ((opened (with-current-buffer result-buffer
                         (clutch-result-edit--open-cell cell return-buffer))))
           (when (and (buffer-live-p opened)
@@ -2095,7 +2095,8 @@ TABLE is a metadata key from `clutch--table-key'."
   (let* ((record-source-p (derived-mode-p 'clutch-record-mode))
          (source (cond
                   (record-source-p
-                   (list clutch-record--result-buffer clutch-record--row-idx))
+                   (list clutch-record--result-buffer
+                         (clutch-record--resolve-row-index)))
                   ((derived-mode-p 'clutch-result-mode)
                    (list (current-buffer)
                          (or (clutch--row-idx-at-line)

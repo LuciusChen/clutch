@@ -663,8 +663,8 @@ field metadata without changing parsed names."
                   (with-current-buffer record-buf
                     (clutch-record-mode)
                     (setq-local clutch-record--result-buffer result-buf
-                                clutch-record--row-idx 0))
-                  (with-current-buffer record-buf
+                                clutch-record--row-idx 0)
+                    (clutch-record--render)
                     (clutch-clone-row-to-insert))
                   (with-current-buffer insert-buf
                     (should (string-match-p "^id[ ]+\\[generated\\]: $"

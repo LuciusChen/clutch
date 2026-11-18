@@ -215,6 +215,8 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
   "Reference to the parent result buffer for record display.")
 (defvar-local clutch-record--row-idx nil
   "Current row index being displayed in a record buffer.")
+(defvar-local clutch-record--row nil
+  "The result row shown by this Record, before applying staged edits.")
 (defvar-local clutch-record--expanded-fields nil
   "List of expanded long field column indices in a record buffer.")
 (defvar-local clutch-record--header-base nil
@@ -952,12 +954,10 @@ If the result has columns, shows a table; otherwise shows DML summary."
   "Discard the staged change at point."
   (interactive)
   (if (derived-mode-p 'clutch-record-mode)
-      (pcase-let* ((`(,ridx ,cidx ,_) (or (clutch--cell-at-point)
+      (pcase-let* ((`(,_ ,cidx ,_) (or (clutch--cell-at-point)
                                          (user-error "No field at point")))
-                   (result-buf (or (and (buffer-live-p clutch-record--result-buffer)
-                                        clutch-record--result-buffer)
-                                   (user-error "Result buffer no longer exists"))))
-        (with-current-buffer result-buf
+                   (ridx (clutch-record--resolve-row-index)))
+        (with-current-buffer clutch-record--result-buffer
           (clutch-result--discard-pending-at ridx cidx))
         (clutch-record--revert))
     (let ((ridx (or (clutch--row-idx-at-line)
@@ -4400,6 +4400,7 @@ the label column width."
            (identity-vec (and row-identity row
                               (clutch-db-row-identity-values row row-identity)))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
+      (setq clutch-record--row row)
       (cl-loop for name in col-names
                for col-def in col-defs
                for cidx from 0
@@ -4494,16 +4495,14 @@ there are several."
 Besides foreign keys, these are the relations added by hand to the
 result's table; see `clutch-er-add-relation'."
   (interactive)
-  (let ((cidx (get-text-property (point) 'clutch-col-idx))
-        (ridx (get-text-property (point) 'clutch-row-idx)))
-    (unless (and cidx ridx (buffer-live-p clutch-record--result-buffer))
-      (user-error "No field at point"))
-    (clutch-record--follow-column clutch-record--result-buffer cidx ridx t)))
+  (let ((cidx (or (get-text-property (point) 'clutch-col-idx)
+                  (user-error "No field at point"))))
+    (clutch-record--follow-column clutch-record--result-buffer
+                                  cidx (clutch-record--resolve-row-index) t)))
 
 (defun clutch-record--field-action-context ()
   "Return the action context for the Record field at point, or nil."
   (when-let* ((cidx (get-text-property (point) 'clutch-col-idx))
-              (ridx (get-text-property (point) 'clutch-row-idx))
               (result-buf clutch-record--result-buffer)
               ((buffer-live-p result-buf)))
     (let* ((fk-info (buffer-local-value 'clutch--fk-info result-buf))
@@ -4526,7 +4525,6 @@ result's table; see `clutch-er-add-relation'."
                     (t 'show-value))))
       (list :action action
             :column-index cidx
-            :row-index ridx
             :result-buffer result-buf
             :value value))))
 
@@ -4557,8 +4555,9 @@ result's table; see `clutch-er-add-relation'."
          (clutch-record--follow-column
           (plist-get context :result-buffer)
           (plist-get context :column-index)
-          (plist-get context :row-index)))
+          (clutch-record--resolve-row-index)))
         ((or 'expand 'collapse)
+         (setq clutch-record--row-idx (clutch-record--resolve-row-index))
          (let ((cidx (plist-get context :column-index)))
            (if (eq (plist-get context :action) 'collapse)
                (setq clutch-record--expanded-fields
@@ -4574,23 +4573,25 @@ result's table; see `clutch-er-add-relation'."
 (defun clutch-record-next-row ()
   "Show the next row in the Record buffer."
   (interactive)
-  (let ((total (with-current-buffer clutch-record--result-buffer
+  (let ((index (clutch-record--resolve-row-index))
+        (total (with-current-buffer clutch-record--result-buffer
                  (length (clutch--result-display-rows)))))
-    (if (>= (1+ clutch-record--row-idx) total)
+    (if (>= (1+ index) total)
         (user-error "Already at last row")
-      (cl-incf clutch-record--row-idx)
-      (setq clutch-record--expanded-fields nil)
+      (setq clutch-record--row-idx (1+ index)
+            clutch-record--expanded-fields nil)
       (clutch-record--render))))
 
 ;;;###autoload
 (defun clutch-record-prev-row ()
   "Show the previous row in the Record buffer."
   (interactive)
-  (if (<= clutch-record--row-idx 0)
-      (user-error "Already at first row")
-    (cl-decf clutch-record--row-idx)
-    (setq clutch-record--expanded-fields nil)
-    (clutch-record--render)))
+  (let ((index (clutch-record--resolve-row-index)))
+    (if (zerop index)
+        (user-error "Already at first row")
+      (setq clutch-record--row-idx (1- index)
+            clutch-record--expanded-fields nil)
+      (clutch-record--render))))
 
 ;;;###autoload
 (defun clutch-record-view-value ()
@@ -4611,6 +4612,7 @@ Selects JSON, XML, or binary string view based on column type and content."
   "Render the Record buffer again, keeping point on its field.
 Background metadata reverts the buffer while the user may be on a field."
   (let ((cidx (get-text-property (point) 'clutch-col-idx)))
+    (setq clutch-record--row-idx (clutch-record--resolve-row-index))
     (clutch-record--render)
     (when-let* ((cidx)
                 (match (text-property-search-forward 'clutch-col-idx cidx #'eq)))
