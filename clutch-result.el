@@ -2569,12 +2569,10 @@ When QUIET is non-nil, suppress informational fallback messages."
                    (encode-coding-string (clutch--format-value val) 'binary))))
       (cons (substring bytes 0 (min (length bytes) 1024)) (length bytes))))))
 
-(defun clutch--blob-hexdump-lines (bytes &optional max-bytes)
-  "Return hex dump lines for BYTES, up to MAX-BYTES bytes."
-  (let* ((total (length bytes))
-         (limit (min total (or max-bytes total)))
-         (offset 0)
-         lines)
+(defun clutch--blob-hexdump-lines (bytes limit)
+  "Return hex dump lines for the first LIMIT bytes of BYTES."
+  (let ((offset 0)
+        lines)
     (while (< offset limit)
       (let* ((line-len (min 16 (- limit offset)))
              (hex-parts nil)
@@ -2622,10 +2620,11 @@ When QUIET is non-nil, suppress informational fallback messages."
      (when (< shown size)
        (format "\n\n... truncated, showing first %d bytes" shown)))))
 
-(defun clutch--blob-view-spec (val quiet)
-  "Build the BLOB viewer for VAL, with a second format unless QUIET."
+(defun clutch--blob-view-spec (val quiet &optional hex)
+  "Build the BLOB viewer for VAL, with a second format unless QUIET.
+When HEX is non-nil, start with hexadecimal output."
   (pcase-let* ((`(,bytes . ,size) (clutch--blob-view-data val))
-               (text-p (clutch--blob-likely-text-p bytes)))
+               (text-p (and (not hex) (clutch--blob-likely-text-p bytes))))
     (list :kind "BLOB" :content (clutch--blob-view-string bytes size text-p)
           :setup #'special-mode
           :alternate (unless quiet
@@ -2662,12 +2661,23 @@ When QUIET is non-nil, suppress informational fallback messages."
                  (lambda () (clutch--setup-blob-view-switch alternate view)))))
   (clutch-blob-view-toggle-mode 1))
 
-(defun clutch--json-view-string-p (val)
-  "Return non-nil when VAL is string content suitable for the JSON viewer."
-  (and (clutch--json-like-string-p val)
-       (condition-case _err
-           (progn (ignore (json-parse-string val)) t)
-         (json-parse-error nil))))
+(defun clutch--json-view-kind (val blob-p)
+  "Classify a JSON-like string VAL for the viewer.
+Return `json' for valid JSON or `invalid-utf8' for bad UTF-8 in a BLOB.
+BLOB-P indicates that VAL is a BLOB."
+  (when (clutch--json-like-string-p val)
+    (condition-case err
+        (progn (ignore (json-parse-string val)) 'json)
+      (json-utf8-decode-error
+       (if blob-p 'invalid-utf8
+         (signal (car err) (cdr err))))
+      (json-parse-error
+       ;; Emacs 29 reports invalid UTF-8 as a generic parse error.
+       (when (and blob-p
+                  (not (multibyte-string-p val))
+                  (memq 'eight-bit
+                        (find-charset-string (decode-coding-string val 'utf-8))))
+         'invalid-utf8)))))
 
 (defun clutch--view-format-value (val)
   "Format VAL for value viewers."
@@ -2679,7 +2689,9 @@ When QUIET is non-nil, suppress informational fallback messages."
 (defun clutch--view-spec (val col-def &optional quiet)
   "Return rendering spec for VAL with column metadata COL-DEF.
 When QUIET is non-nil, suppress nonessential viewer messages."
-  (let ((cat (plist-get col-def :type-category)))
+  (let ((cat (plist-get col-def :type-category))
+        (blob-p (clutch--blob-value-p val col-def))
+        json-kind)
     (cond
      ((and (clutch-db-value-preview-p val)
            (clutch-db-value-preview-bytes val))
@@ -2694,10 +2706,10 @@ When QUIET is non-nil, suppress nonessential viewer messages."
      ((and (stringp val)
            (not (multibyte-string-p val))
            (> (length val) clutch--blob-structured-view-max-bytes)
-           (clutch--blob-value-p val col-def))
+           blob-p)
       (clutch--blob-view-spec val quiet))
      ((or (eq cat 'json)
-          (clutch--json-view-string-p val))
+          (eq (setq json-kind (clutch--json-view-kind val blob-p)) 'json))
       (list :kind "JSON"
             :content (if (stringp val) val
                        (clutch--json-value-to-string val))
@@ -2706,8 +2718,8 @@ When QUIET is non-nil, suppress nonessential viewer messages."
       (list :kind "XML"
             :content val
             :setup (lambda () (clutch--setup-xml-view-buffer val quiet))))
-     ((clutch--blob-value-p val col-def)
-      (clutch--blob-view-spec val quiet))
+     (blob-p
+      (clutch--blob-view-spec val quiet (eq json-kind 'invalid-utf8)))
      (t
       (list :kind "Value"
             :content (clutch--view-format-value val)

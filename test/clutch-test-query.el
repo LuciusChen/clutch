@@ -549,41 +549,39 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                    "<BLOB preview; 3 total>"))))
 
 (ert-deftest clutch-test-blob-view-switches-without-connection ()
-  "Inspect bytes in original results and switch between hex and text."
-  (require 'clutch-db-sqlite)
-  (skip-unless (sqlite-available-p))
-  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-        (blob-buffer "*clutch-blob*"))
-    (unwind-protect
-        (let* ((result (clutch-db-query
-                        conn (concat "SELECT 'plain' AS value UNION ALL SELECT X'616263' "
-                                     "UNION ALL SELECT CAST('[\"' || printf('%0*d', 65536, 0) || '\"]' AS BLOB)")))
-               (column (car (clutch-db-result-columns result)))
-               (rows (clutch-db-result-rows result)))
-          (clutch-db-disconnect conn)
-          (setq conn nil)
-          (should (equal (plist-get (clutch--view-spec (caar rows) column) :kind)
-                         "Value"))
-          (save-window-excursion
-            (clutch--dispatch-view (caadr rows) column)
-            (with-current-buffer (get-buffer blob-buffer)
-              (should (string-search "Text preview:\nabc" (buffer-string)))
-              (call-interactively (key-binding (kbd "x")))
-              (should (string-search "61 62 63" (buffer-string)))
-              (call-interactively (key-binding (kbd "x")))
-              (should (string-search "Text preview:\nabc" (buffer-string))))
-            (clutch--dispatch-view (caar (cddr rows)) column)
-            (should (equal (buffer-name) blob-buffer))
-            (should (string-search "showing first 1024 bytes" (buffer-string)))
-            (call-interactively (key-binding (kbd "x")))
-            (should (string-search "5b 22 30 30" (buffer-string)))
-            (should (string-search "showing first 256 bytes" (buffer-string)))
-            (call-interactively (key-binding (kbd "x")))
-            (should (string-search "showing first 1024 bytes" (buffer-string)))))
-      (when conn
-        (clutch-db-disconnect conn))
-      (when-let* ((buffer (get-buffer blob-buffer)))
-        (kill-buffer buffer)))))
+  "View SQLite result bytes and switch formats after disconnecting."
+  (clutch-test--with-sqlite-result (conn result) nil
+      (concat "SELECT 'plain' AS value UNION ALL SELECT X'616263' "
+              "UNION ALL SELECT CAST('[\"' || printf('%0*d', 65536, 0) || '\"]' AS BLOB) "
+              "UNION ALL SELECT X'5B22FF225D' "
+              "UNION ALL SELECT CAST(X'5B22' || printf('%0*d', 600, 0) || X'FF225D' AS BLOB) "
+              "UNION ALL SELECT X'5B696E666F5D'")
+    (clutch-db-disconnect conn)
+    (clutch--goto-cell 0 0)
+    (clutch-test--with-pop-to-buffer-capture viewer
+      (call-interactively (key-binding (kbd "v")))
+      (should (equal (buffer-name viewer) "*clutch-value*")))
+    (dolist (case '((1 ("Text preview:\nabc") ("61 62 63"))
+                    (2 ("showing first 1024 bytes")
+                       ("5b 22 30 30" "showing first 256 bytes"))
+                    (3 ("Hex preview:" "5b 22 ff 22 5d") ("Text preview:"))
+                    (4 ("Hex preview:" "5b 22 30 30") ("Text preview:"))
+                    (5 ("Text preview:\n[info]") ("5b 69 6e 66 6f 5d"))))
+      (pcase-let ((`(,row ,initial ,alternate) case))
+        (ert-info ((format "SQLite result row %d" row))
+          (clutch--goto-cell row 0)
+          (clutch-test--with-pop-to-buffer-capture viewer
+            (call-interactively (key-binding (kbd "v")))
+            (should (equal (buffer-name viewer) "*clutch-blob*"))
+            (with-current-buffer viewer
+              (let ((original (buffer-string)))
+                (dolist (part initial)
+                  (should (string-search part original)))
+                (call-interactively (key-binding (kbd "x")))
+                (dolist (part alternate)
+                  (should (string-search part (buffer-string))))
+                (call-interactively (key-binding (kbd "x")))
+                (should (equal (buffer-string) original))))))))))
 
 (ert-deftest clutch-test-export-rejects-incomplete-binary-values ()
   "A BLOB byte preview is incomplete; decoded text remains usable."
