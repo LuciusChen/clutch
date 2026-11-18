@@ -2653,22 +2653,12 @@ order, and a table is found as referenced however its name is cased."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
                                      :params '(:driver oracle :user "scott"))))
     (cl-letf (((symbol-function 'clutch-jdbc--rpc)
-               (lambda (_conn op params &optional _timeout)
-                 (pcase op
-                   ("get-schemas" '(:schemas ("SCOTT" "APP" "HISTORY")))
-                   ("get-tables"
-                    (list :done t :rows
-                          (pcase (alist-get 'schema params)
-                            ("APP" '(("ORDERS" "TABLE" "APP" "APP")))
-                            ("HISTORY"
-                             '(("ORDERS" "TABLE" "HISTORY" "HISTORY")))
-                            ((or "SCOTT" 'nil)
-                             '(("USERS" "TABLE" "SCOTT" "SCOTT")
-                               ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
-                               ("USER_SYM" "SYNONYM" "SCOTT" "APP")
-                               ("ORDERS" "TABLE" "APP" "APP")))
-                            (schema (ert-fail (list "Unexpected schema" schema))))))
-                   (_ (ert-fail (list "Unexpected operation" op)))))))
+               (lambda (_conn op _params &optional _timeout)
+                 (should (equal op "get-tables"))
+                 '(:rows (("USERS" "TABLE" "SCOTT" "SCOTT")
+                          ("USER_VIEW" "VIEW" "SCOTT" "SCOTT")
+                          ("USER_SYM" "SYNONYM" "SCOTT" "APP"))
+                         :done t))))
       (should
        (equal (clutch-db-list-table-entries conn)
               '((:name "USERS" :type "TABLE" :schema "SCOTT"
@@ -2676,15 +2666,23 @@ order, and a table is found as referenced however its name is cased."
                 (:name "USER_VIEW" :type "VIEW" :schema "SCOTT"
                        :source-schema "SCOTT")
                 (:name "USER_SYM" :type "SYNONYM" :schema "SCOTT"
-                       :source-schema "APP")
-                (:name "ORDERS" :type "TABLE" :schema "APP"
-                       :source-schema "APP"))))
-      (let ((matches (seq-filter
-                      (lambda (entry) (equal (plist-get entry :name) "ORDERS"))
-                      (clutch-db-list-table-entries conn t))))
-        (should (equal (mapcar (lambda (entry) (plist-get entry :schema))
-                               matches)
-                       '("APP" "HISTORY")))))))
+                       :source-schema "APP")))))
+    (let ((queries 0))
+      (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                 (lambda (_conn op _params &optional _timeout)
+                   (ert-fail (list "Unexpected metadata operation" op))))
+                ((symbol-function 'clutch-db-query)
+                 (lambda (_conn _sql)
+                   (cl-incf queries)
+                   (make-clutch-db-result
+                    :rows '(("ORDERS" "TABLE" "APP" "APP")
+                            ("ORDERS" "TABLE" "HISTORY" "HISTORY"))))))
+        (should (equal (clutch-db-list-table-entries conn t)
+                       '((:name "ORDERS" :type "TABLE" :schema "APP"
+                                :source-schema "APP")
+                         (:name "ORDERS" :type "TABLE" :schema "HISTORY"
+                                :source-schema "HISTORY"))))
+        (should (= queries 1))))))
 
 (ert-deftest clutch-db-test-jdbc-conn-catalog-clickhouse-defaults-to-database ()
   "ClickHouse JDBC metadata should use :database as the default catalog."

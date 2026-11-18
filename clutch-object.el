@@ -515,9 +515,11 @@ Use ENTRY-MAP and DUPLICATE-COUNTS to build labels and annotations."
          (list cand "" suffix)))
      cands)))
 
-(defun clutch--object-entry-reader (conn prompt entries &optional initial-input default-entry)
+(cl-defun clutch--object-entry-reader
+    (conn prompt entries &optional initial-input &key default-entry selection-only)
   "Read an entry from ENTRIES on CONN using PROMPT.
-Offer INITIAL-INPUT for editing and DEFAULT-ENTRY on empty input."
+Offer INITIAL-INPUT for editing and DEFAULT-ENTRY on empty input.
+SELECTION-ONLY suppresses object actions when selecting on another connection."
   (let* ((sorted
           (sort (copy-sequence entries)
                 (lambda (a b)
@@ -576,19 +578,20 @@ Offer INITIAL-INPUT for editing and DEFAULT-ENTRY on empty input."
                 (complete (str pred action)
                   (if (eq action 'metadata)
                       `(metadata
-                        (category . clutch-object)
+                        ,@(unless selection-only '((category . clutch-object)))
                         (annotation-function . ,#'annotation)
                         (group-function . ,#'group)
                         (affixation-function . ,#'affixate)
                         (display-sort-function . identity)
                         (cycle-sort-function . identity))
                     (complete-with-action action candidates str pred))))
-      (setq clutch--object-completion-entry-map entry-map)
-      (when key-value-p
-        (puthash :clutch-resolver
-                 (lambda (name)
-                   (clutch-db-find-table-entry conn name))
-                 entry-map))
+      (unless selection-only
+        (setq clutch--object-completion-entry-map entry-map)
+        (when key-value-p
+          (puthash :clutch-resolver
+                   (lambda (name)
+                     (clutch-db-find-table-entry conn name))
+                   entry-map)))
       (let ((choice
              (completing-read
               prompt
@@ -1447,7 +1450,7 @@ or starting another schema refresh."
              (cond (default (format " (default %s)" (clutch--object-fqname default)))
                    ((null matches) (format " (%s not found)" name))
                    (t "")))
-     entries nil default)))
+     entries nil :default-entry default :selection-only t)))
 
 (defun clutch--table-compare-definition (conn entry side label)
   "Read ENTRY's definition on CONN, identifying failures by SIDE and LABEL."

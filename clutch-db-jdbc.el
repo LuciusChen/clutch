@@ -2053,6 +2053,20 @@ current database."
                :source-schema database)))
      (clutch-db-result-rows (clutch-db-query conn sql)))))
 
+(defun clutch-jdbc--oracle-table-entries (conn)
+  "Return tables and views across Oracle schemas visible on CONN."
+  ;; Ordinary discovery collapses names across owners for completion.
+  (mapcar #'clutch-jdbc--table-entry-from-row
+          (clutch-db-result-rows
+           (clutch-db-query
+            conn
+            (format "SELECT object_name, object_type, owner, owner AS source_schema
+FROM all_objects
+WHERE object_type IN ('TABLE', 'VIEW') AND owner NOT IN (%s)
+ORDER BY object_name, owner"
+                    (mapconcat (lambda (schema) (clutch-db-escape-literal conn schema))
+                               clutch-jdbc--oracle-system-schemas ", "))))))
+
 (cl-defmethod clutch-db-list-table-entries ((conn clutch-jdbc-conn) &optional all-schemas)
   "Return JDBC table entries on CONN, across visible schemas if ALL-SCHEMAS."
   (cl-flet ((read-tables (scope)
@@ -2065,11 +2079,7 @@ current database."
      ((clutch-jdbc--clickhouse-conn-p conn)
       (clutch-jdbc--clickhouse-table-entries conn all-schemas))
      ((and all-schemas (clutch-jdbc--oracle-conn-p conn))
-      ;; Per-schema queries keep same-name objects that the default list
-      ;; collapses.  The login schema can still return other owners' tables.
-      (delete-dups
-       (cl-mapcan (lambda (schema) (read-tables `((schema . ,schema))))
-                  (clutch-db-list-schemas conn))))
+      (clutch-jdbc--oracle-table-entries conn))
      (t
       (let ((scope (clutch-jdbc--metadata-scope-params conn)))
         (read-tables (if all-schemas (assq-delete-all 'schema scope) scope)))))))
