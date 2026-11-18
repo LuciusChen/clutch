@@ -411,14 +411,14 @@ uncommitted work behind."
       (unwind-protect
           (progn
             (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
-            (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer)" schema))
+            (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer PRIMARY KEY, amount numeric(10,2), created timestamp(3))" schema))
             (let ((conn (clutch-open-connection target)))
               (unwind-protect
                   (progn
                     (clutch-db-query conn (format "CREATE SCHEMA %s" schema))
-                    (clutch-db-query conn (format "CREATE TABLE %s.orders (id integer)" schema))
+                    (clutch-db-query conn (format "CREATE TABLE %s.orders (id integer NOT NULL, amount numeric(10,2), created timestamp(3))" schema))
                     (clutch-db-query conn "CREATE SCHEMA staging")
-                    (clutch-db-query conn "CREATE TABLE staging.orders (id integer, note text)")
+                    (clutch-db-query conn "CREATE TABLE staging.orders (id integer NOT NULL, amount numeric(6,0), created timestamp(3))")
                     (clutch-db-query conn "CREATE TABLE public.orders (id integer, wrong bigint)"))
                 (clutch-close-connection conn)))
             (clutch-test--with-live-console params
@@ -457,9 +457,13 @@ uncommitted work behind."
                           (should (string-match-p (concat "Test · " (if different "staging" schema) "\\.orders")
                                                   (buffer-name right)))
                           (with-current-buffer right
-                            (should (eq (not (null (string-search "\"note\" text" (buffer-string))))
-                                        different))
-                            (should-not (string-search "wrong" (buffer-string))))
+                            (should (string-search (if different "numeric(6,0)" "numeric(10,2)")
+                                                   (buffer-string)))
+                            (should (string-search "timestamp(3) without time zone"
+                                                   (buffer-string)))
+                            (should-not (string-search "wrong" (buffer-string)))
+                            (should (string-search "Columns only" (format "%s" header-line-format)))
+                            (should (string-search "CHECK" (format "%s" header-line-format))))
                           (should (buffer-local-value 'buffer-read-only left))
                           (should (buffer-local-value 'buffer-read-only right)))
                       (when (buffer-live-p control)

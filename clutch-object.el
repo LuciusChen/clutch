@@ -1464,8 +1464,9 @@ or starting another schema refresh."
       (user-error "%s %s: definition unavailable for %s" side label name))
     ddl))
 
-(defun clutch--table-compare-ediff (left right product)
-  "Compare (LABEL . DDL) pairs LEFT and RIGHT using SQL PRODUCT."
+(defun clutch--table-compare-ediff (left right product columns-only)
+  "Compare (LABEL . DDL) pairs LEFT and RIGHT using SQL PRODUCT.
+When COLUMNS-ONLY is non-nil, label the comparison's limited scope."
   (let ((windows (current-window-configuration))
         (origin (point-marker))
         buffers started)
@@ -1484,7 +1485,10 @@ or starting another schema refresh."
                 (with-current-buffer buffer
                   (sql-mode)
                   (when product (sql-set-product product))
-                  (setq-local header-line-format (list " " (car side)))
+                  (setq-local header-line-format
+                              (list " " (car side)
+                                    (when columns-only
+                                      " · Columns only (PK, UNIQUE, FK, CHECK, EXCLUDE and indexes omitted)")))
                   (insert (cdr side))
                   (set-buffer-modified-p nil)
                   (setq buffer-read-only t))))
@@ -1544,7 +1548,8 @@ or starting another schema refresh."
           (when target (clutch-close-connection target)))
         (clutch--table-compare-ediff
          (cons (format "%s · %s" source-label (clutch--object-fqname entry)) left)
-         right (plist-get context :product))))))
+         right (plist-get context :product)
+         (equal dialect "postgresql"))))))
 
 ;;;###autoload
 (defun clutch-object-describe (&optional entry)
