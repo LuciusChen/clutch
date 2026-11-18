@@ -9,7 +9,7 @@
 
 <p align="center"><strong>Query and browse databases—and stage SQL row edits—without leaving Emacs.</strong></p>
 
-Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and other databases.
+Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, Cassandra, and other databases.
 
 ![Clutch query console with a result grid and XML value viewer](docs/screenshots/clutch-overview.png)
 
@@ -69,6 +69,7 @@ Row editing stays within the [row-editing boundaries](docs/user-guide.md#row-edi
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
 | MongoDB | Basic native document support; optional SQL Interface surface | Native use requires `mongodb.el`; SQL Interface uses `:surface sql-interface` and JDBC |
 | Redis | Basic key/value support | Requires `redis.el`; includes command buffers, bounded key browsing, and type-aware values |
+| Cassandra | Basic CQL support via JDBC | CQL console, bounded read-only results, and table and column browsing |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Backend-specific limits apply to editing, transactions, and dialect behavior |
 
 See [Backend support levels](docs/backend-support.org) for the precise support policy and non-relational boundaries.

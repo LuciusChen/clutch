@@ -633,7 +633,10 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
     (when col-names
       (with-current-buffer buf
         (clutch--refresh-display)))
-    (when-let* ((text (plist-get result-context :success-message)))
+    (when-let* ((text (or (plist-get result-context :success-message)
+                         (when (plist-get (clutch-db-connection-sql-dialect connection)
+                                          :cql)
+                           (car (clutch-db-result-messages result))))))
       (message "%s" text))
     buf))
 

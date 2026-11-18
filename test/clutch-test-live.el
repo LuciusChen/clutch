@@ -395,6 +395,97 @@ uncommitted work behind."
              (kill-buffer ,buffer)))
          (delete-directory clutch-console-directory t)))))
 
+(ert-deftest clutch-test-live-cassandra-console-preview ()
+  "Use a CQL row bound and discard its cursor after a grid preview."
+  :tags '(:clutch-live :cassandra-live)
+  (let ((url (getenv "CLUTCH_TEST_CASSANDRA_URL"))
+        (clutch-jdbc-fetch-size 3))
+    (unless url
+      (ert-skip "Set CLUTCH_TEST_CASSANDRA_URL to a disposable Cassandra keyspace"))
+    (clutch-test--with-live-console (list :backend 'cassandra :url url)
+      (let ((conn clutch-connection)
+            (table (format "clutch_preview_%d" (emacs-pid)))
+            (send (symbol-function 'clutch-jdbc--send))
+            requests notices)
+        (cl-letf (((symbol-function 'clutch-jdbc--send)
+                   (lambda (op params)
+                     (let ((id (funcall send op params)))
+                       (push (list op params id) requests)
+                       id)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (when fmt (push (apply #'format-message fmt args) notices)))))
+          (unwind-protect
+              (progn
+                (clutch-db-query conn (format "CREATE TABLE %s (tenant int, day int, ts int, payload blob, PRIMARY KEY ((tenant, day), ts)) WITH CLUSTERING ORDER BY (ts DESC)" table))
+                (should-error (clutch-toggle-auto-commit) :type 'user-error)
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (let ((batch (concat
+                                "BEGIN UNLOGGED BATCH "
+                                (mapconcat
+                                 (lambda (ts)
+                                   (format "INSERT INTO %s (tenant,day,ts,payload) VALUES (1,1,%d,0x7B7D)" table ts))
+                                 '(1 2 3) "; ")
+                                " APPLY BATCH")))
+                    (insert batch ";\nSELECT * FROM " table ";")
+                    (search-backward "INSERT")
+                    (clutch-execute-dwim (point) (point))
+                    (clutch-test--await-queries)
+                    (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests))) batch))))
+                (let ((query (format "SELECT ts, payload FROM %s WHERE tenant = 1 AND day = 1"
+                                     table))
+                      (notice "Showing the first 3 rows. More rows are available"))
+                  (dolist (extra '(nil t))
+                    (when extra
+                      (clutch-db-query conn (format "INSERT INTO %s (tenant,day,ts,payload) VALUES (1,1,0,0x7B7D)" table)))
+                    (setq requests nil notices nil)
+                    (erase-buffer)
+                    (insert query ";")
+                    (goto-char (point-min))
+                    (clutch-execute-dwim (point) (point))
+                    (clutch-test--await-queries)
+                    (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests)))
+                                   (concat query "\nLIMIT 4")))
+                    (should-not (assoc "fetch" requests))
+                    (with-current-buffer clutch--last-result-buffer
+                      (should (equal clutch--result-columns '("ts" "payload")))
+                      (should (equal clutch--result-rows '((3 "{}") (2 "{}") (1 "{}"))))
+                      (should-not clutch--result-server-pageable)
+                      (should-not (clutch-result--action-supported-p 'sql-mutation))
+                      (should-error (clutch-result-insert-row) :type 'user-error))
+                    (let ((close (assoc "close-cursor" requests)))
+                      (if extra
+                          (progn
+                            (should (member notice notices))
+                            (should close)
+                            (clutch-test--await
+                             (lambda () (not (gethash (nth 2 close) clutch-jdbc--async-callbacks))))
+                            (should (string-match-p
+                                     "Unknown cursor id"
+                                     (error-message-string
+                                      (should-error (clutch-jdbc--rpc conn "fetch" (nth 1 close))
+                                                    :type 'clutch-db-error)))))
+                        (should-not close)
+                        (should-not (member notice notices))))))
+                (should (equal (clutch-db-result-rows
+                                (clutch-db-query conn (format "SELECT count(*) FROM %s" table)))
+                               '((4))))
+                ;; The wrapper holds a snapshot from when the session opened.
+                (let ((fresh (clutch-open-connection (list :backend 'cassandra :url url))))
+                  (unwind-protect
+                      (let ((columns (clutch-db-column-details fresh table)))
+                        (should (equal (mapcar (lambda (c) (plist-get c :name))
+                                               (seq-filter (lambda (c) (plist-get c :primary-key))
+                                                           columns))
+                                       '("tenant" "day" "ts")))
+                        (should (plist-get (seq-find (lambda (c)
+                                                      (equal (plist-get c :name) "payload"))
+                                                    columns)
+                                           :nullable))
+                        (should-not (clutch-db-object-definition fresh (list :type "TABLE" :name table))))
+                    (clutch-db-disconnect fresh))))
+            (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))))))))
+
 (defun clutch-test--run-in-console (&rest statements)
   "Run each of STATEMENTS in the current console as typed, in turn."
   (dolist (sql statements)

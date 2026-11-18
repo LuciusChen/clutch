@@ -1122,12 +1122,18 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
 
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
-  (unless (clutch--confirm-high-risk-query sql)
-    (when (clutch-db-sql-destructive-p sql)
-      (unless (yes-or-no-p
-               (format "Execute destructive query?\n  %s\n\nProceed? "
-                       (truncate-string-to-width (string-trim sql) 80)))
-        (user-error "Query cancelled")))))
+  (let* ((dialect (clutch--buffer-sql-dialect))
+         (sql (if (plist-get dialect :cql)
+                  (clutch-db-sql-strip-leading-comments sql dialect)
+                sql)))
+    (unless (clutch--confirm-high-risk-query sql)
+      (when (or (clutch-db-sql-destructive-p sql)
+                (and (plist-get dialect :cql)
+                     (equal "BEGIN" (clutch-db-sql-leading-keyword sql))))
+        (unless (yes-or-no-p
+                 (format "Execute destructive query?\n  %s\n\nProceed? "
+                         (truncate-string-to-width (string-trim sql) 80)))
+          (user-error "Query cancelled"))))))
 
 (defun clutch--note-schema-affecting-query (sql connection)
   "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
@@ -1623,9 +1629,11 @@ Semicolons inside strings, line comments, and block comments are skipped."
   "Return point-local SQL bounds for DWIM execute and preview workflows.
 Prefer semicolon-delimited statement bounds when the current buffer
 contains any top-level semicolon, but drop detached leading paragraphs made
-only of line comments.  Otherwise fall back to query-at-point bounds, which
-also split on blank lines."
-  (if (clutch--statement-delimited-buffer-p)
+only of line comments.  CQL always uses statement bounds to keep batches
+intact.  Otherwise fall back to query-at-point bounds, which also split on
+blank lines."
+  (if (or (plist-get (clutch--buffer-sql-dialect) :cql)
+          (clutch--statement-delimited-buffer-p))
       (let* ((statement-bounds (clutch--statement-bounds-at-point))
              (query-bounds (clutch--query-bounds-at-point))
              (statement-beg (car statement-bounds))
@@ -1653,6 +1661,7 @@ the last semicolon, is no statement and is dropped unless it contains /*! or
 /*M!, which open a comment whose body MySQL and MariaDB run."
   (let ((stmts nil)
         (start 0)
+        (dialect (clutch--buffer-sql-dialect))
         (len (length sql)))
     (cl-labels
         ((blank-char-p (ch)
@@ -1670,13 +1679,12 @@ the last semicolon, is no statement and is dropped unless it contains /*! or
                (when (or (string-match-p "/\\*M?!" fragment)
                          (not (string-empty-p
                                (clutch-db-sql-strip-leading-comments
-                                fragment))))
+                                fragment dialect))))
                  (push (list fragment
                              (and base-position (+ base-position tbeg))
                              (and base-position (+ base-position tend)))
                        stmts))))))
-      (dolist (break (clutch-db-sql-statement-breaks
-                      sql (clutch--buffer-sql-dialect)))
+      (dolist (break (clutch-db-sql-statement-breaks sql dialect))
         (emit break)
         (setq start (clutch-db-sql-statement-start sql (1+ break))))
       (emit len))
