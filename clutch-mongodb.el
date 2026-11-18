@@ -1611,7 +1611,7 @@ Deliver CALLBACK with names and ERRBACK with errors."
      (clutch-mongodb-conn-client conn)
      (clutch-mongodb-conn-database conn))))
 
-(cl-defmethod clutch-db-list-table-entries ((conn clutch-mongodb-conn))
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-mongodb-conn) &optional _all-schemas)
   "Return collection entries for MongoDB CONN."
   (mapcar (lambda (name)
             (list :name name

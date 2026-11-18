@@ -864,20 +864,20 @@ missed a USE or a DROP that changed the database."
   "Store MySQL CONN's current database in a copy of connection PARAMS."
   (plist-put (copy-sequence params) :database (clutch-db-database conn)))
 
-(cl-defmethod clutch-db-list-table-entries ((conn mysql-conn))
-  "Return table/view entry plists for the current MySQL database on CONN."
+(cl-defmethod clutch-db-list-table-entries ((conn mysql-conn) &optional all-schemas)
+  "Return table and view entries on CONN, across databases if ALL-SCHEMAS."
   (clutch-db--translate-library-error mysql-error
-    (let* ((result (clutch-db-mysql--metadata-query
-                    conn
-                    "SELECT TABLE_NAME, TABLE_TYPE, NULLIF(TABLE_COMMENT, '')
-FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_SCHEMA = DATABASE()
-  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-ORDER BY TABLE_NAME"))
-           (schema (clutch-db-database conn)))
+    (let ((result (clutch-db-mysql--metadata-query
+                   conn
+                   (concat "SELECT TABLE_NAME, TABLE_TYPE, NULLIF(TABLE_COMMENT, ''), TABLE_SCHEMA
+FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND "
+                           (if all-schemas
+                               "TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')"
+                             "TABLE_SCHEMA = DATABASE()")
+                           " ORDER BY TABLE_NAME, TABLE_SCHEMA"))))
       (mapcar
        (lambda (row)
-         (pcase-let ((`(,name ,table-type ,comment) row))
+         (pcase-let ((`(,name ,table-type ,comment ,schema) row))
            (list :name name
                  :type (if (string= table-type "VIEW") "VIEW" "TABLE")
                  :schema schema
@@ -973,7 +973,12 @@ ORDER BY ORDINAL_POSITION"
          (let* ((result (clutch-db-mysql--metadata-query
                          conn
                          (format "SHOW CREATE TABLE %s"
-                                 (mysql-escape-identifier name))))
+                                 (mapconcat
+                                  #'mysql-escape-identifier
+                                  (delq nil (list (or (plist-get entry :schema)
+                                                      (plist-get entry :source-schema))
+                                                  name))
+                                  "."))))
                 (rows (mysql-result-rows result)))
            (unless rows
              (signal 'clutch-db-error

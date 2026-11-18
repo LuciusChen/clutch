@@ -395,6 +395,85 @@ uncommitted work behind."
              (kill-buffer ,buffer)))
          (delete-directory clutch-console-directory t)))))
 
+(ert-deftest clutch-test-live-compare-table-definitions ()
+  "Compare one table across databases and restore the invoking console."
+  :tags '(:clutch-live :table-compare-live)
+  (skip-unless (eq (clutch-test-live-backend-id) 'pg))
+  (require 'ediff)
+  (clutch-test--with-conn admin
+    (let* ((schema (format "ddl_compare_%d" (emacs-pid)))
+           (params (append '(:backend pg) (clutch-test--live-connect-params)))
+           (target (plist-put (copy-sequence params) :database schema))
+           (clutch-connection-alist (list (cons "Test" target)))
+           (ediff-window-setup-function #'ediff-setup-windows-plain)
+           (entry (list :type "TABLE" :name "orders" :schema schema)))
+      (clutch-db-query admin (format "CREATE DATABASE %s" schema))
+      (unwind-protect
+          (progn
+            (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
+            (clutch-db-query admin (format "CREATE TABLE %s.orders (id integer)" schema))
+            (let ((conn (clutch-open-connection target)))
+              (unwind-protect
+                  (progn
+                    (clutch-db-query conn (format "CREATE SCHEMA %s" schema))
+                    (clutch-db-query conn (format "CREATE TABLE %s.orders (id integer)" schema))
+                    (clutch-db-query conn "CREATE SCHEMA staging")
+                    (clutch-db-query conn "CREATE TABLE staging.orders (id integer, note text)")
+                    (clutch-db-query conn "CREATE TABLE public.orders (id integer, wrong bigint)"))
+                (clutch-close-connection conn)))
+            (clutch-test--with-live-console params
+              (insert "SELECT 1")
+              (goto-char 4)
+              (let ((console (current-buffer))
+                    (source clutch-connection)
+                    (clutch--object-completion-entry-map (make-hash-table))
+                    (clutch--console-name "Development"))
+                (dolist (different '(nil t))
+                  (let ((source-entries clutch--object-completion-entry-map)
+                        control left right)
+                    (let ((ediff-startup-hook (list (lambda () (setq control (current-buffer))))))
+                      (cl-letf (((symbol-function 'completing-read)
+                                 (lambda (prompt table &rest args)
+                                   (if (string-prefix-p "Compare with connection" prompt)
+                                       "Test"
+                                     (let ((choices (all-completions "" table))
+                                           (default (nth 4 args))
+                                           (metadata (completion-metadata "" table nil)))
+                                       (should-not (completion-metadata-get metadata 'category))
+                                       (should (eq clutch--object-completion-entry-map
+                                                   source-entries))
+                                       (should (string-match-p schema default))
+                                       (should (= (length choices) 3))
+                                       (if different
+                                           (seq-find (lambda (c) (string-match-p "staging" c)) choices)
+                                         default))))))
+                        (clutch-compare-table-definition entry)))
+                    (unwind-protect
+                        (with-current-buffer control
+                          (setq left ediff-buffer-A right ediff-buffer-B)
+                          (should (= ediff-number-of-differences (if different 1 0)))
+                          (should (string-match-p (concat "Development · " schema "\\.orders")
+                                                  (buffer-name left)))
+                          (should (string-match-p (concat "Test · " (if different "staging" schema) "\\.orders")
+                                                  (buffer-name right)))
+                          (with-current-buffer right
+                            (should (eq (not (null (string-search "\"note\" text" (buffer-string))))
+                                        different))
+                            (should-not (string-search "wrong" (buffer-string))))
+                          (should (buffer-local-value 'buffer-read-only left))
+                          (should (buffer-local-value 'buffer-read-only right)))
+                      (when (buffer-live-p control)
+                        (with-current-buffer control
+                          (cl-letf (((symbol-function 'y-or-n-p) #'always))
+                            (ediff-quit nil)))))
+                    (clutch-test--await (lambda () (and (not (buffer-live-p left))
+                                                        (not (buffer-live-p right)))))
+                    (should (eq (window-buffer (selected-window)) console))
+                    (should (= (window-point (selected-window)) 4))
+                    (should (eq clutch-connection source)))))))
+        (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))
+        (clutch-db-query admin (format "DROP DATABASE %s" schema))))))
+
 (ert-deftest clutch-test-live-cassandra-console-preview ()
   "Use a CQL row bound and discard its cursor after a grid preview."
   :tags '(:clutch-live :cassandra-live)

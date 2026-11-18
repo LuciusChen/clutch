@@ -369,7 +369,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                (let ((coding-system-for-read 'no-conversion))
                                  (insert-file-contents path))
                                (buffer-string))
-                             (encode-coding-string (clutch--export-csv-content rows)
+                             (encode-coding-string (clutch--export-csv-content rows '("id" "name"))
                                                    coding))))
             (let ((before (with-temp-buffer
                             (insert-file-contents-literally path)
@@ -445,7 +445,6 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                   ('quit (signal 'quit nil)))))))
     (unwind-protect
         (with-temp-buffer
-          (setq-local clutch--result-columns '("value"))
           (dolist (result '(success file-error quit))
             (setq outcome result calls 0)
             (write-region "old\n" nil path nil 'silent)
@@ -462,7 +461,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                                 (progn
                                   (clutch-result--write-export-file
                                    'csv (cdr (assq 'csv clutch--result-export-kinds))
-                                   path #'ignore :coding 'utf-8-with-signature)
+                                   path #'ignore :coding 'utf-8-with-signature
+                                   :columns '("value"))
                                   'success)
                               (file-error (car err))
                               (quit 'quit))
@@ -475,7 +475,7 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                            (if (eq result 'success)
                                (concat "encoded:"
                                        (encode-coding-string
-                                        (clutch--export-csv-content rows)
+                                        (clutch--export-csv-content rows '("value"))
                                         'utf-8-with-signature))
                              "old\n")))
             (should (= (file-modes path) #o640))
@@ -550,12 +550,13 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
 
 (ert-deftest clutch-test-export-rejects-metadata-only-binary-values ()
   "Binary length metadata is not complete data; decoded text remains usable."
-  (let ((metadata (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3))))))
-    (clutch-test--with-result-state (:columns '("body") :column-defs '((:name "body")))
-      (should-error (clutch--export-csv-content (list (list metadata))) :type 'user-error)
-      (let ((value (car (clutch-jdbc--normalize-row
-                         '((:__type "blob" :length 4 :text "<r/>" :encoding "utf-8"))))))
-        (should (equal (clutch--export-csv-content (list (list value))) "body\n<r/>\n"))))))
+  (let ((metadata (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3)))))
+        (value (car (clutch-jdbc--normalize-row
+                     '((:__type "blob" :length 4 :text "<r/>" :encoding "utf-8"))))))
+    (should-error (clutch--export-csv-content (list (list metadata)) '("body"))
+                  :type 'user-error)
+    (should (equal (clutch--export-csv-content (list (list value)) '("body"))
+                   "body\n<r/>\n"))))
 
 (ert-deftest clutch-test-query-export-content-and-bounds ()
   "Direct export writes CSV/TSV without a grid, respecting SQL bounds."
@@ -569,8 +570,8 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
           (clutch-db-query conn "INSERT INTO items VALUES (1, '中文,a'), (2, 'a\"b'), (3, NULL), (4, ''), (5, 'last')")
           (dolist (case '(("SELECT id, body FROM items ORDER BY id" "csv" "utf-8-bom"
                            "id,body\n1,\"中文,a\"\n2,\"a\"\"b\"\n3,\n4,\"\"\n5,last\n" 3)
-                          ("SELECT id, body FROM items ORDER BY id LIMIT 1 OFFSET 1" "tsv" "utf-8"
-                           "id\tbody\n2\t\"a\"\"b\"\n" 1)
+                          ("SELECT body AS payload, id AS item_id FROM items ORDER BY id LIMIT 1 OFFSET 1" "tsv" "utf-8"
+                           "payload\titem_id\n\"a\"\"b\"\t2\n" 1)
                           ("WITH c AS (SELECT * FROM items) SELECT id, body FROM c WHERE 0" "csv" "utf-8"
                            "id,body\n" 1)))
             (pcase-let ((`(,sql ,format ,encoding ,expected ,query-count) case))
@@ -902,7 +903,7 @@ same bounded batches."
                       (let* ((spec (cdr (assq kind clutch--result-export-kinds)))
                              (content (plist-get spec :content))
                              (expected (if (memq kind '(csv tsv))
-                                           (funcall content rows omit-header)
+                                           (funcall content rows '("id" "body") omit-header)
                                          (funcall content rows)))
                              (calls 0)
                              (query (symbol-function 'clutch-db-query))
@@ -1228,7 +1229,7 @@ loop turns into a stack as deep as the pages are many."
                 (clutch-result--write-export-file
                  'csv (cdr (assq 'csv clutch--result-export-kinds)) path
                  (lambda (row-count) (setq exported row-count))
-                 :coding 'utf-8))))
+                 :coding 'utf-8 :columns '("i")))))
           (should (eql exported 800)))
       (delete-file path)
       (clutch-db-disconnect conn))))
