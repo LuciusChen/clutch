@@ -439,6 +439,14 @@ Each table record is (ENTRY . RELATIONS).  No columns are retained here.")
 (defvar-local clutch-er--overview-expanded nil
   "Tables expanded in the overview, with its fixed root first.")
 
+(defvar-local clutch-er--overview-first nil
+  "First neighbour to draw at the root after opening a folded branch.")
+
+(defun clutch-er--recenter-overview (entry &optional first)
+  "Start the overview at ENTRY, starting its neighbours at FIRST."
+  (setq clutch-er--overview-expanded (list entry)
+        clutch-er--overview-first first))
+
 (defun clutch-er--overview-entry (entry &optional model)
   "Qualify table ENTRY using its MODEL, retaining its table identity."
   (list :name (plist-get entry :name) :type "TABLE"
@@ -458,7 +466,8 @@ An unqualified manual endpoint uses the connection's current namespace."
   "Update the current table's overview from the successfully loaded model."
   (unless (eq (car clutch-er--overview) clutch-connection)
     (setq clutch-er--overview (list clutch-connection)
-          clutch-er--overview-expanded nil))
+          clutch-er--overview-expanded nil
+          clutch-er--overview-first nil))
   (let* ((entry (clutch-er--overview-entry clutch-er--entry clutch-er--model))
          (relations
           (mapcar (lambda (relation)
@@ -475,10 +484,10 @@ An unqualified manual endpoint uses the connection's current namespace."
         (setcdr record relations)
       (push (cons entry relations) (cdr clutch-er--overview)))))
 
-(defun clutch-er--overview-neighbors (entry)
-  "Return known neighbours of ENTRY, merging links between the same tables."
+(defun clutch-er--overview-neighbors (relations)
+  "Return the neighbours in RELATIONS, merging links to the same table."
   (let ((by-table (make-hash-table :test 'equal)) neighbors)
-    (dolist (relation (cdr (assoc entry (cdr clutch-er--overview))))
+    (dolist (relation relations)
       (let* ((target (clutch-er--overview-entry
                       (list :name (plist-get relation :table)
                             :schema (plist-get relation :schema)
@@ -503,17 +512,19 @@ CURRENT defaults to the current table.  Repeated nodes are terminal references,
 so cycles and cross-links need no crossing lines.  Display at most twelve nodes."
   (unless (eq (car clutch-er--overview) clutch-connection)
     (setq clutch-er--overview (list clutch-connection)
-          clutch-er--overview-expanded nil))
+          clutch-er--overview-expanded nil
+          clutch-er--overview-first nil))
   (let* ((current (or current (clutch-er--overview-entry clutch-er--entry clutch-er--model)))
          (root (or (car clutch-er--overview-expanded) current))
          (unicode (eq (clutch-er--charset) 'unicode))
          (start (point))
          (remaining 12)
+         (branch-width 16)
          (window (and (display-graphic-p) (get-buffer-window (current-buffer))))
          (width (max 30 (- (if window
                                (/ (window-body-width window t) (window-font-width window))
                              (window-body-width)) 4)))
-         seen omitted)
+         seen)
     (cl-labels
      ((link (text relation arrow-offset)
         (let* ((manual (plist-get relation :stored))
@@ -540,12 +551,25 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                                                                 (car position)))))))
           (unless (eq position junction)
             (insert (propertize (if unicode "│" "|") 'face 'shadow)))))
-      (draw (entry parent lanes)
+      (draw (entry parent lanes reserved)
         (cl-decf remaining)
         (let* ((repeated (member entry seen))
                (record (assoc entry (cdr clutch-er--overview)))
                (selected (equal entry current))
                (expanded (member entry clutch-er--overview-expanded))
+               (slots (- remaining reserved))
+               (children (when (and expanded (not repeated))
+                           (cl-remove parent (clutch-er--overview-neighbors (cdr record))
+                                      :key #'car :test #'equal)))
+               (offset (and (not parent) clutch-er--overview-first
+                            (cl-position clutch-er--overview-first children
+                                         :key #'car :test #'equal)))
+               (children (if (and offset (> offset 0))
+                             (append (nthcdr offset children) (seq-take children offset))
+                           children))
+               (folded (nthcdr slots children))
+               (badge (and folded (format " [+%d]" (length folded))))
+               (node-start (point))
                (label (clutch-er--name (plist-get entry :name)
                                        (plist-get entry :schema)
                                        (plist-get root :schema)
@@ -553,7 +577,8 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
           (insert-text-button
            (truncate-string-to-width
             label
-            (max 10 (min 28 (- width (current-column) 8)))
+            (max 1 (min 28 (- width (current-column)
+                              (if parent 8 (+ 1 branch-width (length badge))))))
             nil nil (if unicode "…" "..."))
            'clutch-er-entry entry 'follow-link t
            'keymap clutch-er--overview-map
@@ -562,36 +587,51 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
            'action (lambda (button)
                      (goto-char (button-start button))
                      (clutch-er-follow)))
-          (insert (propertize (cond (repeated " (shown)") ((not (and record expanded)) " +") (t ""))
-                              'face 'shadow))
-          (let* ((junction
-                  (cons (+ (current-column) 2)
-                        (when window
-                          (+ (car (window-text-pixel-size
-                                   window (line-beginning-position) (point) most-positive-fixnum))
-                             (* 2 (window-font-width window))))))
-                 (children (when (and expanded (not repeated))
-                             (cl-remove parent (clutch-er--overview-neighbors entry)
-                                        :key #'car :test #'equal))))
-            (push entry seen)
-            (if (and children (> remaining 0) (< (+ (car junction) 14) width))
-                (let* ((child (pop children))
-                       (branch (if children (if unicode " ─┬─" " -+-")
-                                 (if unicode " ───" " ---"))))
-                  (link branch (cdr child) 4)
-                  (draw (car child) entry (if children (cons junction lanes) lanes))
-                  (while (and children (> remaining 0))
-                    (setq child (pop children))
-                    (padding junction lanes)
-                    (link (if unicode (if children "├─" "└─") (if children "+-" "`-"))
-                          (cdr child) 2)
-                    (draw (car child) entry (if children (cons junction lanes) lanes))))
-              (insert "\n"))
-            (when children (setq omitted t))))))
+          (when (>= (+ (current-column) branch-width (length badge)) width)
+            (setq slots 0 folded children
+                  badge (and folded (format " [+%d]" (length folded)))))
+          (cond
+           (repeated (insert (propertize " (shown)" 'face 'shadow)))
+           ((or folded (not (and record expanded)))
+            (insert " ")
+            (insert-text-button (if folded (substring badge 1) "+")
+                                'clutch-er-entry entry 'skip t 'follow-link t
+                                'face 'shadow 'help-echo "Expand related tables"
+                                'action (lambda (button)
+                                          (goto-char (button-start button))
+                                          (clutch-er-expand)))
+            (cond
+             (folded
+              (put-text-property node-start (point) 'clutch-er-folded (caar folded))
+              (setq children (seq-take children slots)))
+             ((zerop slots)
+              (put-text-property node-start (point) 'clutch-er-expand-blocked t)))))
+          (push entry seen)
+          (if children
+              ;; Each drawn sibling needs one node before we can spend
+              ;; any more of the budget on this subtree.
+              (cl-loop with junction = (cons (+ (current-column) 2)
+                                             (when window
+                                               (+ (car (window-text-pixel-size
+                                                        window (line-beginning-position)
+                                                        (point) most-positive-fixnum))
+                                                  (* 2 (window-font-width window)))))
+                       for (target . relation) in children
+                       for siblings downfrom (1- (length children))
+                       for more = (> siblings 0)
+                       for first = t then nil
+                       for branch = (if first
+                                        (if unicode (if more " ─┬─" " ───")
+                                          (if more " -+-" " ---"))
+                                      (if unicode (if more "├─" "└─")
+                                        (if more "+-" "`-")))
+                       do (unless first (padding junction lanes))
+                       do (link branch relation (if first 4 2))
+                       do (draw target entry (if more (cons junction lanes) lanes)
+                                (+ reserved siblings)))
+            (insert "\n")))))
      (insert " ")
-     (draw root nil nil))
-    (when omitted
-      (insert (propertize "   ... more relations in the table details\n" 'face 'shadow)))
+     (draw root nil nil 0))
     (add-text-properties start (point)
                          (list 'clutch-er-overview t 'keymap clutch-er--overview-map))
     (insert "\n")))
@@ -630,22 +670,29 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
     (goto-char destination)))
 
 (defun clutch-er-expand ()
-  "Expand the overview table at point using the existing metadata loader.
-A visited table expands from its known relations.  An unvisited table is
-opened asynchronously, and expands when its metadata arrives."
+  "Expand the overview table at point using its known relations.
+Load an unvisited table through the existing reader.  If the branch
+cannot fit here, center the overview on that table and show its fields.
+A folded branch starts with its hidden neighbours using only known relations."
   (interactive)
   (clutch--refuse-while-running clutch-connection)
-  (let ((entry (or (get-text-property (point) 'clutch-er-entry)
-                   (clutch-er--overview-entry clutch-er--entry clutch-er--model))))
-    (unless (member entry clutch-er--overview-expanded)
+  (let* ((current (clutch-er--overview-entry clutch-er--entry clutch-er--model))
+         (entry (or (get-text-property (point) 'clutch-er-entry) current))
+         (folded (get-text-property (point) 'clutch-er-folded))
+         (recenter (get-text-property (point) 'clutch-er-expand-blocked)))
+    (cond
+     (folded (clutch-er--recenter-overview entry folded))
+     (recenter (clutch-er--recenter-overview entry))
+     ((not (member entry clutch-er--overview-expanded))
       (setq clutch-er--overview-expanded
-            (append clutch-er--overview-expanded (list entry))))
-    (if (assoc entry (cdr clutch-er--overview))
-        (progn
-          (clutch-er--render)
-          (when-let* ((position (clutch-er--overview-position entry)))
-            (goto-char position)))
-      (clutch-er-follow))))
+            (append clutch-er--overview-expanded (list entry)))))
+    (if (and (not folded)
+             (or (and recenter (not (equal entry current)))
+                 (not (assoc entry (cdr clutch-er--overview)))))
+        (clutch-er--show entry)
+      (clutch-er--render)
+      (when-let* ((position (clutch-er--overview-position entry)))
+        (goto-char position)))))
 
 ;;;; Drawing
 
@@ -775,6 +822,7 @@ qualified; box characters are used when UNICODE, else ASCII."
          (position (lambda (name) (cl-position name names :test #'equal)))
          ;; A relation ends at its last shown column.  One over several
          ;; adjacent columns that end no other relation brackets them.
+         ;; Only one bracket can end on the column's own row.
          (anchor (lambda (relation)
                    (car (sort (mapcar (lambda (pair) (funcall position (car pair)))
                                       (plist-get relation :pairs))
@@ -782,24 +830,28 @@ qualified; box characters are used when UNICODE, else ASCII."
          (anchors (mapcar (lambda (relation) (cons relation (funcall anchor relation)))
                           relations))
          (brackets
-          (cl-loop for (relation . end) in anchors
+          (cl-loop with used-ends = nil
+                   for (relation . end) in anchors
                    for rows = (sort (mapcar (lambda (pair)
                                               (funcall position (car pair)))
                                             (plist-get relation :pairs))
                                     #'<)
                    when (and (cdr rows)
+                             (not (memq end used-ends))
                              (= (- end (car rows)) (1- (length rows)))
                              (cl-notany (lambda (other)
-                                          (and (memq (cdr other) (butlast rows))
-                                               (not (eq (car other) relation))))
+                                          (and (memq (cdr other) rows)
+                                               (< (cdr other) end)))
                                         anchors))
-                   collect (cons relation rows))))
+                   collect (cons relation rows)
+                   and do (push end used-ends))))
     (cl-loop
      for column in columns
      for index from 0
      for name = (plist-get column :name)
      for ending = (cl-loop for (relation . end) in anchors
                            when (eql end index) collect relation)
+     for bracket = (cl-find-if (lambda (relation) (assq relation brackets)) ending)
      for crossing = (cl-loop for (relation . rows) in brackets
                              when (and (memq index rows) (/= index (car (last rows))))
                              return (cons relation (if (= index (car rows))
@@ -807,6 +859,10 @@ qualified; box characters are used when UNICODE, else ASCII."
      for column-cell = (concat " " (clutch-er--marker column relations unicode)
                                " " name)
      for type-cell = (propertize (or (plist-get column :type) "") 'face 'shadow)
+     ;; Put the bracket cap on the column's row, before other links.
+     when (and bracket (not (eq bracket (car ending))))
+     do (setq ending (cons bracket (delq bracket ending)))
+     end
      nconc
      (if crossing
          (list (list (list 'clutch-er-column name
@@ -1053,7 +1109,7 @@ MODEL, when provided, is ready to render."
       ;; Recenter only when a width/node limit puts the destination outside
       ;; the visible overview.  Ordinary node navigation keeps its layout.
       (unless (clutch-er--overview-position (clutch-er--overview-entry entry model))
-        (setq clutch-er--overview-expanded (list (clutch-er--overview-entry entry model)))
+        (clutch-er--recenter-overview (clutch-er--overview-entry entry model))
         (clutch-er--render))
       (goto-char (point-min))
       (clutch-er-overview)
@@ -1118,8 +1174,8 @@ With prefix RECENTER, start the overview at the current table."
   (interactive "P")
   (clutch--refuse-while-running clutch-connection)
   (when recenter
-    (setq clutch-er--overview-expanded
-          (list (clutch-er--overview-entry clutch-er--entry clutch-er--model))))
+    (clutch-er--recenter-overview
+     (clutch-er--overview-entry clutch-er--entry clutch-er--model)))
   (clutch--clear-table-metadata-caches clutch-connection
                                        (plist-get clutch-er--entry :name))
   (clutch-er--show clutch-er--entry))
@@ -1132,7 +1188,9 @@ With prefix RECENTER, start the overview at the current table."
                                              clutch-er--entry clutch-er--model))))
                        (button-at position))
                      (user-error "No overview table to move from")))
-         (position (button-start button))
+         (position (button-start (if (button-get button 'skip)
+                                     (previous-button (button-start button))
+                                   button)))
          (horizontal (memq direction '(left right)))
          (sign (if (memq direction '(left up)) -1 1))
          (origin (save-excursion
@@ -1148,7 +1206,8 @@ With prefix RECENTER, start the overview at the current table."
                  (forward (* sign (if horizontal dx dy)))
                  (row-distance (if horizontal (abs dy) forward))
                  (offset (if horizontal forward (abs dx))))
-            (when (and (> forward 0)
+            (when (and (not (button-get candidate 'skip))
+                       (> forward 0)
                        (or (not destination)
                            (< row-distance best-row-distance)
                            (and (= row-distance best-row-distance) (< offset best-offset))))

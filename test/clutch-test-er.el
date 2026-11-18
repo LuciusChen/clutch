@@ -165,7 +165,25 @@ columns are asked for."
 "))
     (clutch-er-toggle-columns)
     (should (string-match-p "^   note +text$" (clutch-test-er--text)))
-    (should-not (string-match-p "more column" (clutch-test-er--text)))))
+    (should-not (string-match-p "more column" (clutch-test-er--text))))
+  (let* ((conn (clutch-test-er--conn))
+         (orders (assoc "orders" (clutch-test-conn-tables conn)))
+         (keys (plist-get (cdr orders) :foreign-keys)))
+    (setcdr orders (plist-put (cdr orders) :foreign-keys
+                              (append '(("country" :ref-table "countries" :ref-column "code"
+                                         :constraint "fk_country"))
+                                      keys
+                                      '(("region" :ref-table "markets" :ref-column "r"
+                                         :constraint "fk_market")
+                                        ("country" :ref-table "markets" :ref-column "c"
+                                         :constraint "fk_market")))))
+    (clutch-test-er--with-view conn
+      (should (string-match-p
+               (concat "^ ● region +text +─┐\n"
+                       " ● country +text +─┴→  regions (code, country)\n"
+                       " +→  countries\\.code\n"
+                       " +→  markets (r, c)  from (region, country)$")
+               (clutch-test-er--text))))))
 
 (ert-deftest clutch-test-er-highlight-follows-point-without-redrawing ()
   "Moving to a relation highlights it and its columns; moving to a column
@@ -209,7 +227,8 @@ highlights its relations.  Neither changes the text."
     (let ((tick (buffer-chars-modified-tick)))
       (clutch-er-right)
       (should (looking-at "customers"))
-      (clutch-er-down)
+      (should-error (clutch-er-right) :type 'user-error)
+      (clutch-er-next 1)
       (should (looking-at "regions"))
       (clutch-er-up)
       (should (looking-at "customers"))
@@ -613,9 +632,47 @@ draws with ASCII."
     (should (string-match-p (regexp-quote "b.people +") (buffer-string)))
     (should (string-match-p (regexp-quote "public.people +") (buffer-string)))
     (should (string-match-p "people (shown)" (buffer-string)))
-    (should (string-match-p "more relations" (buffer-string)))
+    (should (string-match-p (regexp-quote "people [+992]") (buffer-string)))
     (should (equal (mapcar (lambda (node) (plist-get (car node) :name))
                           (cdr clutch-er--overview)) '("people")))
+    (let ((initial-root (car clutch-er--overview-expanded))
+          (neighbor (clutch-er--overview-entry '(:name "people" :schema "b"))))
+      (push (cons neighbor
+                  (cl-loop for i below 20 collect
+                           (list :table (format "t%d" i) :schema "b" :direction 'in)))
+            (cdr clutch-er--overview))
+      (clutch-test-er--goto-table "people" "b")
+      (goto-char (1+ (button-end (button-at (point)))))
+      (should (eq (char-after) ?+))
+      (let ((clutch-er--entry neighbor))
+        (should (push-button (point) t)))
+      (should (string-prefix-p "\n people [+9] ─┬─← t0 +" (clutch-test-er--text)))
+      (should (equal (button-get (button-at (point)) 'clutch-er-entry)
+                     neighbor))
+      (setq clutch-er--overview-expanded (list initial-root)))
+    (setf (plist-get clutch-er--model :relations)
+          '((:table "people" :schema "b" :direction out)
+            (:table "orders" :schema "a" :direction in)))
+    (clutch-er--remember-overview)
+    (push (clutch-er--overview-entry '(:name "people" :schema "b"))
+          (cdr clutch-er--overview-expanded))
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (clutch-er--insert-overview))
+    (should (string-match-p (regexp-quote "orders +") (buffer-string)))
+    (should-not (string-match-p "t9" (buffer-string)))
+    (clutch-test-er--goto-table "people" "b")
+    (should (looking-at (regexp-quote "b.people [+11]")))
+    (forward-char (length "b.people ["))
+    (should (push-button (point) t))
+    (should (looking-at (regexp-quote "people [+9]")))
+    (clutch-test-er--goto-table "t9" "b")
+    (should (looking-at "t9"))
+    (clutch-test-er--goto-table "people" "b")
+    (forward-char (length "people ["))
+    (call-interactively (key-binding (kbd "+")))
+    (clutch-test-er--goto-table "t0" "b")
+    (should (equal (plist-get clutch-er--entry :schema) "a"))
     (setq clutch-connection 'replacement)
     (clutch-er--remember-overview)
     (should (eq (car clutch-er--overview) 'replacement))

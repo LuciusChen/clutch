@@ -31,3 +31,5 @@ After the spatial/field-navigation adjustment, all non-live gates passed again o
 Single-column and composite-key arrows occupy the same link-cell column. The single-column link shifts its left padding by one character while retaining the cell width, leaving table labels and the composite bracket geometry unchanged. The existing presentation snapshot fails with the previous padding and passes with the aligned padding.
 
 The header keeps Open, the destination of `o`, Columns and Add link. The two context strings are formatted once when the mode starts; redisplay selects one with a text-property lookup and adds the existing disconnected badge. Remaining commands stay available through mode help.
+
+A later revision reserves room for siblings before following a deep branch, so every drawn lane reaches a node. A folded-neighbour marker carries the first hidden destination, which is enough to start the next group without retaining pages or fetching metadata. Explicitly opening that marker moves the overview's root and leaves the field card as it was. The marker is a button for mouse interaction, and directional and sequential navigation continue to stop at tables.
