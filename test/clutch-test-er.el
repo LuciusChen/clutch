@@ -149,22 +149,22 @@ columns are asked for."
   (clutch-test-er--with-view (clutch-test-er--conn)
     (should (equal (clutch-test-er--text)
                    "
- orders ─┬─→ customers +
-         ├─→ regions +
-         ├─← items +
-         └─← refunds +
+orders ─┬─→ customers +
+        ├─→ regions +
+        ├─← items +
+        └─← refunds +
 
- orders                                    5 columns
- ───────────────────────────────────────────────────
- ◆ id            int      ←  items.order_id
-                          ←  refunds.order_id
- ● customer_id   int      →  customers.id
- ● region        text   ─┐
- ● country       text   ─┴→  regions (code, country)
-   … 1 more column
+orders                                    5 columns
+───────────────────────────────────────────────────
+◆ id            int      ←  items.order_id
+                         ←  refunds.order_id
+● customer_id   int      →  customers.id
+● region        text   ─┐
+● country       text   ─┴→  regions (code, country)
+  … 1 more column
 "))
     (clutch-er-toggle-columns)
-    (should (string-match-p "^   note +text$" (clutch-test-er--text)))
+    (should (string-match-p "^  note +text$" (clutch-test-er--text)))
     (should-not (string-match-p "more column" (clutch-test-er--text))))
   (let* ((conn (clutch-test-er--conn))
          (orders (assoc "orders" (clutch-test-conn-tables conn)))
@@ -179,8 +179,8 @@ columns are asked for."
                                          :constraint "fk_market")))))
     (clutch-test-er--with-view conn
       (should (string-match-p
-               (concat "^ ● region +text +─┐\n"
-                       " ● country +text +─┴→  regions (code, country)\n"
+               (concat "^● region +text +─┐\n"
+                       "● country +text +─┴→  regions (code, country)\n"
                        " +→  countries\\.code\n"
                        " +→  markets (r, c)  from (region, country)$")
                (clutch-test-er--text))))))
@@ -226,23 +226,24 @@ highlights its relations.  Neither changes the text."
       (should (eq (key-binding (car binding)) (cdr binding))))
     (let ((tick (buffer-chars-modified-tick)))
       (clutch-er-right)
+      (clutch-er-right)
       (should (looking-at "customers"))
-      (should-error (clutch-er-right) :type 'user-error)
-      (clutch-er-next 1)
+      (forward-line 1)
+      (call-interactively (key-binding [right]))
       (should (looking-at "regions"))
       (clutch-er-up)
       (should (looking-at "customers"))
       (clutch-er-left)
+      (clutch-er-left)
       (should (looking-at "orders"))
-      (should-error (clutch-er-left) :type 'user-error)
       (should (= tick (buffer-chars-modified-tick))))
     (clutch-er-right)
     (clutch-er-follow)
-    (should (string-match-p "^ customers " (clutch-test-er--text)))
+    (should (string-match-p "^customers +2 columns$" (clutch-test-er--text)))
     (should (string-match-p " ←  orders.customer_id$" (clutch-test-er--text)))
     (clutch-er-left)
     (clutch-er-follow)
-    (should (string-match-p "^ orders " (clutch-test-er--text))))
+    (should (string-match-p "^orders +5 columns$" (clutch-test-er--text))))
   ;; A node below another branch can be reached without returning to its root.
   (with-temp-buffer
     (insert-text-button "root" 'clutch-er-entry '(:name "root"))
@@ -304,7 +305,7 @@ key of the database."
   ]
 }
 "))
-    (should (string-match-p "^ ○ note +text + ⇢  customers.name  manual$"
+    (should (string-match-p "^○ note +text + ⇢  customers.name  manual$"
                             (clutch-test-er--text)))
     (clutch-test-er--goto "customers.name")
     (should (equal (clutch-test-er--answering '(("note") ("id")) "customers"
@@ -355,7 +356,7 @@ connection's current one."
                           clutch-connection clutch--connection-params
                           clutch-er--entry))))
     (clutch-er-refresh)
-    (should (string-match-p "^ ● customer_id +int + →  customers.id$"
+    (should (string-match-p "^● customer_id +int + →  customers.id$"
                             (clutch-test-er--text)))
     (should (= 1 (cl-count-if (lambda (line) (string-match-p "customers.id" line))
                               (split-string (clutch-test-er--text) "\n"))))
@@ -506,9 +507,9 @@ not the name the result shows it under."
 draws with ASCII."
   (cl-letf (((symbol-function 'char-width) (lambda (_char) 2)))
     (clutch-test-er--with-view (clutch-test-er--conn)
-      (should (string-match-p "^ \\* id +int +<-- items.order_id$"
+      (should (string-match-p "^\\* id +int +<-- items.order_id$"
                               (clutch-test-er--text)))
-      (should (string-match-p "^ o country +text +-\\+> regions (code, country)$"
+      (should (string-match-p "^o country +text +-\\+> regions (code, country)$"
                               (clutch-test-er--text)))))
   (let ((clutch-er-charset 'ascii))
     (clutch-test-er--with-view (clutch-test-er--conn)
@@ -593,8 +594,6 @@ draws with ASCII."
         (let* ((start (text-property-any (point-min) (point-max) 'clutch-er-overview t))
                (end (next-single-property-change start 'clutch-er-overview nil (point-max))))
           (should (equal overview (buffer-substring-no-properties start end))))
-        (should (equal (plist-get (get-text-property (point) 'clutch-er-entry) :name)
-                       "customers"))
         (should (eq (button-get (button-at (point)) 'face) 'clutch-er-highlight))
         (should (equal (plist-get clutch-er--entry :name) "customers")))
       (goto-char (1+ (button-end (button-at (point)))))
@@ -603,7 +602,7 @@ draws with ASCII."
       (should (string-match-p (regexp-quote "regions +") (buffer-string)))
       (clutch-er-refresh t)
       (should (looking-at "customers"))
-      (should (string-prefix-p "\n customers" (buffer-string)))
+      (should (string-prefix-p "\ncustomers" (buffer-string)))
       (clutch-er-right)
       (clutch-er-follow)
       (should (equal (plist-get clutch-er--entry :name) "orders"))

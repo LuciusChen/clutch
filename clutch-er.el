@@ -630,7 +630,6 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
                        do (draw target entry (if more (cons junction lanes) lanes)
                                 (+ reserved siblings)))
             (insert "\n")))))
-     (insert " ")
      (draw root nil nil 0))
     (add-text-properties start (point)
                          (list 'clutch-er-overview t 'keymap clutch-er--overview-map))
@@ -638,7 +637,7 @@ so cycles and cross-links need no crossing lines.  Display at most twelve nodes.
 
 (defun clutch-er--overview-position (entry)
   "Return the first button position for table ENTRY, or nil if not shown."
-  (let ((button (next-button (point-min))) position)
+  (let ((button (next-button (point-min) t)) position)
     (while (and button (not position))
       (if (equal (button-get button 'clutch-er-entry) entry)
           (setq position (button-start button))
@@ -856,7 +855,7 @@ qualified; box characters are used when UNICODE, else ASCII."
                              when (and (memq index rows) (/= index (car (last rows))))
                              return (cons relation (if (= index (car rows))
                                                        'first 'middle)))
-     for column-cell = (concat " " (clutch-er--marker column relations unicode)
+     for column-cell = (concat (clutch-er--marker column relations unicode)
                                " " name)
      for type-cell = (propertize (or (plist-get column :type) "") 'face 'shadow)
      ;; Put the bracket cap on the column's row, before other links.
@@ -928,8 +927,7 @@ qualified; box characters are used when UNICODE, else ASCII."
          (lines (clutch-er--lines columns relations shown-schema unicode))
          (texts (mapcar #'string-trim-right
                         (clutch-viz-columns (mapcar #'cdr lines) 0 3)))
-         (title (concat " " (propertize (plist-get clutch-er--entry :name)
-                                        'face 'clutch-er-title)))
+         (title (propertize (plist-get clutch-er--entry :name) 'face 'clutch-er-title))
          (summary (propertize
                    (concat (if shown-schema
                                (concat shown-schema (if unicode " · " " - "))
@@ -946,18 +944,18 @@ qualified; box characters are used when UNICODE, else ASCII."
     (insert title
             (make-string (- width (string-width title) (string-width summary)) ?\s)
             summary "\n"
-            " " (propertize (make-string (1- width) (if unicode ?─ ?-)) 'face 'shadow)
+            (propertize (make-string width (if unicode ?─ ?-)) 'face 'shadow)
             "\n")
     (cl-loop for (properties) in lines
              for text in texts
              do (insert (apply #'propertize (concat text "\n") properties)))
     (when (> hidden 0)
-      (insert (propertize (format "   %s %d more column%s\n"
+      (insert (propertize (format "  %s %d more column%s\n"
                                   (if unicode "…" "...") hidden
                                   (if (= hidden 1) "" "s"))
                           'face 'shadow)))
     (unless relations
-      (insert "\n" (propertize "   No foreign keys reach this table." 'face 'shadow) "\n"))
+      (insert "\n" (propertize "  No foreign keys reach this table." 'face 'shadow) "\n"))
     (setq clutch-er--lines
           (let ((position (point-min)) spans)
             (while (< position (point-max))
@@ -1185,15 +1183,16 @@ With prefix RECENTER, start the overview at the current table."
 
 (defun clutch-er--move-node (direction)
   "Move one overview node in DIRECTION, leaving table details as they are."
-  (let* ((button (or (button-at (point))
-                     (when-let* ((position (clutch-er--overview-position
-                                            (clutch-er--overview-entry
-                                             clutch-er--entry clutch-er--model))))
-                       (button-at position))
-                     (user-error "No overview table to move from")))
-         (position (button-start (if (button-get button 'skip)
-                                     (previous-button (button-start button))
-                                   button)))
+  (let* ((button (button-at (point)))
+         (position
+          (cond
+           ((and button (button-get button 'skip))
+            (button-start (previous-button (button-start button))))
+           (button (button-start button))
+           ((get-text-property (point) 'clutch-er-overview) (point))
+           (t (or (clutch-er--overview-position
+                   (clutch-er--overview-entry clutch-er--entry clutch-er--model))
+                  (user-error "No overview table to move from")))))
          (horizontal (memq direction '(left right)))
          (sign (if (memq direction '(left up)) -1 1))
          (origin (save-excursion
@@ -1201,7 +1200,7 @@ With prefix RECENTER, start the overview at the current table."
                    (cons (line-number-at-pos) (current-column))))
          destination best-row-distance best-offset)
     (save-excursion
-      (let ((candidate (or (button-at (point-min)) (next-button (point-min)))))
+      (let ((candidate (next-button (point-min) t)))
         (while candidate
           (goto-char (button-start candidate))
           (let* ((dy (- (line-number-at-pos) (car origin)))
@@ -1216,8 +1215,7 @@ With prefix RECENTER, start the overview at the current table."
                            (and (= row-distance best-row-distance) (< offset best-offset))))
               (setq destination (point) best-row-distance row-distance best-offset offset)))
           (setq candidate (next-button (button-end candidate))))))
-    (unless destination (user-error "No table in that direction"))
-    (goto-char destination)))
+    (when destination (goto-char destination))))
 
 (defun clutch-er-left ()
   "Move to the nearest overview node on the left."

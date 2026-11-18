@@ -267,7 +267,7 @@ Staging a field edit with =C-c C-c= returns to the same field in the Record view
 
 * ER View (clutch-er-mode) Key Bindings
 
-The overview sits above the displayed table's fields. Arrow keys move focus across branches. Left and Right prefer the same row, while Up and Down prefer the nearest row and then the closest column. Clicking a table opens its fields and keeps the overview layout stable. A destination outside the visible overview becomes the new root. Multiple keys between two tables share a link, with a double arrow for references in both directions. Cycles and cross-links end with =(shown)=, and manual links are dotted.
+The overview sits above the displayed table's fields. Arrow keys move focus across branches, using the cursor's position when it is between nodes. Left and Right prefer the same row, while Up and Down prefer the nearest row and then the closest column. At an edge, focus stays put. Clicking a table opens its fields and keeps the overview layout stable. A destination outside the visible overview becomes the new root. Multiple keys between two tables share a link, with a double arrow for references in both directions. Cycles and cross-links end with =(shown)=, and manual links are dotted.
 
 A bare =+= marks an unopened branch. =[+N]= counts the neighbours folded by the width or node limit. Click either marker to expand. If an unopened branch cannot fit, the overview starts from that table and shows its fields. A folded branch uses the relations already loaded and keeps the current fields. Expand again to see the next group.
 
