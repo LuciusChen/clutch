@@ -4,6 +4,8 @@
 
 ### Added
 
+- The BLOB viewer supports SQLite values and bounded JDBC byte previews with a compatible agent. Press `x` to switch between text and hexadecimal using the existing result.
+
 - Table object actions can compare definitions across saved SQL connections in Ediff, with a same-schema match offered by default.
 
 - Cassandra JDBC profiles run CQL, browse tables and columns, and show bounded read-only result previews with a truncation notice. Clutch pins the published agent 0.2.29 and verifies its SHA-256. This agent handles Cassandra BLOB results.

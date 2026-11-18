@@ -548,12 +548,55 @@ When TARGET-SUFFIX is non-nil, export through a link to that suffix."
                     (plist-get (clutch--view-spec value '(:type-category blob)) :content))
                    "<BLOB preview; 3 total>"))))
 
-(ert-deftest clutch-test-export-rejects-metadata-only-binary-values ()
-  "Binary length metadata is not complete data; decoded text remains usable."
-  (let ((metadata (car (clutch-jdbc--normalize-row '((:__type "blob" :length 3)))))
+(ert-deftest clutch-test-blob-view-switches-without-connection ()
+  "Inspect bytes in original results and switch between hex and text."
+  (require 'clutch-db-sqlite)
+  (skip-unless (sqlite-available-p))
+  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
+        (blob-buffer "*clutch-blob*"))
+    (unwind-protect
+        (let* ((result (clutch-db-query
+                        conn (concat "SELECT 'plain' AS value UNION ALL SELECT X'616263' "
+                                     "UNION ALL SELECT CAST('[\"' || printf('%0*d', 65536, 0) || '\"]' AS BLOB)")))
+               (column (car (clutch-db-result-columns result)))
+               (rows (clutch-db-result-rows result)))
+          (clutch-db-disconnect conn)
+          (setq conn nil)
+          (should (equal (plist-get (clutch--view-spec (caar rows) column) :kind)
+                         "Value"))
+          (save-window-excursion
+            (clutch--dispatch-view (caadr rows) column)
+            (with-current-buffer (get-buffer blob-buffer)
+              (should (string-search "Text preview:\nabc" (buffer-string)))
+              (call-interactively (key-binding (kbd "x")))
+              (should (string-search "61 62 63" (buffer-string)))
+              (call-interactively (key-binding (kbd "x")))
+              (should (string-search "Text preview:\nabc" (buffer-string))))
+            (clutch--dispatch-view (caar (cddr rows)) column)
+            (should (equal (buffer-name) blob-buffer))
+            (should (string-search "showing first 1024 bytes" (buffer-string)))
+            (call-interactively (key-binding (kbd "x")))
+            (should (string-search "5b 22 30 30" (buffer-string)))
+            (should (string-search "showing first 256 bytes" (buffer-string)))
+            (call-interactively (key-binding (kbd "x")))
+            (should (string-search "showing first 1024 bytes" (buffer-string)))))
+      (when conn
+        (clutch-db-disconnect conn))
+      (when-let* ((buffer (get-buffer blob-buffer)))
+        (kill-buffer buffer)))))
+
+(ert-deftest clutch-test-export-rejects-incomplete-binary-values ()
+  "A BLOB byte preview is incomplete; decoded text remains usable."
+  (let ((preview (car (clutch-jdbc--normalize-row
+                       '((:__type "blob" :length 1000 :preview-base64 "AQID")))))
         (value (car (clutch-jdbc--normalize-row
                      '((:__type "blob" :length 4 :text "<r/>" :encoding "utf-8"))))))
-    (should-error (clutch--export-csv-content (list (list metadata)) '("body"))
+    (let ((content (plist-get (clutch--view-spec preview '(:type-category blob))
+                              :content)))
+      (should (string-search "BLOB size: 1000 bytes" content))
+      (should (string-search "01 02 03" content))
+      (should (string-search "showing first 3 bytes" content)))
+    (should-error (clutch--export-csv-content (list (list preview)) '("body"))
                   :type 'user-error)
     (should (equal (clutch--export-csv-content (list (list value)) '("body"))
                    "body\n<r/>\n"))))

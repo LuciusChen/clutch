@@ -2551,12 +2551,23 @@ When QUIET is non-nil, suppress informational fallback messages."
   (font-lock-ensure (point-min) (point-max))
   (jit-lock-fontify-now (point-min) (point-max)))
 
-(defun clutch--blob-bytes (val)
-  "Return a unibyte string for blob-like VAL."
+(defconst clutch--blob-structured-view-max-bytes (* 64 1024)
+  "Largest raw BLOB eligible for full JSON or XML formatting.")
+
+(defun clutch--blob-view-data (val)
+  "Return (PREFIX . SIZE) for a BLOB value VAL already in the result."
   (cond
-   ((stringp val) (encode-coding-string val 'binary))
-   ((vectorp val) (apply #'unibyte-string (append val nil)))
-   (t (encode-coding-string (clutch--format-value val) 'binary))))
+   ((clutch-db-value-preview-p val)
+    (cons (clutch-db-value-preview-bytes val)
+          (clutch-db-value-preview-length val)))
+   ((vectorp val)
+    (cons (apply #'unibyte-string (append (seq-take val 1024) nil))
+          (length val)))
+   (t
+    (let ((bytes (if (and (stringp val) (not (multibyte-string-p val)))
+                     val
+                   (encode-coding-string (clutch--format-value val) 'binary))))
+      (cons (substring bytes 0 (min (length bytes) 1024)) (length bytes))))))
 
 (defun clutch--blob-hexdump-lines (bytes &optional max-bytes)
   "Return hex dump lines for BYTES, up to MAX-BYTES bytes."
@@ -2594,28 +2605,62 @@ When QUIET is non-nil, suppress informational fallback messages."
             (setq printable (1+ printable)))))
       (>= (/ (float printable) n) 0.85))))
 
-(defun clutch--blob-view-string (val)
-  "Build a concise DataGrip-like display string for blob VAL."
-  (let* ((bytes (clutch--blob-bytes val))
-         (size (length bytes))
-         (text-like (clutch--blob-likely-text-p bytes))
-         (max-bytes (if text-like 1024 256))
-         (shown (min size max-bytes))
-         (truncated (> size max-bytes)))
+(defun clutch--blob-view-string (bytes size text-p)
+  "Render BLOB prefix BYTES of total SIZE as text when TEXT-P, or hex."
+  (let ((shown (min (length bytes) (if text-p 1024 256))))
     (concat
      (format "BLOB size: %d bytes\n\n" size)
-     (if text-like
+     (if text-p
          (let ((preview (decode-coding-string (substring bytes 0 shown)
                                               'utf-8 t)))
            (concat "Text preview:\n"
                    (if (string-empty-p preview) "<empty>" preview)))
        (concat "Hex preview:\n"
                (mapconcat #'identity
-                          (clutch--blob-hexdump-lines bytes max-bytes)
+                          (clutch--blob-hexdump-lines bytes shown)
                           "\n")))
-     (if truncated
-         (format "\n\n... truncated, showing first %d bytes" max-bytes)
-       ""))))
+     (when (< shown size)
+       (format "\n\n... truncated, showing first %d bytes" shown)))))
+
+(defun clutch--blob-view-spec (val quiet)
+  "Build the BLOB viewer for VAL, with a second format unless QUIET."
+  (pcase-let* ((`(,bytes . ,size) (clutch--blob-view-data val))
+               (text-p (clutch--blob-likely-text-p bytes)))
+    (list :kind "BLOB" :content (clutch--blob-view-string bytes size text-p)
+          :setup #'special-mode
+          :alternate (unless quiet
+                       (cons (clutch--blob-view-string bytes size (not text-p))
+                             #'special-mode)))))
+
+(defvar-local clutch--blob-view-switch nil
+  "Function that switches the BLOB display in the current viewer.")
+
+(defun clutch-blob-view-toggle ()
+  "Switch between the BLOB's hexadecimal and text views."
+  (interactive)
+  (unless clutch--blob-view-switch
+    (user-error "No alternate BLOB view"))
+  (funcall clutch--blob-view-switch))
+
+(define-minor-mode clutch-blob-view-toggle-mode
+  "Switch between BLOB displays with \\[clutch-blob-view-toggle]."
+  :group 'clutch
+  :keymap '(("x" . clutch-blob-view-toggle)))
+
+(defun clutch--setup-blob-view-switch (view alternate)
+  "Activate VIEW and arrange for the same buffer to render ALTERNATE."
+  (funcall (cdr view))
+  (setq-local header-line-format
+              (if header-line-format
+                  (list header-line-format (clutch--status-separator)
+                        "x  Toggle hex/text")
+                " x  Toggle hex/text")
+              clutch--blob-view-switch
+              (lambda ()
+                (clutch--render-view-buffer
+                 (current-buffer) (car alternate)
+                 (lambda () (clutch--setup-blob-view-switch alternate view)))))
+  (clutch-blob-view-toggle-mode 1))
 
 (defun clutch--json-view-string-p (val)
   "Return non-nil when VAL is string content suitable for the JSON viewer."
@@ -2636,11 +2681,21 @@ When QUIET is non-nil, suppress informational fallback messages."
 When QUIET is non-nil, suppress nonessential viewer messages."
   (let ((cat (plist-get col-def :type-category)))
     (cond
+     ((and (clutch-db-value-preview-p val)
+           (clutch-db-value-preview-bytes val))
+      (clutch--blob-view-spec val quiet))
      ((or (null val) (clutch--cell-placeholder-value val)
           (clutch-db-value-preview-p val))
       (list :kind "Value"
             :content (clutch--view-format-value val)
             :setup #'special-mode))
+     ;; Raw BLOBs can be much larger than the structured text returned by
+     ;; JDBC.  Keep parsing and rendering bounded for those byte strings.
+     ((and (stringp val)
+           (not (multibyte-string-p val))
+           (> (length val) clutch--blob-structured-view-max-bytes)
+           (clutch--blob-value-p val col-def))
+      (clutch--blob-view-spec val quiet))
      ((or (eq cat 'json)
           (clutch--json-view-string-p val))
       (list :kind "JSON"
@@ -2651,30 +2706,42 @@ When QUIET is non-nil, suppress nonessential viewer messages."
       (list :kind "XML"
             :content val
             :setup (lambda () (clutch--setup-xml-view-buffer val quiet))))
-     ((eq cat 'blob)
-      (list :kind "BLOB"
-            :content (clutch--blob-view-string val)
-            :setup #'special-mode))
+     ((clutch--blob-value-p val col-def)
+      (clutch--blob-view-spec val quiet))
      (t
       (list :kind "Value"
             :content (clutch--view-format-value val)
             :setup #'special-mode)))))
 
 (defun clutch--dispatch-view (val col-def)
-  "Open the appropriate viewer for VAL given column metadata COL-DEF.
-Dispatch order: JSON content → JSON viewer; XML content → XML viewer;
-blob type with non-text value → binary string; otherwise plain text."
-  (pcase-let* ((`(:kind ,kind :content ,content :setup ,setup)
-                (clutch--view-spec val col-def))
-               (buffer-name
-                (cdr (assoc kind
-                            '(("JSON" . "*clutch-json*")
-                              ("XML" . "*clutch-xml*")
-                              ("BLOB" . "*clutch-blob*")
-                              ("Value" . "*clutch-value*"))))))
+  "Open the appropriate viewer for VAL given column metadata COL-DEF."
+  (let* ((spec (clutch--view-spec val col-def))
+         (kind (plist-get spec :kind))
+         (content (plist-get spec :content))
+         (setup (plist-get spec :setup))
+         (buffer-name
+          (cdr (assoc kind '(("JSON" . "*clutch-json*")
+                             ("XML" . "*clutch-xml*")
+                             ("BLOB" . "*clutch-blob*")
+                             ("Value" . "*clutch-value*")))))
+         (alternate (plist-get spec :alternate)))
     (when (and (string= kind "JSON") (string-empty-p content))
       (user-error "No JSON value at point"))
-    (clutch--view-in-buffer content buffer-name setup)))
+    (when (and (member kind '("JSON" "XML"))
+               (clutch--blob-value-p val col-def))
+      ;; Decoded JDBC text has a separate, exact byte prefix.  Native
+      ;; adapters can use the original unibyte value directly.
+      (when-let* ((binary (and (stringp val)
+                               (or (get-text-property 0 'clutch-blob-preview val)
+                                   (unless (multibyte-string-p val) val)))))
+        (pcase-let ((`(,bytes . ,size) (clutch--blob-view-data binary)))
+          (setq alternate
+                (cons (clutch--blob-view-string bytes size nil) #'special-mode)))))
+    (clutch--view-in-buffer
+     content buffer-name
+     (if alternate
+         (lambda () (clutch--setup-blob-view-switch (cons content setup) alternate))
+       setup))))
 
 (defun clutch--cell-preview-context ()
   "Return the cell preview context at point, or nil."
@@ -2896,11 +2963,11 @@ PARENT-WIDTH and BOTTOM delimit the usable parent-frame area."
   (let* ((state clutch--cell-preview-state)
          (buffer (plist-get state :buffer))
          (frame (plist-get state :frame)))
-    (pcase-let* ((`(:kind ,_kind :content ,content :setup ,setup)
-                  (clutch--view-spec (plist-get context :value)
-                                     (plist-get context :column-def)
-                                     t)))
-      (clutch--render-view-buffer buffer content setup)
+    (let ((spec (clutch--view-spec (plist-get context :value)
+                                   (plist-get context :column-def)
+                                   t)))
+      (clutch--render-view-buffer buffer (plist-get spec :content)
+                                  (plist-get spec :setup))
       (with-current-buffer buffer
         (setq-local mode-line-format nil
                     header-line-format nil

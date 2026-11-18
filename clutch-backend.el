@@ -260,9 +260,9 @@ When CONTEXT is non-nil, use it in the raised `clutch-db-error' message."
 ;;;; Result struct
 
 (cl-defstruct clutch-db-value-preview
-  "An incomplete result value, with TYPE, original LENGTH and preview TEXT.
+  "An incomplete result value with TYPE, original LENGTH and preview TEXT or BYTES.
 This value may be displayed, but must not be used as complete database data."
-  type length text)
+  type length text bytes)
 
 (defun clutch-db-require-complete-value (value)
   "Return VALUE, or reject an incomplete result preview."
