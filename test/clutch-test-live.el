@@ -498,6 +498,30 @@ uncommitted work behind."
               (progn
                 (clutch-db-query conn (format "CREATE TABLE %s (tenant int, day int, ts int, payload blob, PRIMARY KEY ((tenant, day), ts)) WITH CLUSTERING ORDER BY (ts DESC)" table))
                 (should-error (clutch-toggle-auto-commit) :type 'user-error)
+                (clutch-db-query conn "CREATE TABLE partition (k int PRIMARY KEY)")
+                (clutch-db-query conn "INSERT INTO partition (k) VALUES (1)")
+                (let ((query "SELECT k FROM partition LIMIT 1"))
+                  (insert query ";")
+                  (goto-char (point-min))
+                  (clutch-execute-dwim (point) (point))
+                  (clutch-test--await-queries)
+                  (should (equal (alist-get 'sql (nth 1 (assoc "execute" requests)))
+                                 query))
+                  (with-current-buffer clutch--last-result-buffer
+                    (should (equal clutch--result-rows '((1))))))
+                (erase-buffer)
+                (let* ((entry (list :type "TABLE" :name table))
+                       (clutch--object-action-entry entry)
+                       (menu (clutch-test--transient-menu-text 'clutch-object-actions-menu)))
+                  (should (string-search "Describe object" menu))
+                  (should-not (string-search "Show definition" menu))
+                  (should-not (string-search "Compare table definition" menu))
+                  (let ((clutch--object-dispatch-entry entry)
+                        (keymap (clutch--embark-actions-keymap nil t)))
+                    (should (eq (car (clutch--embark-object-target))
+                                'clutch-cassandra-object))
+                    (should-not (lookup-key keymap (kbd "s")))
+                    (should-not (lookup-key keymap (kbd "c")))))
                 (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                   (let ((batch (concat
                                 "BEGIN UNLOGGED BATCH "
@@ -563,6 +587,7 @@ uncommitted work behind."
                                            :nullable))
                         (should-not (clutch-db-object-definition fresh (list :type "TABLE" :name table))))
                     (clutch-db-disconnect fresh))))
+            (clutch-db-query conn "DROP TABLE IF EXISTS partition")
             (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))))))))
 
 (defun clutch-test--run-in-console (&rest statements)

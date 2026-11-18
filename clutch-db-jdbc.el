@@ -1617,19 +1617,24 @@ the `messages' field do not report."
     (if (not (equal "SELECT" (clutch-db-sql-leading-keyword cql dialect)))
         cql
       (let* ((candidates (clutch-db-sql-code-match-positions
-                          cql 0 nil ";\\|\\_<\\(?:LIMIT\\|PARTITION\\|ALLOW\\)\\_>"))
-             partition-end
+                          cql 0 nil ";\\|\\_<\\(?:LIMIT\\|PER\\|ALLOW\\)\\_>"))
+             per-partition-limit
              (boundary
               (clutch-db-sql-scan-code
                cql 0 nil
                (lambda (pos ch depth)
                  (when (zerop depth)
                    (pcase (upcase ch)
-                     (?P (setq partition-end (gethash pos candidates)) nil)
-                     (?L (unless (and partition-end
-                                      (= pos (clutch-db-sql--skip-blank
-                                              cql partition-end dialect)))
-                           'limited))
+                     (?P
+                      (let* ((partition (clutch-db-sql--skip-blank
+                                         cql (gethash pos candidates) dialect))
+                             (end (clutch-db-sql--token-end cql partition)))
+                        (when (and end (eq t (compare-strings
+                                              cql partition end "PARTITION" 0 nil t)))
+                          (setq per-partition-limit
+                                (clutch-db-sql--skip-blank cql end dialect))))
+                      nil)
+                     (?L (unless (eql pos per-partition-limit) 'limited))
                      ((or ?A ?\;) pos))))
                dialect candidates)))
         (if (eq boundary 'limited)
