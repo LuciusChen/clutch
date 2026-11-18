@@ -30,7 +30,6 @@
 (defvar clutch--row-identity-error-message)
 (defvar clutch--row-identity-status)
 (defvar clutch-record--result-buffer)
-(defvar clutch-record--row-idx)
 
 (defvar-local clutch--fk-info nil
   "Foreign key info for the current result.")
@@ -674,7 +673,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
         (clutch-result--edit-pending-insert ridx)
       (let* ((op "edit cell")
              (table (clutch--result-source-table-or-user-error op))
-             (row-identity (clutch-result--row-identity-or-user-error table op))
+             (_ (clutch-result--row-identity-or-user-error table op))
              (display-row (nth ridx (clutch--result-display-rows)))
              (original (nth cidx display-row))
              (col-name (nth cidx clutch--result-columns))
@@ -697,11 +696,6 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                  (string-trim-right
                   (clutch-result--editable-field-string
                    original col-def detail)))))
-             (target-row (list
-                          :identity (clutch-db-row-identity-values
-                                     display-row row-identity)
-                          :original original
-                          :original-state original-state))
              (result-buf (current-buffer))
              (target-cell (cons ridx cidx))
              (viewport (when-let* ((win (get-buffer-window result-buf t)))
@@ -750,7 +744,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                           (user-error "Result buffer no longer exists"))
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit
-                           ridx cidx new-value target-row))))
+                           ridx cidx new-value display-row original-state))))
           (with-current-buffer result-buf
             (setq-local clutch--active-edit-cell target-cell)
             (clutch-result-edit--refresh-target-row ridx)))
@@ -777,6 +771,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                     (user-error "No cell at point"))))
       (if (eq result-buffer return-buffer)
           (clutch-result-edit--open-cell cell return-buffer)
+        (setcar cell (clutch-record--resolve-row-index))
         (let ((opened (with-current-buffer result-buffer
                         (clutch-result-edit--open-cell cell return-buffer))))
           (when (and (buffer-live-p opened)
@@ -855,9 +850,9 @@ relying on the selected window."
                                                  return-buf
                                                  viewport)))
 
-(defun clutch-result--apply-edit (ridx cidx new-value target-row)
+(defun clutch-result--apply-edit (ridx cidx new-value original-row original-state)
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
-TARGET-ROW is a plist captured when the edit buffer opened.
+ORIGINAL-ROW and ORIGINAL-STATE are the row and cell state at editor entry.
 Refresh the affected row and footer in place when possible."
   (clutch--refuse-while-running clutch-connection)
   (clutch-result--refuse-if-moved)
@@ -867,14 +862,11 @@ Refresh the affected row and footer in place when possible."
          (row (or (nth ridx display-rows)
                   (user-error "Edited row no longer exists; reopen the edit buffer")))
          (identity-vec (clutch-db-row-identity-values row row-identity))
-         (expected-identity (plist-get target-row :identity))
          (key (cons identity-vec cidx))
-         (original (plist-get target-row :original))
-         (original-state (plist-get target-row :original-state))
          (new-state (clutch-result-edit--state-for-value new-value)))
-    (unless (equal identity-vec expected-identity)
-      (user-error "Edited row changed; reopen the edit buffer"))
-    (unless (equal (nth cidx row) original)
+    ;; A new result can have the same values at this position for another
+    ;; table or projection.  Its rows belong to a different snapshot.
+    (unless (eq row original-row)
       (user-error "Edited row changed; reopen the edit buffer"))
     (if (equal new-state original-state)
         (setq clutch--pending-edits
@@ -2095,7 +2087,8 @@ TABLE is a metadata key from `clutch--table-key'."
   (let* ((record-source-p (derived-mode-p 'clutch-record-mode))
          (source (cond
                   (record-source-p
-                   (list clutch-record--result-buffer clutch-record--row-idx))
+                   (list clutch-record--result-buffer
+                         (clutch-record--resolve-row-index)))
                   ((derived-mode-p 'clutch-result-mode)
                    (list (current-buffer)
                          (or (clutch--row-idx-at-line)

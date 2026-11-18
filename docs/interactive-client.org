@@ -253,7 +253,7 @@ Typical flow:
 
 The Record transient labels =RET= from the field at point: =Follow FK=, =Expand=, =Collapse=, or =Show value=.  It is inapt when point is not on a field.
 
-Staging a field edit with =C-c C-c= returns to the same field in the Record view.
+Staging a field edit with =C-c C-c= returns to the same field in the Record view. The Record stays with its row when a client-side filter or sort moves it. If the row is filtered out or a new query or page replaces the result, reopen the Record from the result table before editing or following a relation. If a query replaces the result while the cell editor is already open, Clutch refuses to stage the edit and keeps your input in the editor.
 
 * Describe View (clutch-describe-mode) Key Bindings
 
@@ -491,7 +491,7 @@ C-c C-o                     ;; Show object actions for the current object, or pr
 
 The main navigation path is object-centric rather than tree-centric.  =C-c C-j= is the single conceptual object entrypoint.  It resolves an object at point when possible; otherwise it opens a flat annotated object picker.  By default the primary set is =TABLE= / =VIEW= / =SYNONYM= / =COLLECTION= / =KEY=, configurable via =clutch-primary-object-types=.  The picker returns quickly with schema snapshot objects and any already-warmed metadata, then keeps warming slower categories such as indexes, sequences, and routines in the background after schema refreshes.  Once an object is resolved, =RET= runs the object's default action.  In query consoles and the REPL, when point is already on a table-like object, =C-c C-j= opens the picker prefilled with that name instead of inserting browse SQL immediately; =RET= stays the explicit browse trigger.
 
-=C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves the object at point when possible; otherwise it prompts with the same flat picker.  It opens the shared describe buffer for the target object.  That buffer is only a view over the same object model; it does not define a second action universe.
+=C-c C-d= is a describe-focused wrapper over the same resolution logic.  It resolves the object at point when possible; otherwise it prompts with the same flat picker. Describe and definition buffers show their connection and keep separate views for objects on different connections, even when their names match.
 
 =C-c C-o= is the direct “show me actions” wrapper over the same object model. It resolves the object at point when possible; otherwise it prompts, then opens the shared action UI.  The action set is intentionally small and shared across Embark and Transient:
 

@@ -508,12 +508,47 @@ The exact-name match only needs entries under the name's prefix."
                (lambda (_conn _entry &optional _params)
                  "PUBLIC.orders (TABLE)\n\nSummary\n  Name  orders")))
       (clutch--render-object-describe
-       'fake-conn
+       (make-clutch-test-conn)
        '(:name "orders" :type "TABLE" :source-schema "PUBLIC"))
       (should (string-match-p "PUBLIC.orders (TABLE)" (buffer-string)))
       (should (string-match-p "\\[desc\\]" clutch-describe--header-base))
       (should (string-match-p "show definition" clutch-describe--header-base))
       (should-not (string-match-p "PUBLIC.orders" clutch-describe--header-base)))))
+
+(ert-deftest clutch-test-object-views-keep-their-sqlite-connection ()
+  "Describe and DDL for the same name stay with their originating connection."
+  (skip-unless (sqlite-available-p))
+  (let* ((entry '(:name "orders" :schema "main" :type "TABLE"))
+         (first (clutch-db-sqlite-connect '(:database ":memory:")))
+         (second (clutch-db-sqlite-connect '(:database ":memory:")))
+         buffers)
+    (unwind-protect
+        (save-window-excursion
+          (clutch-db-query first "CREATE TABLE orders (dev_only TEXT)")
+          (clutch-db-query second "CREATE TABLE orders (test_only TEXT)")
+          (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
+            (ert-info ((symbol-name command))
+              (let ((views
+                     (mapcar
+                      (lambda (conn)
+                        (with-temp-buffer
+                          (setq-local clutch-connection conn
+                                      clutch--connection-params
+                                      '(:backend sqlite :database ":memory:"))
+                          (push (funcall command entry) buffers)
+                          (car buffers)))
+                      (list first second first))))
+                (should-not (eq (nth 0 views) (nth 1 views)))
+                (should (eq (nth 0 views) (nth 2 views)))
+                (cl-mapc (lambda (buffer conn column)
+                           (with-current-buffer buffer
+                             (should (eq clutch-connection conn))
+                             (should (string-search column (buffer-string)))))
+                         views (list first second first)
+                         '("dev_only" "test_only" "dev_only"))))))
+      (mapc #'kill-buffer (delete-dups buffers))
+      (clutch-db-disconnect first)
+      (clutch-db-disconnect second))))
 
 (ert-deftest clutch-test-object-sql-name-never-produces-current-schema-literal ()
   "Browse SQL must use real schema metadata, never current_schema placeholders."
@@ -549,7 +584,7 @@ The exact-name match only needs entries under the name's prefix."
                      (setq object-buffer buf)
                      buf)))
           (with-temp-buffer
-            (setq-local clutch-connection 'fake-conn)
+            (setq-local clutch-connection (make-clutch-test-conn :backend 'oracle))
             (setq-local clutch--connection-params '(:backend oracle))
             (setq-local clutch--conn-sql-product nil)
             (clutch-object-show-ddl-or-source
@@ -675,7 +710,8 @@ The exact-name match only needs entries under the name's prefix."
          (schema (make-hash-table :test 'equal))
          (metadata (make-hash-table :test 'equal))
          (detail-calls 0)
-         (column "new_col"))
+         (column "new_col")
+         describe-buffer)
     (clutch--store-object-cache conn nil)
     (puthash "USERS" '("id" "old_col") schema)
     (puthash conn schema clutch--schema-cache)
@@ -703,10 +739,12 @@ The exact-name match only needs entries under the name's prefix."
               (setq-local clutch-connection conn clutch--buffer-error-details '(:summary "old"))
               (puthash conn (list :buffer (current-buffer) :problem '(:summary "old"))
                        clutch--problem-records-by-conn)
-              (save-current-buffer (clutch-object-describe '(:name "USERS" :type "TABLE")))
+              (setq describe-buffer
+                    (save-current-buffer
+                      (clutch-object-describe '(:name "USERS" :type "TABLE"))))
               (should-not clutch--buffer-error-details)
               (should-not (gethash conn clutch--problem-records-by-conn)))
-            (with-current-buffer "*clutch describe: USERS*"
+            (with-current-buffer describe-buffer
               (should (string-match-p "new_col" (buffer-string)))
               (should-not (string-match-p "old_col" (buffer-string)))
               (should (= detail-calls 1))
@@ -717,8 +755,8 @@ The exact-name match only needs entries under the name's prefix."
               (call-interactively #'clutch-describe-refresh)
               (should (string-match-p "changed_col" (buffer-string)))
               (should-not (string-match-p "new_col" (buffer-string)))))
-        (when-let* ((buffer (get-buffer "*clutch describe: USERS*")))
-          (kill-buffer buffer))))
+        (when (buffer-live-p describe-buffer)
+          (kill-buffer describe-buffer))))
     (should (= detail-calls 2))
     (should-not (gethash conn clutch--column-details-active-cache))
     (should (equal (gethash conn clutch--column-details-queue-cache) '("ORDERS")))
@@ -810,7 +848,8 @@ The exact-name match only needs entries under the name's prefix."
                 ((symbol-function 'font-lock-ensure)
                  (lambda () (setq fontified t))))
         (clutch--render-object-describe
-         'mongo-conn '(:name "users" :type "COLLECTION"))
+         (make-clutch-test-conn :backend 'mongodb)
+         '(:name "users" :type "COLLECTION"))
         (should (eq selected-mode 'json-mode))
         (should fontified)
         (should buffer-read-only)

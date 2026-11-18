@@ -947,6 +947,21 @@ server's default-schema position between two dots."
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (use-local-map map)))
 
+(defun clutch--object-view-buffer (conn kind entry &optional suffix)
+  "Return the buffer for KIND of ENTRY on CONN, with optional SUFFIX."
+  (let ((name (format "*clutch %s: %s%s%s · %s*" kind
+                      (if-let* ((catalog (plist-get entry :catalog)))
+                          (concat catalog ".") "")
+                      (clutch--object-fqname entry)
+                      (if suffix (concat " " suffix) "")
+                      (clutch--connection-key conn))))
+    ;; Two live sessions can have the same public label (e.g. SQLite :memory:).
+    (or (cl-find-if (lambda (buffer)
+                      (and (eq (buffer-local-value 'clutch-connection buffer) conn)
+                           (string-prefix-p name (buffer-name buffer))))
+                    (buffer-list))
+        (generate-new-buffer name))))
+
 (defun clutch--show-object-text-buffer
     (conn entry text &optional params product title-suffix)
   "Display TEXT for ENTRY using CONN's object definition mode.
@@ -955,19 +970,15 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
                       (and params
                            (clutch--effective-sql-product params))
                       clutch-sql-product))
-         (title (if title-suffix
-                    (format "%s %s"
-                            (clutch--object-fqname entry)
-                            title-suffix)
-                  (clutch--object-fqname entry)))
-         (buf (get-buffer-create (format "*clutch: %s*" title))))
+         (buf (clutch--object-view-buffer conn "definition" entry title-suffix)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (if (clutch-db-native-document-surface-p conn params)
             (clutch--json-display-mode)
           (sql-mode))
         (clutch--bind-connection-context conn params product)
-        (setq-local clutch-browser-current-object entry)
+        (setq-local clutch-browser-current-object entry
+                    header-line-format (concat " " (clutch--connection-key conn)))
         (clutch--use-object-action-keymap)
         (erase-buffer)
         (insert text)
@@ -1308,9 +1319,8 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
                                         ("C-c C-o" "Object actions")
                                         ("g" "Refresh")))
                                      "]")))
-                  (if (string-empty-p icon)
-                      (concat " " hints)
-                    (format " %s  %s" icon hints)))
+                  (concat " " (unless (string-empty-p icon) (concat icon " "))
+                          (clutch--connection-key conn) "  " hints))
                 header-line-format
                 (list :eval
                       (list #'clutch--header-with-disconnect-badge
@@ -1327,8 +1337,7 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
 
 (defun clutch--show-object-describe-buffer (conn entry &optional params product)
   "Display a describe buffer for ENTRY using CONN."
-  (let ((buf (get-buffer-create
-              (format "*clutch describe: %s*" (clutch--object-fqname entry)))))
+  (let ((buf (clutch--object-view-buffer conn "describe" entry)))
     (with-current-buffer buf
       (clutch--render-object-describe conn entry params product))
     (pop-to-buffer buf '((display-buffer-at-bottom)))))

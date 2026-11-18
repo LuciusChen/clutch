@@ -2596,7 +2596,7 @@ throughout."
     (let* ((table (format "clutch_obj_desc_%d" (emacs-pid)))
            (index (format "idx_clutch_obj_desc_%d" (emacs-pid)))
            (later (concat table "_later"))
-           describe-name
+           describe-buffer
            (drop-sql (format "DROP TABLE IF EXISTS %s" table))
            (create-sql
             (clutch-test--live-create-table-sql
@@ -2625,7 +2625,6 @@ throughout."
                                :key (lambda (entry) (plist-get entry :name))
                                :test #'string=)))
                 (should table-entry)
-                (setq describe-name (format "*clutch describe: %s*" (clutch--object-fqname table-entry)))
                 (should index-entry)
                 (let ((text (clutch--object-describe-text conn table-entry)))
                   (should (string-match-p (regexp-quote table) text))
@@ -2641,8 +2640,8 @@ throughout."
                 (save-window-excursion
                   (with-temp-buffer
                     (setq-local clutch-connection conn)
-                    (clutch-object-describe table-entry))
-                  (with-current-buffer describe-name
+                    (setq describe-buffer (clutch-object-describe table-entry)))
+                  (with-current-buffer describe-buffer
                     (clutch-db-query conn (format "ALTER TABLE %s ADD extra INT" table))
                     (clutch-db-query conn (format "CREATE TABLE %s (id INT)" later))
                     (let ((inhibit-read-only t)) (erase-buffer) (insert "stale display"))
@@ -2662,7 +2661,7 @@ throughout."
                     (should (string-match-p "^  extra\\_>" (buffer-string)))
                     (should (not (eq (gethash later (gethash conn clutch--schema-cache) 'missing)
                                      'missing)))))))
-          (when-let* ((buffer (and describe-name (get-buffer describe-name)))) (kill-buffer buffer))
+          (when (buffer-live-p describe-buffer) (kill-buffer describe-buffer))
           (ignore-errors (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" later)))
           (ignore-errors (clutch-db-query conn drop-sql)))))))
 
@@ -3427,12 +3426,7 @@ drawn."
                            (lambda (&rest _) t)))
                   (let ((row (car clutch--result-rows)))
                     (clutch-result--apply-edit
-                     0 0 "after"
-                     (list
-                      :identity (clutch-db-row-identity-values
-                                 row clutch--row-identity)
-                      :original (car row)
-                      :original-state (cons nil (car row)))))
+                     0 0 "after" row (cons nil (car row))))
                   (should clutch--pending-edits)
                   (progn (clutch-result-submit) (clutch-test--await-queries))
                   (should-not clutch--pending-edits)
@@ -3466,11 +3460,7 @@ the schema's table."
                         (cidx (cl-position column clutch--result-columns
                                            :test #'string=)))
                     (clutch-result--apply-edit
-                     0 cidx value
-                     (list :identity (clutch-db-row-identity-values
-                                      row clutch--row-identity)
-                           :original (nth cidx row)
-                           :original-state (cons nil (nth cidx row))))
+                     0 cidx value row (cons nil (nth cidx row)))
                     (cl-letf (((symbol-function 'yes-or-no-p)
                                (lambda (&rest _) t)))
                       (clutch-result-submit)
@@ -3838,11 +3828,7 @@ A quote inside the CTE's quoted name must not hide the modification."
                                  clutch--result-source-table table))
                         (let ((row (car clutch--result-rows)))
                           (clutch-result--apply-edit
-                           0 0 value
-                           (list :identity (clutch-db-row-identity-values
-                                            row clutch--row-identity)
-                                 :original (car row)
-                                 :original-state (cons nil (car row)))))
+                           0 0 value row (cons nil (car row))))
                         (cl-letf (((symbol-function 'yes-or-no-p)
                                    (lambda (&rest _) t)))
                           (clutch-result-submit)

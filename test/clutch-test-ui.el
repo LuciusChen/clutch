@@ -2461,6 +2461,78 @@ Point left behind made the next cell command scroll back to it."
           (when (buffer-live-p edit-buf) (kill-buffer edit-buf))
           (when (buffer-live-p record-buf) (kill-buffer record-buf)))))))
 
+(ert-deftest clutch-test-record-edit-stays-with-row-after-result-filter ()
+  "A Record editor may stage only against the result it opened from."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE orders (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO orders VALUES (1, 'apple'), (2, 'banana')"
+        "CREATE TABLE archive (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO archive VALUES (1, 'apple')")
+      "SELECT id, name FROM orders ORDER BY id"
+    (let (record editor)
+      (unwind-protect
+          (progn
+            (clutch--goto-cell 0 1)
+            (call-interactively (key-binding (kbd "RET")))
+            (setq record (current-buffer))
+            (goto-char (point-min))
+            (search-forward "name")
+            (beginning-of-line)
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "banana")))
+                (call-interactively (key-binding (kbd "/")))))
+            (let ((err (should-error
+                        (call-interactively (key-binding (kbd "C-c '")))
+                        :type 'user-error)))
+              (should (string-match-p "Reopen the record" (error-message-string err))))
+            (with-current-buffer result
+              (should-not clutch--pending-edits)
+              (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+                (call-interactively (key-binding (kbd "/"))))
+              (clutch--goto-cell 1 1)
+              (call-interactively (key-binding (kbd "RET"))))
+            (goto-char (point-min))
+            (search-forward "name")
+            (beginning-of-line)
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "banana")))
+                (call-interactively (key-binding (kbd "/")))))
+            (call-interactively (key-binding (kbd "C-c '")))
+            (setq editor (current-buffer))
+            (should (equal (buffer-string) "banana"))
+            (erase-buffer)
+            (insert "pear")
+            (call-interactively (key-binding (kbd "C-c C-c")))
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (call-interactively (key-binding (kbd "C-c C-c")))))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT id, name FROM orders ORDER BY id"))
+                           '((1 "apple") (2 "pear"))))
+            (with-current-buffer result
+              (clutch--goto-cell 0 1)
+              (call-interactively (key-binding (kbd "RET"))))
+            (goto-char (point-min))
+            (search-forward "name")
+            (beginning-of-line)
+            (call-interactively (key-binding (kbd "C-c '")))
+            (setq editor (current-buffer))
+            (should (equal (buffer-string) "apple"))
+            (erase-buffer)
+            (insert "edited")
+            (with-current-buffer result
+              (clutch--execute "SELECT id, name FROM archive")
+              (should (equal clutch--result-source-table "archive")))
+            (with-current-buffer editor
+              (let ((err (should-error
+                          (call-interactively (key-binding (kbd "C-c C-c")))
+                          :type 'user-error)))
+                (should-not (buffer-local-value 'clutch--pending-edits result))
+                (should (string-match-p "Edited row changed" (error-message-string err))))
+              (should (equal (buffer-string) "edited"))))
+        (when (buffer-live-p editor) (kill-buffer editor))
+        (when (buffer-live-p record) (kill-buffer record))))))
+
 (ert-deftest clutch-test-record-edit-unchanged-numeric-does-not-stage ()
   "Submitting an unchanged numeric Record field should not stage an edit."
   (clutch-test--with-pop-to-buffer-capture edit-buf
@@ -2586,6 +2658,7 @@ Point left behind made the next cell command scroll back to it."
           (clutch-record-mode)
           (setq-local clutch-record--result-buffer result-buf
                       clutch-record--row-idx start
+                      clutch-record--row (nth start (or filtered rows))
                       clutch-record--expanded-fields '(0))
           (let ((renders 0))
             (cl-letf (((symbol-function 'clutch-record--render)
@@ -2649,7 +2722,8 @@ Point left behind made the next cell command scroll back to it."
           (with-current-buffer result-buf
             (setq-local clutch--result-column-defs
                         '((:name "payload" :type-category json))
-                        clutch--fk-info nil))
+                        clutch--fk-info nil
+                        clutch--result-rows '(("payload"))))
           (with-temp-buffer
             (insert (propertize "payload"
                                 'clutch-col-idx 0
@@ -2657,6 +2731,9 @@ Point left behind made the next cell command scroll back to it."
                                 'clutch-full-value (make-string 100 ?x)))
             (goto-char (point-min))
             (setq-local clutch-record--result-buffer result-buf
+                        clutch-record--row-idx 0
+                        clutch-record--row
+                        (car (buffer-local-value 'clutch--result-rows result-buf))
                         clutch-record--expanded-fields nil)
             (let (followed
                   (render-count 0))

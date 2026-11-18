@@ -183,11 +183,7 @@
               (edit-first-name (value)
                 (let ((row (car clutch--result-rows)))
                   (clutch-result--apply-edit
-                   0 0 value
-                   (list :identity (clutch-db-row-identity-values
-                                    row clutch--row-identity)
-                         :original (car row)
-                         :original-state (cons nil (car row)))))
+                   0 0 value row (cons nil (car row))))
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t)))
                   (clutch-result-submit))))
@@ -264,11 +260,7 @@ table sits in another schema, or the column is generated."
           (should (equal (mapcar #'car clutch--result-rows) '("alpha")))
           (let ((row (car clutch--result-rows)))
             (clutch-result--apply-edit
-             0 0 "edited"
-             (list :identity (clutch-db-row-identity-values
-                              row clutch--row-identity)
-                   :original (car row)
-                   :original-state (cons nil (car row)))))
+             0 0 "edited" row (cons nil (car row))))
           (cl-letf (((symbol-function 'yes-or-no-p)
                      (lambda (&rest _) t)))
             (clutch-result-submit))
@@ -3034,8 +3026,8 @@ backend refuses the cancel or fails to send it and the page then arrives."
                      "A query is running"
                      (error-message-string
                       (should-error (clutch-result--apply-edit
-                                     0 1 "z" (list :identity [1] :original "a"
-                                                   :original-state (cons nil "a")))
+                                     0 1 "z" (car (clutch--result-display-rows))
+                                     '(nil . "a"))
                                     :type 'user-error))))
             (funcall (cdar finishes) nil '(clutch-db-error "relation does not exist"))
             (ert-run-idle-timers)

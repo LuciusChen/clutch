@@ -663,8 +663,8 @@ field metadata without changing parsed names."
                   (with-current-buffer record-buf
                     (clutch-record-mode)
                     (setq-local clutch-record--result-buffer result-buf
-                                clutch-record--row-idx 0))
-                  (with-current-buffer record-buf
+                                clutch-record--row-idx 0)
+                    (clutch-record--render)
                     (clutch-clone-row-to-insert))
                   (with-current-buffer insert-buf
                     (should (string-match-p "^id[ ]+\\[generated\\]: $"
@@ -840,10 +840,8 @@ redraw."
   (pcase-dolist (`(,label ,stage)
                  `(("edit" ,(lambda ()
                               (clutch-result--apply-edit
-                               0 1 "after"
-                               (list :identity [1]
-                                     :original "before"
-                                     :original-state '(nil . "before")))))
+                               0 1 "after" (car (clutch--result-display-rows))
+                               '(nil . "before"))))
                    ("delete" ,(lambda ()
                                 (clutch--goto-cell 0 0)
                                 (clutch-result-delete-rows)))))
@@ -871,9 +869,7 @@ redraw."
        :row-identity (clutch-test--primary-row-identity "users" '("id") '(0))
        :render t)
     (clutch-result--apply-edit
-     0 1 "beta" (list :identity [2]
-                      :original "beta"
-                      :original-state '(nil . "beta")))
+     0 1 "beta" (car (clutch--result-display-rows)) '(nil . "beta"))
     (should-not clutch--pending-edits)))
 
 (ert-deftest clutch-test-discard-pending-at-point-contract ()
@@ -975,10 +971,7 @@ for deletion."
      (setq-local clutch--pending-inserts '((("id" . "3") ("name" . "c"))))
      (let ((row (car clutch--result-rows)))
        (clutch-result--apply-edit
-        0 1 "a2"
-        (list :identity (clutch-db-row-identity-values row clutch--row-identity)
-              :original (nth 1 row)
-              :original-state (cons nil (nth 1 row)))))
+        0 1 "a2" row (cons nil (nth 1 row))))
      (goto-char (aref clutch--row-start-positions 1))
      (clutch-result-delete-rows)
      ,@body))
@@ -1088,10 +1081,7 @@ the current catalog."
       (let ((here clutch--result-resolution-context)
             (row (car clutch--result-rows)))
         (clutch-result--apply-edit
-         0 1 "x"
-         (list :identity (clutch-db-row-identity-values row clutch--row-identity)
-               :original (nth 1 row)
-               :original-state (cons nil (nth 1 row))))
+         0 1 "x" row (cons nil (nth 1 row)))
         (cl-letf (((symbol-function 'yes-or-no-p) #'always))
           ;; SQLite cannot move; another recorded context leaves the
           ;; result as a move would.
@@ -1901,10 +1891,7 @@ A server-side filter, which wraps the query, keeps that table."
     (let ((rows clutch--result-rows))
       (clutch-result--apply-edit
        0 (cl-position "nick" clutch--result-columns :test #'string=) "A"
-       (list :identity (clutch-db-row-identity-values
-                        (nth 0 rows) clutch--row-identity)
-             :original "a"
-             :original-state (cons nil "a")))
+       (car rows) '(nil . "a"))
       (setq-local clutch--pending-deletes
                   (list (clutch-db-row-identity-values
                          (nth 1 rows) clutch--row-identity))
@@ -1952,10 +1939,7 @@ alias, quoted, qualified or through a CTE."
         (let ((rows clutch--result-rows))
           (clutch-result--apply-edit
            0 (cl-position "name" clutch--result-columns :test #'string=) "a2"
-           (list :identity (clutch-db-row-identity-values
-                            (nth 0 rows) clutch--row-identity)
-                 :original "a"
-                 :original-state (cons nil "a")))
+           (car rows) '(nil . "a"))
           (setq-local clutch--pending-deletes
                       (list (clutch-db-row-identity-values
                              (nth 1 rows) clutch--row-identity))
