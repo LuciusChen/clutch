@@ -404,9 +404,6 @@ PARAMS select the stored manual relations."
 Its columns and foreign keys come from the metadata cache, loaded now
 when missing; the keys that reference it and the relations file are
 read each time."
-  (unless (clutch--connection-alive-p conn)
-    (user-error "Connection closed.  Reconnect from the SQL buffer or REPL"))
-  (clutch--refuse-while-running conn)
   (clutch--await-background-request conn)
   (let* ((table (plist-get entry :name))
          (schema (plist-get entry :schema))
@@ -1018,8 +1015,8 @@ ERROR and CANCELLED describe an unsuccessful load."
                 (run-hook-with-args 'clutch--table-metadata-updated-hook
                                     conn key 'foreign-keys)
                 (clutch-er--show
-                 entry (clutch-er--metadata-model
-                        conn clutch--connection-params entry columns foreign incoming)))
+                 entry :model (clutch-er--metadata-model
+                               conn clutch--connection-params entry columns foreign incoming)))
             (error
              (let ((inhibit-read-only t))
                (erase-buffer)
@@ -1089,15 +1086,19 @@ OMIT-LOADING skips the loading text."
       (clutch--end-query-activity activity))
     started))
 
-(defun clutch-er--show (entry &optional model omit-loading)
+(cl-defun clutch-er--show (entry &key model omit-loading display)
   "Show ENTRY in the current ER buffer, loading asynchronously when supported.
 MODEL, when provided, is ready to render.
-OMIT-LOADING skips the loading text during an asynchronous load."
+OMIT-LOADING skips the loading text during an asynchronous load.
+DISPLAY shows the buffer before drawing its details."
   (unless model
     (unless (clutch--connection-alive-p clutch-connection)
       (user-error "Connection closed.  Reconnect from the SQL buffer or REPL"))
     (clutch--refuse-while-running clutch-connection))
-  (unless (and (not model) (clutch-er--load-async entry omit-loading))
+  (if (and (not model) (clutch-er--load-async entry omit-loading))
+      (when display
+        (pop-to-buffer (current-buffer))
+        (clutch-er--align-arrows))
     (let ((model (or model
                      (clutch--with-object-error-capture
                       (current-buffer) clutch-connection entry "er-diagram"
@@ -1106,6 +1107,7 @@ OMIT-LOADING skips the loading text during an asynchronous load."
       (setq clutch-er--entry entry clutch-er--model model
             clutch-browser-current-object entry)
       (clutch-er--remember-overview)
+      (when display (pop-to-buffer (current-buffer)))
       (clutch-er--render)
       ;; Recenter only when a width/node limit puts the destination outside
       ;; the visible overview.  Ordinary node navigation keeps its layout.
@@ -1179,7 +1181,7 @@ With prefix RECENTER, start the overview at the current table."
      (clutch-er--overview-entry clutch-er--entry clutch-er--model)))
   (clutch--clear-table-metadata-caches clutch-connection
                                        (plist-get clutch-er--entry :name))
-  (clutch-er--show clutch-er--entry nil t))
+  (clutch-er--show clutch-er--entry :omit-loading t))
 
 (defun clutch-er--move-node (direction)
   "Move one overview node in DIRECTION, leaving table details as they are."
@@ -1453,16 +1455,9 @@ Without ENTRY, use the table at point or ask for one."
             (with-current-buffer buffer
               (unless (derived-mode-p 'clutch-er-mode) (clutch-er-mode))
               (clutch--bind-connection-context conn params (plist-get context :product))
-              (clutch-er--show entry))
+              (clutch-er--show entry :display t))
             (setq shown t)
-            (pop-to-buffer buffer)
-            (with-current-buffer buffer
-              (if clutch-er--model
-                  (progn
-                    (clutch-er--render)
-                    (goto-char (point-min))
-                    (clutch-er-overview))
-                (clutch-er--align-arrows))))
+            (set-buffer buffer))
         (unless (or shown existing)
           (kill-buffer buffer))))))
 

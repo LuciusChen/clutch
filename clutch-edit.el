@@ -2097,8 +2097,6 @@ TABLE is a metadata key from `clutch--table-key'."
                    (user-error "Clone row is only available from result or record buffers"))))
          (result-buf (nth 0 source))
          (ridx (nth 1 source)))
-    (unless (buffer-live-p result-buf)
-      (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
       (clutch-edit--require-sql-staged-mutation "Clone row to insert"))
     (let* ((table (with-current-buffer result-buf
