@@ -3460,7 +3460,7 @@ the schema's table."
                         (cidx (cl-position column clutch--result-columns
                                            :test #'string=)))
                     (clutch-result--apply-edit
-                     0 cidx value row (cons nil (nth cidx row))))
+                     0 cidx value row (cons nil (nth cidx row)))
                     (cl-letf (((symbol-function 'yes-or-no-p)
                                (lambda (&rest _) t)))
                       (clutch-result-submit)
