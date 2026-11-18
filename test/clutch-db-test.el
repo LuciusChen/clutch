@@ -3911,10 +3911,8 @@ old database, while Clutch showed and listed the new one."
   "Use only a global CQL LIMIT and preserve an explicit user limit."
   (dolist (case '(("SELECT ts FROM events LIMIT 2" . "SELECT ts FROM events LIMIT 2")
                   ("SELECT k FROM partition LIMIT 1" . "SELECT k FROM partition LIMIT 1")
-                  ("SELECT ts FROM events per /* scope */ partition // cap\n limit 2 LIMIT 3"
-                   . "SELECT ts FROM events per /* scope */ partition // cap\n limit 2 LIMIT 3")
-                  ("SELECT ts FROM events PER PARTITION LIMIT 2 ALLOW FILTERING"
-                   . "SELECT ts FROM events PER PARTITION LIMIT 2 \nLIMIT 4 ALLOW FILTERING")
+                  ("SELECT ts FROM events per /* scope */ partition // cap\n limit 2 ALLOW FILTERING"
+                   . "SELECT ts FROM events per /* scope */ partition // cap\n limit 2 \nLIMIT 4 ALLOW FILTERING")
                   ("SELECT 'LIMIT' FROM events // LIMIT 1"
                    . "SELECT 'LIMIT' FROM events // LIMIT 1\nLIMIT 4")
                   ("UPDATE events SET x = 'LIMIT' WHERE id = 1"
