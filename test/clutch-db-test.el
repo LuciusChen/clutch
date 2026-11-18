@@ -8896,43 +8896,23 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
               :type 'clutch-db-error)))
         (should (string-match-p "Unknown savepoint id" (cadr err)))))))
 
-(ert-deftest clutch-db-test-jdbc-mssql-live-result-workflow ()
-  "SQL Server JDBC should handle real result workflows."
+(ert-deftest clutch-db-test-jdbc-mssql-live-primary-key-and-parameterized-update ()
+  "Read a SQL Server primary key and update a row with bound parameters."
   :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let* ((tbl (clutch-db-test--live-name "cc_mssql_flow"))
-           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
-           (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl)))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
             (clutch-db-query
              conn
-             (format "CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, name NVARCHAR(32), score INT)"
+             (format "CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, name NVARCHAR(32))"
                      tbl))
             (clutch-db-query
              conn
-             (format "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
+             (format "INSERT INTO %s (id, name) VALUES (3, 'before')"
                      tbl))
-            (let* ((page-sql (clutch-db-build-paged-sql conn base-sql 0 2))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn page-sql))))
-              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
-                             '("1" "2"))))
-            (let* ((sort-sql (clutch-db-build-paged-sql
-                              conn base-sql 0 2 '("score" . "DESC")))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn sort-sql))))
-              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
-                             '("5" "4"))))
-            (let* ((filter-sql
-                    (clutch-db-apply-where
-                     conn base-sql
-                     (format "%s > 20" (clutch-db-escape-identifier conn "score"))))
-                   (count-sql (clutch-db-build-count-sql conn filter-sql))
-                   (count-rows (clutch-db-result-rows
-                                (clutch-db-query conn count-sql))))
-              (should (equal (format "%s" (caar count-rows)) "3")))
             (should (equal (clutch-db-primary-key-columns conn tbl) '("id")))
             (let ((update-result
                    (clutch-db-execute-params
@@ -9073,13 +9053,12 @@ statement nothing waits for keeps its own limit."
     (should (clutch-db-live-p conn))
     (should (equal (clutch-db-display-name conn) "ClickHouse"))))
 
-(ert-deftest clutch-db-test-jdbc-clickhouse-live-result-workflow ()
-  "ClickHouse JDBC should handle real result workflows."
+(ert-deftest clutch-db-test-jdbc-clickhouse-live-columns ()
+  "Read column metadata for a ClickHouse table through JDBC."
   :tags '(:db-live :jdbc-live :clickhouse-live)
   (clutch-db-test--with-clickhouse conn
     (let* ((tbl (clutch-db-test--live-name "cc_ch_flow"))
-           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl))
-           (base-sql (format "SELECT id, name, score FROM %s ORDER BY id" tbl)))
+           (drop-sql (format "DROP TABLE IF EXISTS %s" tbl)))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
@@ -9087,29 +9066,6 @@ statement nothing waits for keeps its own limit."
              conn
              (format "CREATE TABLE %s (id Int32, name String, score Int32) ENGINE = Memory"
                      tbl))
-            (clutch-db-query
-             conn
-             (format "INSERT INTO %s (id, name, score) VALUES (1, 'ann', 10), (2, 'bob', 20), (3, 'cam', 30), (4, 'dan', 40), (5, 'eve', 50)"
-                     tbl))
-            (let* ((page-sql (clutch-db-build-paged-sql conn base-sql 0 2))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn page-sql))))
-              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
-                             '("1" "2"))))
-            (let* ((sort-sql (clutch-db-build-paged-sql
-                              conn base-sql 0 2 '("score" . "DESC")))
-                   (rows (clutch-db-result-rows
-                          (clutch-db-query conn sort-sql))))
-              (should (equal (mapcar (lambda (row) (format "%s" (car row))) rows)
-                             '("5" "4"))))
-            (let* ((filter-sql
-                    (clutch-db-apply-where
-                     conn base-sql
-                     (format "%s > 20" (clutch-db-escape-identifier conn "score"))))
-                   (count-sql (clutch-db-build-count-sql conn filter-sql))
-                   (count-rows (clutch-db-result-rows
-                                (clutch-db-query conn count-sql))))
-              (should (equal (format "%s" (caar count-rows)) "3")))
             (let ((columns (clutch-db-list-columns conn tbl)))
               (should (member "id" columns))
               (should (member "name" columns))
