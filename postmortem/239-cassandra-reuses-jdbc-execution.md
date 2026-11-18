@@ -1,0 +1,7 @@
+# Cassandra uses existing JDBC execution and metadata
+
+The ING driver reports keyspaces as JDBC schemas. The table, column and primary-key RPCs work with that scope and the existing isolated metadata session. The driver's foreign-key methods return a shared empty ResultSet that fails on reuse after close, so Cassandra skips foreign-key requests while the generic JDBC code continues to own resource cleanup. The driver also keeps the schema snapshot taken at connection time, so a reconnect is needed after DDL. The driver reports nullable CQL columns as non-nullable, so Clutch uses primary-key membership for CQL nullability.
+
+The ING wrapper calls the native result set's all() before exposing JDBC rows. A small RPC batch alone therefore does not bound data read from Cassandra. Clutch adds a CQL LIMIT of N+1 for SELECT without a global limit and asks the agent for those rows in the existing execute RPC. It preserves the projection, ordering, per-partition limit and any explicit global limit. The extra row distinguishes an exact-size result from a truncated one. It closes a truncated cursor using the existing close-cursor RPC. CQL statement selection keeps batch mutations together so moving point inside a batch cannot run its member as a separate statement.
+
+JDBC key sequence exposes order but loses partition grouping and clustering directions. Table definition reconstruction is deferred until an authoritative source can supply that information.

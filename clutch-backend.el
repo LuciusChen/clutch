@@ -330,9 +330,9 @@ checks this rather than `clutch-db-busy-p' and waits."
 
 ;;;; SQL helpers (literal-or-comment awareness)
 
-(defun clutch-db-sql-strip-leading-comments (sql)
-  "Strip leading SQL comments and whitespace from SQL."
-  (substring sql (clutch-db-sql--skip-blank sql 0)))
+(defun clutch-db-sql-strip-leading-comments (sql &optional dialect)
+  "Strip leading SQL comments and whitespace from SQL using DIALECT."
+  (substring sql (clutch-db-sql--skip-blank sql 0 dialect)))
 
 (defun clutch-db-sql-trim-end (sql)
   "Return SQL without trailing whitespace and its final semicolon.
@@ -425,11 +425,15 @@ match data is left untouched."
         (if-let* ((newline (string-search "\n" sql (+ pos 2))))
             (1+ newline)
           len)))
-     ((eq ch ?/)  ;; Possible /* block comment */.
-      (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?*))
-        (if-let* ((close (string-search "*/" sql (+ pos 2))))
-            (+ close 2)
-          len))))))
+     ((and (eq ch ?/) (< (1+ pos) len))
+      (pcase (aref sql (1+ pos))
+        (?* (if-let* ((close (string-search "*/" sql (+ pos 2))))
+                (+ close 2)
+              len))
+        (?/ (when (plist-get dialect :cql)
+              (if-let* ((newline (string-search "\n" sql (+ pos 2))))
+                  (1+ newline)
+                len))))))))
 
 (defun clutch-db-sql--skip-dollar-quote (sql pos)
   "Return the end of a PostgreSQL dollar-quoted body at POS, or nil.
@@ -642,17 +646,48 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
   "Return zero-based offsets of top-level semicolons in SQL.
 Semicolons inside strings and comments do not count.  DIALECT is a
 `clutch-db-sql-dialect' plist; its rules decide where a literal ends, so a
-semicolon inside one is not a break.  START, when non-nil, is an offset
+semicolon inside one is not a break.  A CQL batch's inner separators
+are skipped.  START, when non-nil, is an offset
 known to be top-level code outside any literal, such as the position just
 past a top-level semicolon; scanning begins there instead of at 0."
-  (let (breaks)
+  (if (plist-get dialect :cql)
+      (clutch-db-sql--cql-statement-breaks sql dialect start)
+    (let (breaks)
+      (clutch-db-sql-scan-code
+       sql (or start 0) nil
+       (lambda (pos _ch depth)
+         (when (zerop depth)
+           (push pos breaks))
+         nil)
+       dialect ";")
+      (nreverse breaks))))
+
+(defun clutch-db-sql--cql-statement-breaks (sql dialect start)
+  "Return CQL statement breaks in SQL using DIALECT, scanning from START.
+The inner semicolons of a batch stay in its statement."
+  (let* ((statement-start (or start 0))
+         (interest (clutch-db-sql-code-match-positions
+                    sql statement-start nil ";\\|\\_<\\(?:BEGIN\\|APPLY\\)\\_>"))
+         batch breaks)
     (clutch-db-sql-scan-code
-     sql (or start 0) nil
-     (lambda (pos _ch depth)
+     sql statement-start nil
+     (lambda (pos ch depth)
        (when (zerop depth)
-         (push pos breaks))
+         (pcase ch
+           (?\; (unless batch
+                  (push pos breaks)
+                  (setq statement-start (1+ pos))))
+           ((or ?B ?b)
+            (when (= pos (clutch-db-sql--skip-blank sql statement-start dialect))
+              (setq batch t)))
+           ((or ?A ?a)
+            (when batch
+              (let* ((token (clutch-db-sql--skip-blank sql (+ pos 5) dialect))
+                     (end (clutch-db-sql--token-end sql token)))
+                (when (and end (eq t (compare-strings sql token end "BATCH" 0 nil t)))
+                  (setq batch nil)))))))
        nil)
-     dialect ";")
+     dialect interest)
     (nreverse breaks)))
 
 (defun clutch-db-sql-statement-effective-offset (text offset)
@@ -897,9 +932,9 @@ Quoted text, comments and nested queries do not contribute clauses."
     (string-match-p (concat "\\`" (regexp-opt keywords) "\\b")
                     (upcase trimmed))))
 
-(defun clutch-db-sql-leading-keyword (sql)
-  "Return the leading SQL keyword for SQL, or nil."
-  (let ((trimmed (clutch-db-sql-strip-leading-comments sql)))
+(defun clutch-db-sql-leading-keyword (sql &optional dialect)
+  "Return the leading keyword for SQL using DIALECT, or nil."
+  (let ((trimmed (clutch-db-sql-strip-leading-comments sql dialect)))
     (when (string-match "\\`\\([[:alpha:]]+\\)" trimmed)
       (upcase (match-string 1 trimmed)))))
 
@@ -922,9 +957,9 @@ statement MAIN, or nil when SQL has none."
         (cons (substring normalized 0 main) (substring normalized main))
       (cons nil normalized))))
 
-(defun clutch-db-sql--skip-blank (sql pos)
+(defun clutch-db-sql--skip-blank (sql pos &optional dialect)
   "Return the first position at or after POS in SQL past blanks.
-Whitespace and comments are blanks."
+Whitespace and comments recognized by DIALECT are blanks."
   (let ((len (length sql))
         next)
     (while (and (< pos len)
@@ -932,7 +967,7 @@ Whitespace and comments are blanks."
                                (1+ pos)
                              (and (memq (aref sql pos) '(?- ?/))
                                   (clutch-db-sql-skip-literal-or-comment
-                                   sql pos)))))
+                                   sql pos nil dialect)))))
       (setq pos next))
     pos))
 

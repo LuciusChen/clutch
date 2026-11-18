@@ -12,7 +12,8 @@ Clutch separates database support by the surface it can honestly expose, not onl
 | Basic document support | Non-relational backend with a read-oriented grid/metadata mapping, but not the SQL row-editing model. | MongoDB via =mongodb= |
 | Basic key/value support | Command-oriented key/value and data-structure backend with key browsing and type-aware value display, but not SQL row editing, joins, or row identity. | Redis via =redis= |
 | SQL Interface surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via =(:backend mongodb :surface sql-interface)= |
-| Unsupported / future contract | Databases that need a different UI and backend contract before clutch should claim support. | Cassandra, Elasticsearch, Couchbase |
+| Basic CQL support | CQL execution and table and column metadata, with a bounded read-only result grid. | Cassandra via JDBC |
+| Unsupported / future contract | Databases that need a different UI and backend contract before clutch should claim support. | Elasticsearch, Couchbase |
 
 * MongoDB Boundary
 

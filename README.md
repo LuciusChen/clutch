@@ -9,7 +9,7 @@
 
 <p align="center"><strong>Query and browse databases—and stage SQL row edits—without leaving Emacs.</strong></p>
 
-Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, and other databases.
+Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, Cassandra, and other databases.
 
 ![Clutch query console with a result grid and XML value viewer](docs/screenshots/clutch-overview.png)
 
@@ -70,6 +70,7 @@ Row editing stays within the [row-editing boundaries](docs/user-guide.md#row-edi
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
 | MongoDB | Basic native document support; optional SQL Interface surface | Native use requires `mongodb.el`; SQL Interface uses `:surface sql-interface` and JDBC |
 | Redis | Basic key/value support | Requires `redis.el`; includes command buffers, bounded key browsing, and type-aware values |
+| Cassandra | Basic CQL support via JDBC | CQL console, bounded read-only results, and table and column browsing |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Backend-specific limits apply to editing, transactions, and dialect behavior |
 
 See [Backend support levels](docs/backend-support.org) for the precise support policy and non-relational boundaries.
@@ -92,7 +93,7 @@ If a configured native backend package is missing, Clutch reports it when connec
 
 `nerd-icons` is optional: without it, Clutch uses text symbols and backend names instead of icons. Its availability is checked once per Emacs session, including when it is missing; restart Emacs after installing it during a running session.
 
-JDBC support ships with Clutch, but its runtime requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.28, which reports ordered foreign-key metadata for ER views and composite-key navigation, while retaining statement warnings, metadata isolation and timeout behavior. On first connection, Clutch can prompt to download the agent and supported drivers; it verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.org) for setup, supported drivers, connection examples, and transaction behavior.
+JDBC support ships with Clutch and requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.29 for Cassandra BLOB conversion and ordered foreign-key metadata for ER views and composite-key navigation. On first connection, Clutch can prompt to download the agent and supported drivers. It verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.org) for setup, supported drivers, connection examples, and transaction behavior.
 
 For source checkouts, add Clutch and each native protocol checkout you use to `load-path`:
 

@@ -3907,6 +3907,19 @@ old database, while Clutch showed and listed the new one."
               '((:name "clutch_live_smoke" :type "TABLE"
                  :schema "default" :source-schema "default")))))))
 
+(ert-deftest clutch-db-test-jdbc-cassandra-preview-preserves-cql-clauses ()
+  "Use only a global CQL LIMIT and preserve an explicit user limit."
+  (dolist (case '(("SELECT ts FROM events LIMIT 2" . "SELECT ts FROM events LIMIT 2")
+                  ("SELECT ts FROM events PER PARTITION LIMIT 2 ALLOW FILTERING"
+                   . "SELECT ts FROM events PER PARTITION LIMIT 2 \nLIMIT 4 ALLOW FILTERING")
+                  ("SELECT 'LIMIT' FROM events // LIMIT 1"
+                   . "SELECT 'LIMIT' FROM events // LIMIT 1\nLIMIT 4")
+                  ("UPDATE events SET x = 'LIMIT' WHERE id = 1"
+                   . "UPDATE events SET x = 'LIMIT' WHERE id = 1")))
+    (ert-info ((car case))
+      (should (equal (clutch-jdbc--cassandra-preview-cql (car case) 4)
+                     (cdr case))))))
+
 (ert-deftest clutch-db-test-jdbc-clickhouse-column-details-omit-catalog ()
   "ClickHouse column metadata should map foreign keys without adding scope."
   (let ((conn (make-clutch-jdbc-conn :conn-id 5
@@ -3985,11 +3998,11 @@ table of the same name in the connection's own scope answered for it."
         (clutch-db-list-columns conn "peo_ple")))
     (should (equal (nreverse scopes)
                    '(("get-primary-keys" "peo_ple" "alt_%\\scope" "other")
-                     ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
+                     ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-primary-keys" "peo_ple" "alt_%\\scope" "other")
-                     ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
+                     ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-foreign-keys" "peo_ple" "alt_%\\scope" "other")
                      ("get-columns" "peo\\_ple" "alt\\_\\%\\\\scope" "other")
                      ("get-columns" "peo\\_ple" "dbo" "app"))))))
@@ -4060,8 +4073,8 @@ connection's own schema.  A driver without schemas reports an empty one."
                              (:table "child" :column "b" :ref-column "other"
                                      :schema "side_1" :constraint "fk"))))
             (should (equal (nreverse calls)
-                           '("get-primary-keys" "get-foreign-keys"
-                             "get-columns" "get-referencing-keys")))))))))
+                           '("get-primary-keys" "get-columns"
+                             "get-foreign-keys" "get-referencing-keys")))))))))
 
 ;;;; Unit tests — clutch-db-complete-tables (Oracle)
 

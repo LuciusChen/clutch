@@ -16,6 +16,7 @@ For the wire protocol, RPC inventory, runtime session model, and startup/error s
 | =snowflake=    | Snowflake             | Basic SQL     | Maven Central       | —            |
 | =clickhouse=   | ClickHouse            | Basic SQL     | Maven Central       | 8123         |
 | =mongodb= + =:surface sql-interface= | MongoDB SQL Interface | SQL Interface surface | Maven Central | 27017 |
+| =cassandra=    | Apache Cassandra      | Basic CQL     | Manual download     | 9042         |
 | =db2=          | IBM DB2               | Basic SQL     | Manual download     | 50000        |
 
 DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases can be used through the generic =jdbc= backend by passing =:url "jdbc:xxx://..."= and =:driver-class "..."= directly, then placing the driver jar in the drivers directory.  Use =:display-name= if you want the UI to show a friendly backend label instead of plain =JDBC=.
@@ -26,7 +27,7 @@ Support levels are defined in [[file:backend-support.org][docs/backend-support.o
 
 ** Setup
 
-On first =clutch-connect= to a JDBC backend, clutch loads =clutch-db-jdbc.el= automatically and then prompts to download the published agent jar and the required driver jar. Just answer =y= at each prompt — no manual setup commands needed.
+On first =clutch-connect= to a JDBC backend, clutch loads =clutch-db-jdbc.el= automatically and then prompts to download the published agent jar and any required drivers available from Maven Central. Cassandra and DB2 drivers are installed manually.
 
 If you prefer to pre-install everything up front:
 
@@ -61,6 +62,21 @@ Oracle installs now also pull =orai18n.jar= automatically, which is required for
 Oracle installs also keep the active JDBC line unambiguous: =clutch-jdbc-install-driver 'oracle= enables =ojdbc8.jar= and disables =ojdbc11.jar= by removing it if present; =clutch-jdbc-install-driver 'oracle-11= does the inverse.  This avoids loading both Oracle driver lines at once.
 
 SQL Server installs use Microsoft's classifier-based Maven artifacts (for example =mssql-jdbc-13.4.0.jre11.jar=) and normalize the local filename to =mssql-jdbc.jar=.  If you manage the driver manually, use the JRE-classified artifact from Maven Central rather than a nonexistent plain =mssql-jdbc-<version>.jar= path.
+
+** Cassandra
+
+Download =cassandra-jdbc-wrapper-5.0.5-bundle.jar= from the [[https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5][ING JDBC wrapper release]] and place it in the JDBC drivers directory. Use the bundle, which contains the driver's dependencies. Cassandra BLOB results require agent 0.2.29 or later. Create a saved connection such as:
+
+#+begin_src emacs-lisp
+("cassandra-local" . (:backend cassandra
+                     :url "jdbc:cassandra://127.0.0.1:9042/my_keyspace?localdatacenter=datacenter1"))
+#+end_src
+
+Choose the initial keyspace in the URL and use qualified =keyspace.table= names to query other keyspaces. The connection profile owns the current keyspace. Console =USE= and interactive keyspace switching are unavailable.
+
+Clutch sends handwritten CQL mutations as written. For a =SELECT= without a global =LIMIT=, it adds a CQL limit one row beyond the grid bound, before any =ALLOW FILTERING=. The JDBC wrapper otherwise materializes the server result in the JVM. An explicit global =LIMIT= stays in the statement and controls how many rows the driver can receive. A result grid shows at most =clutch-jdbc-fetch-size= rows (500 by default, or 9999 at its maximum setting to leave room for one lookahead row). For longer results it closes the JDBC cursor after the preview and displays a truncation notice. Grid sorting, filtering and delimited export operate on the displayed rows. Full-query export, server-side grid pagination, staged editing and SQL transaction controls are unavailable. You can execute handwritten CQL mutations, though the driver does not provide a meaningful affected-row count.
+
+Object browsing exposes tables, columns and primary-key membership. The ING driver takes a schema snapshot at connect time. Reconnect after DDL to see structural changes in the object browser and completion. Table DDL reconstruction is unavailable because a JDBC primary-key list does not preserve partition-key grouping or clustering order.
 
 ** Agent Launch Options
 

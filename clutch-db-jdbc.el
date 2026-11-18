@@ -55,13 +55,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.28"
+(defcustom clutch-jdbc-agent-version "0.2.29"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "0ab869021e85957b89dbb3f4fbd119d7da0e2e84bdca087ec92869cbc4124d29"
+  "7e1f8a480468e1af4ca0889e086facb8e48744873fc2784f67fee5fbd6b02260"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -156,6 +156,9 @@ A stuck disconnect should not block the user or kill the agent.")
                    :filename "clickhouse-jdbc.jar"
                    :class "com.clickhouse.jdbc.ClickHouseDriver"
                    :companions (slf4j-api slf4j-nop)))
+    (cassandra . (:manual "https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5"
+                  :filename "cassandra-jdbc-wrapper-5.0.5-bundle.jar"
+                  :class "com.ing.data.cassandra.jdbc.CassandraDriver"))
     (duckdb     . (:maven "org.duckdb:duckdb_jdbc:1.5.3.0"
                   :filename "duckdb_jdbc.jar"
                   :class "org.duckdb.DuckDBDriver"))
@@ -169,7 +172,7 @@ A stuck disconnect should not block the user or kill the agent.")
                    :filename "slf4j-nop.jar"
                    :internal t)))
   "Known JDBC driver sources.
-All entries support auto-download via `clutch-jdbc-install-driver'.")
+Entries without Maven coordinates require manual installation.")
 
 (defconst clutch-jdbc--driver-metadata
   '((jdbc       . (:display-name "JDBC"
@@ -211,6 +214,12 @@ All entries support auto-download via `clutch-jdbc-install-driver'.")
                   :update-default t
                   :sql-product postgres
                   :sql-dialect (:backslash-escapes t :dollar-quotes t)))
+    (cassandra . (:display-name "Cassandra"
+                  :default-port 9042
+                  :support-level basic
+                  :data-model wide-column
+                  :sql-dialect (:cql t)
+                  :manual-choice nil))
     (clickhouse . (:display-name "ClickHouse"
                   :default-port 8123
                   :support-level basic
@@ -914,6 +923,10 @@ property even when the URL includes a default auth database."
                 (list "Ordinary MongoDB uses the native mongodb backend; JDBC is only for :surface sql-interface"))))
      ((and (eq driver 'jdbc)
            (stringp url)
+           (string-prefix-p "jdbc:cassandra://" url))
+      'cassandra)
+     ((and (eq driver 'jdbc)
+           (stringp url)
            (string-prefix-p "jdbc:oracle:" url t))
       (signal 'clutch-db-error
               (list "Oracle JDBC URLs require :backend oracle, not :backend jdbc")))
@@ -930,7 +943,8 @@ property even when the URL includes a default auth database."
 
 (defun clutch-jdbc--manual-commit-capable-p (driver params)
   "Return non-nil when DRIVER/PARAMS can expose JDBC transaction controls."
-  (not (clutch-jdbc--mongodb-driver-p driver params)))
+  (not (or (eq driver 'cassandra)
+           (clutch-jdbc--mongodb-driver-p driver params))))
 
 (defun clutch-jdbc--manual-commit-mode (driver params)
   "Return non-nil when DRIVER with PARAMS should use manual-commit mode.
@@ -940,7 +954,9 @@ non-nil.  Any driver opts in explicitly via `:manual-commit t' in PARAMS."
    ((not (clutch-jdbc--manual-commit-capable-p driver params))
     (when (plist-get params :manual-commit)
       (signal 'clutch-db-error
-              (list "MongoDB JDBC does not support Clutch manual-commit controls")))
+              (list (if (eq driver 'cassandra)
+                        "Cassandra JDBC does not support Clutch manual-commit controls"
+                      "MongoDB JDBC does not support Clutch manual-commit controls"))))
     nil)
    ((plist-member params :manual-commit)
     (plist-get params :manual-commit))
@@ -999,6 +1015,10 @@ Returns a `clutch-jdbc-conn'."
                    (>= clutch-jdbc-validate-after-idle-seconds 0)))
     (user-error
      "JDBC idle validation interval must be nil or a non-negative integer"))
+  (when (eq driver 'cassandra)
+    (let ((url (plist-get params :url)))
+      (unless (and (stringp url) (string-prefix-p "jdbc:cassandra://" url))
+        (user-error "Cassandra requires a :url starting with jdbc:cassandra://"))))
   (clutch-jdbc--setup-prerequisites driver)
   (clutch-jdbc--ensure-agent)
   (let* ((normalized-params (clutch-jdbc--apply-timeout-defaults params))
@@ -1165,6 +1185,10 @@ as is, or 0, meaning none, when CONN has no positive limit."
   (let ((url (plist-get (clutch-jdbc-conn-params conn) :url)))
     (and (stringp url)
          (string-prefix-p prefix url))))
+
+(defun clutch-jdbc--cassandra-conn-p (conn)
+  "Return non-nil for a Cassandra JDBC connection CONN."
+  (eq (clutch-jdbc--conn-driver conn) 'cassandra))
 
 (defun clutch-jdbc--duckdb-conn-p (conn)
   "Return non-nil when CONN is a DuckDB JDBC connection."
@@ -1565,25 +1589,76 @@ the `messages' field do not report."
     (let* ((first-rows (plist-get result :rows))
            (cursor-id (plist-get result :cursor-id))
            (done (eq t (plist-get result :done)))
-           (all-rows (if done first-rows
-                       (nconc first-rows
-                              (clutch-jdbc--fetch-all conn cursor-id)))))
+           (preview (and (not done) (clutch-jdbc--cassandra-conn-p conn)))
+           (all-rows (cond
+                      (done first-rows)
+                      (preview (butlast first-rows))
+                      (t (nconc first-rows
+                                (clutch-jdbc--fetch-all conn cursor-id))))))
+      ;; Cassandra result grids show one bounded batch.  Schedule cursor
+      ;; release before returning the grid without waiting on the driver.
+      (when preview
+        (clutch-jdbc--rpc-async
+         "close-cursor" `((cursor-id . ,cursor-id)) #'ignore
+         (lambda (err) (message "Could not close Cassandra cursor: %s" err))
+         nil conn))
       (make-clutch-db-result
        :connection conn
        :columns (clutch-jdbc--make-columns
                  (plist-get result :columns)
                  (plist-get result :col-types))
        :rows (mapcar #'clutch-jdbc--normalize-row all-rows)
-       :messages (plist-get result :messages)))))
+       :messages (if preview
+                     (cons (format "Showing the first %d rows. More rows are available"
+                                   (length all-rows))
+                           (plist-get result :messages))
+                   (plist-get result :messages))))))
+
+(defun clutch-jdbc--cassandra-preview-cql (cql size)
+  "Cap an unbounded SELECT in CQL at SIZE rows."
+  (let ((dialect '(:cql t)))
+    (if (not (equal "SELECT" (clutch-db-sql-leading-keyword cql dialect)))
+        cql
+      (let* ((candidates (clutch-db-sql-code-match-positions
+                          cql 0 nil ";\\|\\_<\\(?:LIMIT\\|PARTITION\\|ALLOW\\)\\_>"))
+             partition-end
+             (boundary
+              (clutch-db-sql-scan-code
+               cql 0 nil
+               (lambda (pos ch depth)
+                 (when (zerop depth)
+                   (pcase (upcase ch)
+                     (?P (setq partition-end (gethash pos candidates)) nil)
+                     (?L (unless (and partition-end
+                                      (= pos (clutch-db-sql--skip-blank
+                                              cql partition-end dialect)))
+                           'limited))
+                     ((or ?A ?\;) pos))))
+               dialect candidates)))
+        (if (eq boundary 'limited)
+            cql
+          (let ((end (or boundary (length cql))))
+            (concat (substring cql 0 end) (format "\nLIMIT %d" size)
+                    (when boundary (concat " " (substring cql end))))))))))
 
 (defun clutch-jdbc--execute-params (conn payload &optional async)
   "Return agent parameters that run PAYLOAD on CONN.
 ASYNC non-nil marks a request that nothing waits for."
-  (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-          payload
-          `((fetch-size . ,(clutch-jdbc--effective-fetch-size))
-            (query-timeout-seconds
-             . ,(clutch-jdbc--conn-query-timeout conn async)))))
+  (let ((size (clutch-jdbc--effective-fetch-size)))
+    (when (clutch-jdbc--cassandra-conn-p conn)
+      (let ((cql (alist-get 'sql payload)))
+        (when (equal "USE" (clutch-db-sql-leading-keyword cql '(:cql t)))
+          (signal 'clutch-db-error
+                  '("Select the Cassandra keyspace in the JDBC URL or qualify the table name")))
+        (setq size (min (1+ size) clutch-jdbc--max-fetch-size)
+              payload (copy-alist payload))
+        ;; The driver materializes the server result before JDBC next().
+        (setf (alist-get 'sql payload) (clutch-jdbc--cassandra-preview-cql cql size))))
+    (append `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
+            payload
+            `((fetch-size . ,size)
+              (query-timeout-seconds
+               . ,(clutch-jdbc--conn-query-timeout conn async))))))
 
 (defun clutch-jdbc--execute-rpc (conn op payload)
   "Execute JDBC RPC OP with PAYLOAD on CONN and return a database result."
@@ -1673,6 +1748,11 @@ still arrive."
               (clutch-jdbc--use-oracle-schema conn schema))))
       (clutch-db-error
        (message "Could not follow the current schema: %s" (cadr err))))))
+
+(cl-defmethod clutch-db-query-result-context ((conn clutch-jdbc-conn) sql)
+  "Return read-only result context for SQL on Cassandra CONN."
+  (when (clutch-jdbc--cassandra-conn-p conn)
+    (list :row-identity-prep (list :sql sql) :server-pageable nil)))
 
 (cl-defmethod clutch-db-query ((conn clutch-jdbc-conn) sql)
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
@@ -1831,10 +1911,12 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
 
 (cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
   "Return how JDBC CONN's database folds unquoted names, or nil.
-Oracle, Snowflake and DB2 fold them to upper case, and a PostgreSQL URL
-to lower case."
+Oracle, Snowflake and DB2 fold them to upper case.  Cassandra and
+PostgreSQL fold them to lower case."
   (cond ((memq (clutch-jdbc--conn-driver conn) '(oracle snowflake db2)) 'upper)
-        ((clutch-jdbc--url-prefix-p conn "jdbc:postgresql:") 'lower)))
+        ((or (clutch-jdbc--cassandra-conn-p conn)
+             (clutch-jdbc--url-prefix-p conn "jdbc:postgresql:"))
+         'lower)))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.
@@ -1928,7 +2010,9 @@ Oracle uses the username as schema (uppercased).  Other backends return nil."
 (defun clutch-jdbc--conn-schema (conn)
   "Return the effective schema for CONN: explicit :schema or the Oracle default."
   (or (plist-get (clutch-jdbc-conn-params conn) :schema)
-      (clutch-jdbc--default-schema conn)))
+      (if (clutch-jdbc--cassandra-conn-p conn)
+          (clutch-db-database conn)
+        (clutch-jdbc--default-schema conn))))
 
 (defun clutch-jdbc--conn-catalog (conn)
   "Return the effective catalog for CONN, or nil when unused.
@@ -1939,9 +2023,10 @@ ClickHouse maps its current database to JDBC catalog, not schema."
 
 (defun clutch-jdbc--metadata-scope-params (conn)
   "Return optional JDBC metadata scope params for CONN.
-ClickHouse omits catalog because its JDBC metadata filter drops rows
-when a catalog is supplied."
-  (let ((catalog (unless (clutch-jdbc--clickhouse-conn-p conn)
+ClickHouse's driver drops rows when a catalog is supplied.
+Cassandra filters by keyspace, which its driver reports as a schema."
+  (let ((catalog (unless (or (clutch-jdbc--clickhouse-conn-p conn)
+                             (clutch-jdbc--cassandra-conn-p conn))
                    (clutch-jdbc--conn-catalog conn)))
         (schema (clutch-jdbc--conn-schema conn)))
     (append (when catalog `((catalog . ,catalog)))
@@ -2390,10 +2475,11 @@ the metadata request."
   "Build the JDBC column metadata requests for TABLE on CONN.
 SCHEMA and CATALOG qualify the table."
   (let ((params (clutch-jdbc--table-metadata-params conn table schema catalog)))
-    (list (cons "get-primary-keys" params)
-          (cons "get-foreign-keys" params)
-          (cons "get-columns"
-                (clutch-jdbc--table-metadata-params conn table schema catalog t)))))
+    (append (list (cons "get-primary-keys" params)
+                  (cons "get-columns"
+                        (clutch-jdbc--table-metadata-params conn table schema catalog t)))
+            (unless (clutch-jdbc--cassandra-conn-p conn)
+              (list (cons "get-foreign-keys" params))))))
 
 (defun clutch-jdbc--send-metadata (conn request callback)
   "Send metadata REQUEST on CONN, reporting result and error to CALLBACK."
@@ -2403,20 +2489,24 @@ SCHEMA and CATALOG qualify the table."
    (lambda (error) (funcall callback nil (list 'clutch-db-error error)))
    nil conn))
 
-(defun clutch-jdbc--column-details-from-results (results)
-  "Decode JDBC column metadata RESULTS, including primary and foreign keys."
+(defun clutch-jdbc--column-details-from-results (conn results)
+  "Decode CONN's JDBC column metadata RESULTS, including keys."
   (let ((primary (plist-get (nth 0 results) :primary-keys))
-        (foreign (clutch-jdbc--foreign-keys-from-result (nth 1 results))))
+        (foreign (clutch-jdbc--foreign-keys-from-result (nth 2 results)))
+        (cassandra (clutch-jdbc--cassandra-conn-p conn)))
     (mapcar
      (lambda (col)
-       (let ((name (plist-get col :name)))
+       (let* ((name (plist-get col :name))
+              (primary-p (and (member name primary) t)))
          (list :name name :type (plist-get col :type)
                :backend-type (plist-get col :backend-type)
-               :nullable (clutch-jdbc--json-bool (plist-get col :nullable))
-               :primary-key (and (member name primary) t)
+               ;; The Cassandra wrapper reports even null cells as non-nullable.
+               :nullable (if cassandra (not primary-p)
+                           (clutch-jdbc--json-bool (plist-get col :nullable)))
+               :primary-key primary-p
                :foreign-key (cdr (assoc name foreign))
                :comment nil :default (plist-get col :default))))
-     (clutch-jdbc--normalize-column-details (plist-get (nth 2 results) :columns)))))
+     (clutch-jdbc--normalize-column-details (plist-get (nth 1 results) :columns)))))
 
 (cl-defmethod clutch-db-column-details-async ((conn clutch-jdbc-conn) table callback
                                               &optional errback schema catalog)
@@ -2424,7 +2514,7 @@ SCHEMA and CATALOG qualify the table."
   (clutch-db--metadata-request-series
    (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
    (clutch-jdbc--column-detail-requests conn table schema catalog)
-   #'clutch-jdbc--column-details-from-results
+   (lambda (results) (clutch-jdbc--column-details-from-results conn results))
    (clutch-db--metadata-outcome callback errback) nil)
   t)
 
@@ -2463,15 +2553,15 @@ schemas reports an empty one, which is left out."
 (cl-defmethod clutch-db-foreign-keys-async ((conn clutch-jdbc-conn) table callback
                                             &optional errback schema catalog)
   "Fetch foreign-key info for TABLE on JDBC CONN asynchronously."
-  (clutch-jdbc--rpc-async
-   "get-foreign-keys"
-   (clutch-jdbc--table-metadata-params conn table schema catalog)
-   (lambda (result)
-     (when callback
-       (funcall callback (clutch-jdbc--foreign-keys-from-result result))))
-   errback
-   nil
-   conn)
+  (if (clutch-jdbc--cassandra-conn-p conn)
+      (when callback (funcall callback nil))
+    (clutch-jdbc--rpc-async
+     "get-foreign-keys"
+     (clutch-jdbc--table-metadata-params conn table schema catalog)
+     (lambda (result)
+       (when callback
+         (funcall callback (clutch-jdbc--foreign-keys-from-result result))))
+     errback nil conn))
   t)
 
 (cl-defmethod clutch-db-list-columns ((conn clutch-jdbc-conn) table)
@@ -2608,6 +2698,7 @@ schemas reports an empty one, which is left out."
   (let ((type (upcase (or (plist-get entry :type) "")))
         (name (plist-get entry :name)))
     (pcase type
+      ((guard (clutch-jdbc--cassandra-conn-p conn)) nil)
       ((or "PROCEDURE" "FUNCTION" "TRIGGER")
        (let ((result (clutch-jdbc--rpc
                       conn "get-object-source"
@@ -2788,16 +2879,16 @@ Only PostgreSQL and MySQL URLs have plans."
 (cl-defmethod clutch-db-foreign-keys ((conn clutch-jdbc-conn) table
                                       &optional schema catalog)
   "Return foreign key info for TABLE on JDBC CONN."
-  (let* ((result (clutch-jdbc--rpc
-                  conn "get-foreign-keys"
-                  (clutch-jdbc--table-metadata-params
-                   conn table schema catalog))))
-    (clutch-jdbc--foreign-keys-from-result result)))
+  (unless (clutch-jdbc--cassandra-conn-p conn)
+    (clutch-jdbc--foreign-keys-from-result
+     (clutch-jdbc--rpc conn "get-foreign-keys"
+                       (clutch-jdbc--table-metadata-params conn table schema catalog)))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-jdbc-conn) table
                                         &optional schema catalog)
   "Return detailed column info for TABLE on JDBC CONN."
   (clutch-jdbc--column-details-from-results
+   conn
    (mapcar (lambda (request)
              (clutch-jdbc--rpc conn (car request) (cdr request)))
            (clutch-jdbc--column-detail-requests conn table schema catalog))))
@@ -2825,9 +2916,10 @@ Only PostgreSQL and MySQL URLs have plans."
                                           &optional schema catalog)
   "Read incoming keys of TABLE on JDBC CONN."
   (clutch-jdbc--require-er-metadata)
-  (clutch-jdbc--referencing-keys-from-result
-   (clutch-jdbc--rpc conn "get-referencing-keys"
-                     (clutch-jdbc--table-metadata-params conn table schema catalog))))
+  (unless (clutch-jdbc--cassandra-conn-p conn)
+    (clutch-jdbc--referencing-keys-from-result
+     (clutch-jdbc--rpc conn "get-referencing-keys"
+                       (clutch-jdbc--table-metadata-params conn table schema catalog)))))
 
 (cl-defmethod clutch-db-referencing-keys-async
   ((conn clutch-jdbc-conn) table callback &optional errback schema catalog continue)
@@ -2835,8 +2927,9 @@ Only PostgreSQL and MySQL URLs have plans."
   (clutch-jdbc--require-er-metadata)
   (clutch-db--metadata-request-series
    (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
-   (list (cons "get-referencing-keys"
-               (clutch-jdbc--table-metadata-params conn table schema catalog)))
+   (unless (clutch-jdbc--cassandra-conn-p conn)
+     (list (cons "get-referencing-keys"
+                 (clutch-jdbc--table-metadata-params conn table schema catalog))))
    (lambda (results) (clutch-jdbc--referencing-keys-from-result (car results)))
    (clutch-db--metadata-outcome callback errback) continue)
   t)
@@ -2848,11 +2941,12 @@ Only PostgreSQL and MySQL URLs have plans."
   (clutch-db--metadata-request-series
    (lambda (request outcome) (clutch-jdbc--send-metadata conn request outcome))
    (append (clutch-jdbc--column-detail-requests conn table schema catalog)
-           (list (cons "get-referencing-keys"
-                       (clutch-jdbc--table-metadata-params conn table schema catalog))))
+           (unless (clutch-jdbc--cassandra-conn-p conn)
+             (list (cons "get-referencing-keys"
+                         (clutch-jdbc--table-metadata-params conn table schema catalog)))))
    (lambda (results)
-     (list :columns (clutch-jdbc--column-details-from-results results)
-           :foreign-keys (clutch-jdbc--foreign-keys-from-result (nth 1 results))
+     (list :columns (clutch-jdbc--column-details-from-results conn results)
+           :foreign-keys (clutch-jdbc--foreign-keys-from-result (nth 2 results))
            :referencing-keys (clutch-jdbc--referencing-keys-from-result (nth 3 results))))
    (clutch-db--metadata-outcome callback errback) continue)
   t)

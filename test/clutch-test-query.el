@@ -1644,6 +1644,18 @@ the filter wraps the base query, not the last query run."
         (should (equal captured
                        "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
 
+(ert-deftest clutch-test-cassandra-dwim-keeps-a-whole-batch ()
+  "Point inside a batch must select the batch, even without a final semicolon."
+  (let ((batch "BEGIN BATCH\nINSERT INTO t (id) VALUES (1);\n\nINSERT INTO t (id) VALUES (2)\nAPPLY BATCH"))
+    (dolist (suffix '("" ";\nSELECT * FROM t;"))
+      (with-temp-buffer
+        (clutch-mode)
+        (setq-local clutch-connection (make-clutch-jdbc-conn :driver 'cassandra))
+        (insert batch suffix)
+        (search-backward "INSERT")
+        (pcase-let ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
+          (should (equal (buffer-substring-no-properties beg end) batch)))))))
+
 (ert-deftest clutch-test-statement-bounds-leave-trailing-comments-behind ()
   "Point on a statement or on its trailing comment picks that statement.
 The previous line's comment used to lead the next statement, so the flash
