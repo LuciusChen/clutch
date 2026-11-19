@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
+
 ### Fixed
+
+- Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
 

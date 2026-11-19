@@ -3618,11 +3618,15 @@ once the saved connection was renamed, which then renames the console."
         (let* ((dir (make-temp-file "clutch-console-" t))
                (clutch-console-directory (expand-file-name "consoles" dir))
                (params (list :backend 'sqlite
+                             :sql-product 'sqlite
                              :database (expand-file-name "prod.db" dir)))
                (storage-name (clutch--console-persistence-name "alpha" params))
                (conn (clutch-db-sqlite-connect params))
                (existing (generate-new-buffer " *clutch-query-console-existing*"))
-               (clutch-connection-alist `((,alias . ,params))))
+               (saved-params (if by-storage
+                                 params
+                               (plist-put (copy-sequence params) :sql-product 'postgres)))
+               (clutch-connection-alist `((,alias . ,saved-params))))
           (unwind-protect
               (progn
                 (with-current-buffer existing
@@ -3631,7 +3635,7 @@ once the saved connection was renamed, which then renames the console."
                               clutch-connection conn)
                   (if by-storage
                       (setq-local clutch--console-storage-name storage-name)
-                    (setq-local clutch--connection-params params)))
+                    (clutch--bind-connection-context conn params 'sqlite)))
                 (clutch-query-console alias)
                 (should (eq (current-buffer) existing))
                 (should (eq clutch-connection conn))
@@ -3640,6 +3644,7 @@ once the saved connection was renamed, which then renames the console."
                 (should (equal (buffer-name existing) (format "*clutch: %s*" alias)))
                 (should (local-variable-p 'sql-product))
                 (should (eq sql-product 'sqlite))
+                (should (eq clutch--conn-sql-product 'sqlite))
                 (should (equal mode-name "clutch")))
             (when (buffer-live-p existing)
               (kill-buffer existing))

@@ -313,7 +313,6 @@
                      clutch-indirect-abort
                      clutch-indirect-execute
                      clutch-mode
-                     clutch-preview-execution-sql
                      clutch-query-console
                      clutch-query-sqlite-file
                      clutch-repl

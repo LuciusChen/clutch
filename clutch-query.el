@@ -96,8 +96,6 @@ not flash.  The flash uses `pulse', so `pulse-flag' and
 (declare-function clutch-result--display-select
                   "clutch-result"
                   (connection sql result elapsed &rest keyword-args))
-(declare-function clutch-result--preview-execution-sql "clutch-result" ())
-(declare-function clutch-result--show-buffer "clutch-result" (buf))
 (declare-function clutch-act-dwim "clutch-object" (&optional entry))
 (declare-function clutch-jump "clutch-object" (&optional entry))
 (declare-function clutch-describe-dwim "clutch-object" (&optional entry))
@@ -126,7 +124,6 @@ When nil, console persistence falls back to `clutch--console-name'.")
   (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
   (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
   (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
-  (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
   (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
   (define-key map (kbd "C-c ?") #'clutch-dispatch)
   (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
@@ -316,7 +313,6 @@ as the automatic reconnect does, rather than with PARAMS."
   (let* ((params (clutch--prepare-connection-origin-params
                   params source-default-directory))
          (ad-hoc-params (and ad-hoc-params params))
-         (product (clutch--effective-sql-product params))
          (storage-name (clutch--console-persistence-name name params))
          (existing (clutch--find-console-buffer name storage-name))
          (existing-conn (and existing
@@ -324,13 +320,12 @@ as the automatic reconnect does, rather than with PARAMS."
     (cond
      ((and existing-conn (clutch--connection-alive-p existing-conn))
       (with-current-buffer existing
-        (clutch--ensure-query-console-major-mode params)
-        (let ((existing-params (or clutch--connection-params params)))
-          (setq-local clutch--console-name name)
-          (setq-local clutch--console-storage-name storage-name)
-          (setq-local clutch--console-ad-hoc-params ad-hoc-params)
-          (clutch--bind-connection-context
-           clutch-connection existing-params product))
+        (setq-local clutch--console-name name)
+        (setq-local clutch--console-storage-name storage-name)
+        (setq-local clutch--console-ad-hoc-params ad-hoc-params)
+        (clutch--bind-connection-context
+         existing-conn (or clutch--connection-params params)
+         clutch--conn-sql-product)
         (clutch--update-console-buffer-name))
       (select-window
        (or (clutch--console-window-for existing) (selected-window)))
@@ -348,7 +343,8 @@ as the automatic reconnect does, rather than with PARAMS."
       (setq-local clutch--console-ad-hoc-params ad-hoc-params)
       (clutch--update-console-buffer-name))
      (t
-      (let* ((conn (clutch--build-conn params))
+      (let* ((product (clutch--effective-sql-product params))
+             (conn (clutch--build-conn params))
              (buf (or existing
                       (generate-new-buffer "*clutch-console*")))
              (is-new (zerop (buffer-size buf))))
@@ -1583,45 +1579,6 @@ when `clutch-pulse-statement-at-point' is non-nil."
     (consp (clutch-db-sql-statement-breaks
             text (clutch--buffer-sql-dialect)))))
 
-(defun clutch--preview-sql-buffer (sql &optional product)
-  "Display SQL in the *clutch-preview* buffer using SQL PRODUCT.
-The selected window keeps its buffer, so the submit key pressed next still
-reaches the result buffer, not `sql-mode' in the preview."
-  (let ((buf (get-buffer-create "*clutch-preview*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (unless (derived-mode-p 'sql-mode)
-          (sql-mode))
-        (when (and product
-                   (not (and (local-variable-p 'sql-product)
-                             (eq sql-product product))))
-          (setq-local sql-product product)
-          (sql-set-product product))
-        (erase-buffer)
-        (insert sql)
-        (goto-char (point-min))
-        (setq buffer-read-only t)))
-    (display-buffer buf)))
-
-;;;###autoload (autoload 'clutch-preview-execution-sql "clutch" nil t)
-(defun clutch-preview-execution-sql ()
-  "Preview the execution payload for the current workflow."
-  (interactive)
-  (let ((sql
-         (cond
-          ((derived-mode-p 'clutch-result-mode)
-           (clutch-result--preview-execution-sql))
-          ((use-region-p)
-           (string-trim (buffer-substring-no-properties
-                         (region-beginning) (region-end))))
-          (t
-           (pcase-let* ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
-             (string-trim (buffer-substring-no-properties beg end)))))))
-    (when (or (null sql) (string-empty-p sql))
-      (user-error "No SQL to preview"))
-    (clutch--preview-sql-buffer
-     sql (or clutch--conn-sql-product sql-product))))
-
 ;;;; Interactive commands
 
 (defun clutch--statement-bounds-at-point ()
@@ -2309,25 +2266,12 @@ Accumulates input until a top-level semicolon ends it, then executes."
 
 ;;;; Query editing major mode
 
-;;;###autoload (autoload 'clutch-show-result "clutch" nil t)
-(defun clutch-show-result ()
-  "Show the existing result buffer for this console's connection.
-It appears where a query shows its result."
-  (interactive)
-  (unless (and clutch-connection
-               (buffer-live-p clutch--last-result-buffer)
-               (eq clutch-connection
-                   (buffer-local-value 'clutch-connection
-                                       clutch--last-result-buffer)))
-    (user-error "No result buffer for this connection"))
-  (clutch-result--show-buffer clutch--last-result-buffer))
-
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
     (clutch--install-query-keybindings map)
     (define-key map (kbd "C-c C-v") 'clutch-er-diagram)
-    (define-key map (kbd "C-c C-z") #'clutch-show-result)
+    (define-key map (kbd "C-c C-z") #'undefined)
     (define-key map (kbd "C-c C-n") #'undefined)
     (define-key map (kbd "C-c TAB") #'clutch-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-complete-qualified-or-indent)
@@ -2340,7 +2284,6 @@ It appears where a query shows its result."
 
 \\<clutch-mode-map>
 Key bindings:
-  \\[clutch-show-result]  Show the current connection's result buffer
   \\[clutch-execute-dwim]       Execute region or statement/query at point
   \\[clutch-execute-region]     Execute region
   \\[clutch-execute-buffer]     Execute buffer
@@ -2350,8 +2293,7 @@ Key bindings:
   \\[clutch-act-dwim]   Object actions
   \\[clutch-switch-schema]      Switch schema/database
   \\[clutch-complete-at-point]  Complete SQL identifier at point
-  \\[clutch-complete-qualified-or-indent]       Complete qualified column or indent
-  \\[clutch-preview-execution-sql]      Preview execution"
+  \\[clutch-complete-qualified-or-indent]       Complete qualified column or indent"
   (clutch--query-mode-common-setup)
   (clutch--install-completion-capfs)
   (add-hook 'eldoc-documentation-functions
@@ -2418,7 +2360,6 @@ server nothing."
     ("x" "DWIM" clutch-execute-dwim)
     ("r" "Region" clutch-execute-region)
     ("b" "Buffer" clutch-execute-buffer)
-    ("p" "Preview execution" clutch-preview-execution-sql)
     ("E" "Explain plan" clutch-explain-plan)
     ("e" "Export query to file" clutch-export-query)]]
   [:pad-keys t

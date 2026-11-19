@@ -2066,7 +2066,7 @@ reconnecting."
                   (clutch-test--run-in-console (format "SELECT id, v FROM %s" table))
                   (let ((lost (clutch-test--end-console-session admin)))
                     (dolist (command '(clutch-result-copy-insert
-                                       clutch-preview-execution-sql))
+                                       clutch-result--preview-sql))
                       (ert-info ((format "lost: %s" command))
                         (call-in-result command)
                         (should (eq (buffer-local-value 'clutch-connection
@@ -2079,7 +2079,7 @@ reconnecting."
                                      clutch-result-sort-by-column
                                      clutch-result-apply-filter clutch-result-edit-cell
                                      clutch-result-column-info
-                                     clutch-preview-execution-sql
+                                     clutch-result--preview-sql
                                      clutch-result-copy-insert
                                      clutch-result-copy-update))
                     (ert-info ((format "ended: %s" command))
