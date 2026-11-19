@@ -8696,26 +8696,33 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
   "Oracle JDBC cancel should interrupt the query and keep the session usable."
   :tags '(:db-live :jdbc-live :oracle-live)
   (clutch-db-test--with-oracle conn
-    (let ((request-id
-           (clutch-jdbc--send
-            "execute"
-            `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-              (sql . "SELECT COUNT(*) FROM ALL_OBJECTS a, ALL_OBJECTS b")
-              (fetch-size . ,clutch-jdbc-fetch-size))))
-          cancel-result)
-      (with-timeout
-          (5 (ert-fail "Oracle live execute did not become cancellable"))
-        (while (not (eq t (plist-get cancel-result :cancelled)))
-          (setq cancel-result
-                (clutch-jdbc--rpc
-                 conn "cancel"
-                 `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))
-                 (clutch-jdbc--conn-rpc-timeout conn)))
-          (unless (eq t (plist-get cancel-result :cancelled))
-            (sleep-for 0.05))))
-      (should (eq t (plist-get cancel-result :cancelled)))
-      (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
-        (should (equal (caar (clutch-db-result-rows result)) "42"))))))
+    (clutch-db-test--with-oracle observer
+      (let* ((rows "SELECT LEVEL n FROM DUAL CONNECT BY LEVEL <= 5000")
+             (sql (format "SELECT /* %s */ SUM(MOD(a.n*b.n, 97)) FROM (%s) a CROSS JOIN (%s) b"
+                          (clutch-db-test--live-name "clutch_cancel") rows rows))
+             (running-sql
+              (concat "SELECT 1 FROM v$session s JOIN v$sql q ON q.sql_id = s.sql_id"
+                      " WHERE s.status = 'ACTIVE' AND s.sql_exec_start IS NOT NULL"
+                      " AND q.sql_text = '" sql "'"))
+             outcome)
+        (should (clutch-db-query-async
+                 conn sql (lambda (result error) (setq outcome (list result error)))))
+        ;; Let Oracle enter the statement before testing the driver's cancel.
+        (with-timeout (5 (ert-fail "Oracle did not start the query"))
+          (while (not (clutch-db-result-rows (clutch-db-query observer running-sql)))
+            (should-not outcome)
+            (sleep-for 0.05)))
+        (should (clutch-db-interrupt-query conn))
+        (with-timeout (15 (ert-fail "Oracle did not return a query outcome"))
+          (while (not outcome)
+            (accept-process-output nil 0.05)))
+        (should-not (car outcome))
+        (should (eq (car (cadr outcome)) 'clutch-db-error))
+        (let ((diag (plist-get (clutch-db-error-details conn) :diag)))
+          (should (equal (plist-get diag :category) "cancel"))
+          (should (equal (plist-get diag :vendor-code) 1013)))
+        (let ((result (clutch-db-query conn "SELECT 42 AS answer FROM DUAL")))
+          (should (equal (caar (clutch-db-result-rows result)) "42")))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-live-wire-error-diagnostics ()
   "Oracle wire errors carry request identity, diagnostics and opt-in debug data."
@@ -9674,6 +9681,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (should (clutch-db-interrupt-query conn)))
       (should (equal captured-op "cancel"))
       (should (= (alist-get 'conn-id captured-params) 7))
+      (should (= (alist-get 'request-id captured-params) 41))
       (should-not (gethash conn clutch-jdbc--busy-request-ids))))
   (let ((conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
                                      :params '(:driver jdbc :rpc-timeout 12)))

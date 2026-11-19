@@ -1841,8 +1841,9 @@ still arrive."
     (unless (plist-get (gethash request-id clutch-jdbc--async-callbacks)
                        :handler)
       (remhash conn clutch-jdbc--busy-request-ids))
-    (let* ((id (clutch-jdbc--send "cancel"
-                                  `((conn-id . ,(clutch-jdbc-conn-conn-id conn)))))
+    (let* ((id (clutch-jdbc--send
+                "cancel" `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                           (request-id . ,request-id))))
            (response (clutch-jdbc--recv-response-nonfatal
                       id clutch-jdbc-cancel-timeout-seconds)))
       (when (eq t (plist-get response :ok))
