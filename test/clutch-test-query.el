@@ -2411,6 +2411,22 @@ on, and a statement it started elsewhere keeps its marker."
         (conn-b (make-clutch-test-conn))
         (new-conn (make-clutch-test-conn)))
     (with-temp-buffer
+      (setq-local clutch-connection (make-clutch-test-conn))
+      (clutch-test--with-async-statements finishes
+        (let (outcome)
+          (cl-letf (((symbol-function 'clutch-db-interrupt-query) (lambda (_) t))
+                    ((symbol-function 'clutch--try-reconnect)
+                     (lambda () (setq clutch-connection new-conn))))
+            (clutch--execute-statement "UPDATE items SET n = 1" clutch-connection nil nil
+                                       (lambda (value) (setq outcome value)))
+            (clutch-cancel-query-or-quit)
+            (clutch-db-disconnect clutch-connection)
+            (funcall (cdar finishes) nil
+                     '(clutch-db-execution-not-started "idle validation failed"))
+            (ert-run-idle-timers)
+            (should (= (length finishes) 1))
+            (should (plist-get outcome :cancelled))))))
+    (with-temp-buffer
       (let* ((old (make-clutch-test-conn
                    :queries (list (cons "stale-plan"
                                         (lambda (conn)
