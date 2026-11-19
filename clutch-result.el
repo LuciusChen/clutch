@@ -672,6 +672,7 @@ failure."
                    sql conn (list :error error
                                   :source-buffer buffer
                                   :result-context '(:keep-result-on-error t))))
+                 ((eq cancelled 'confirmed) (message "Query cancelled"))
                  (cancelled (message "Query cancelled (result unchanged)")))))
              ;; After the activity ends, so a query that ON-RESULT starts
              ;; counts its own time.
@@ -3751,7 +3752,7 @@ buffer, or changing its connection, stops the export."
                                :result-context '(:keep-result-on-error t))))
              (settle error))
             (cancelled
-             (stop "Export cancelled"))
+             (stop (if (eq cancelled 'confirmed) "Query cancelled" "Export cancelled")))
             (t
              (let ((rows (clutch-db-result-rows result)))
                (condition-case emit-error

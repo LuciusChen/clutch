@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Oracle Thin uses in-band cancellation so `C-g` works across network routes that drop TCP urgent data. Confirmed cancellations now show `Query cancelled` without recording a problem.
+
 - Clutch pins JDBC agent 0.2.31 so `C-g` can cancel a submitted statement before it starts. Clutch skips automatic retry when cancellation and an idle connection failure coincide.
 
 ## 0.8.0 - 2026-11-18

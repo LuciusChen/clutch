@@ -178,6 +178,7 @@ Pure in-memory URLs and attached catalogs are not listed.  An in-memory database
 
 ** Oracle-specific Notes
 
+- Oracle Thin connections send cancellation in-band by default. Set =:props (("oracle.net.disableOob" . "false"))= to use TCP urgent data.
 - *Oracle driver default*: =clutch-jdbc-install-driver 'oracle= now installs =ojdbc8= by default.  It is the safest choice across Oracle 11g/12c/19c and avoids the known 11g LOB compatibility problems seen with =ojdbc11=.
 - *Oracle 11g*: keep using =ojdbc8=.  If =ojdbc11.jar= is present from an older setup, reinstall with =(clutch-jdbc-install-driver 'oracle)= to re-enable =ojdbc8.jar= and remove the conflicting =ojdbc11.jar= copy automatically.
 - *Oracle 19c+ only*: if you specifically want the newer driver line, install it with =(clutch-jdbc-install-driver 'oracle-11)=.

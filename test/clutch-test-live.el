@@ -3334,32 +3334,38 @@ has no active request to cancel.  No cancellation result is mocked."
         (delete-directory dir t)))))
 
 (ert-deftest clutch-test-live-long-statement-runs-in-background-and-cancels ()
-  "A long statement should leave Emacs free and stop when C-g cancels it."
+  "A long statement leaves Emacs free and C-g cancels it without a problem."
   :tags '(:clutch-live)
   (unless (clutch-test-live-backend-capability-p :async-cancel)
     (ert-skip (clutch-test-capability-skip-message :async-cancel)))
   (clutch-test--with-conn conn
-    (let ((sleep-sql (plist-get (clutch-test-live-backend-descriptor)
-                                :sleep-sql))
-          (start (float-time))
-          timer-fired shown)
+    (let* ((sleep-sql (plist-get (clutch-test-live-backend-descriptor) :sleep-sql))
+           (sql (if (eq (clutch-test-live-backend-id) 'mysql)
+                    ;; MySQL SLEEP can return a normal result when interrupted.
+                    (concat "SELECT SUM(MOD(a.ORDINAL_POSITION*b.ORDINAL_POSITION*c.ORDINAL_POSITION,97)) "
+                            "FROM information_schema.columns a CROSS JOIN information_schema.columns b "
+                            "CROSS JOIN information_schema.columns c")
+                  (format sleep-sql 30)))
+           (start (float-time))
+           timer-fired cancelled)
       (with-temp-buffer
         (setq-local clutch-connection conn)
-        (cl-letf (((symbol-function 'clutch--show-execution-error)
-                   (lambda (_buffer _conn _sql err &rest _args)
-                     (setq shown err)
-                     "cancelled")))
-          (clutch--execute (format sleep-sql 30))
-          (should-not shown)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (when (and format-string
+                                (equal (apply #'format format-string args) "Query cancelled"))
+                       (setq cancelled t)))))
+          (clutch--execute sql)
           (should (gethash conn clutch--running-queries))
           (run-at-time 0.2 nil (lambda () (setq timer-fired t)))
           (clutch-test--await (lambda () timer-fired))
           (should (gethash conn clutch--running-queries))
           (clutch-cancel-query-or-quit)
-          (clutch-test--await (lambda () shown))
-          (should (eq (car shown) 'clutch-db-error))
-          (should (< (- (float-time) start) 20))
-          (should-not (gethash conn clutch--running-queries))))
+          (clutch-test--await (lambda () (not (gethash conn clutch--running-queries))))
+          (should cancelled)
+          (should-not clutch--buffer-error-details)
+          (should-not (gethash conn clutch--problem-records-by-conn))
+          (should (< (- (float-time) start) 20))))
       (clutch-db-query conn (format sleep-sql 0))
       (should (clutch-db-live-p conn)))))
 

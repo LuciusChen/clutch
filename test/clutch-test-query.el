@@ -2633,7 +2633,7 @@ running query, a buffer where \\`C-g' runs another command and a query
 already being cancelled get no key."
   (let ((async-conn (make-clutch-test-conn))
         (other-conn (make-clutch-test-conn)))
-    (should (advice-function-member-p #'clutch--cancel-running-query-on-quit
+    (should (advice-function-member-p #'clutch--query-command-error
                                       (default-value 'command-error-function)))
     (with-temp-buffer
       (clutch-mode)
@@ -2641,14 +2641,18 @@ already being cancelled get no key."
       (clutch-test--with-async-statements _finishes
         ;; Only this handler runs, not others on the global value, such as
         ;; Transient's while a menu is open.
-        (let ((command-error-function #'ignore)
-              unread-command-events interrupts)
-          (add-function :after command-error-function
-                        #'clutch--cancel-running-query-on-quit)
+        (let* (reported-caller
+               (command-error-function
+                (lambda (_data _context caller) (setq reported-caller caller)))
+               unread-command-events interrupts)
+          (add-function :around command-error-function #'clutch--query-command-error)
           (cl-letf (((symbol-function 'clutch-db-interrupt-query)
                      (lambda (conn) (push conn interrupts) t)))
             (clutch--run-db-query-async async-conn "SELECT 1" nil #'ignore)
-            (funcall command-error-function '(error "Other") "" nil)
+            (funcall command-error-function '(error "Other") "" 'other-command)
+            (should (eq reported-caller 'other-command))
+            (funcall command-error-function '(clutch-query-interrupted) "" 'clutch--handle-query-quit)
+            (should-not reported-caller)
             (with-temp-buffer
               (funcall command-error-function '(quit) "" nil))
             (with-temp-buffer
@@ -3533,6 +3537,33 @@ its outcome and the next one does not run, even if cancellation fails."
                 (should (member "1 statement executed, then cancelled" messages))
                 (should-not (gethash async-conn clutch--running-queries))
                 (should-not (clutch-db--foreground-busy-p async-conn))))))))))
+
+(ert-deftest clutch-test-confirmed-cancel-is-not-reported-as-a-problem ()
+  "Only a confirmed cancellation is quiet after C-g."
+  (dolist (code '(1013 12592))
+    (with-temp-buffer
+      (clutch-mode)
+      (setq-local clutch-connection (make-clutch-test-conn :backend 'oracle))
+      (clutch-test--with-async-statements finishes
+        (let (messages)
+          (cl-letf (((symbol-function 'clutch-db-interrupt-query) (lambda (_) t))
+                    ((symbol-function 'clutch-result--display-error) #'ignore)
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (clutch--execute "SELECT 1 FROM DUAL")
+            (call-interactively #'clutch-cancel-query-or-quit)
+            (funcall (cdar finishes) nil
+                     `(clutch-db-error ,(format "ORA-%05d" code)
+                       (:backend jdbc :diag (:category "cancel" :vendor-code ,code))))
+            (ert-run-idle-timers)
+            (if (= code 1013)
+                (progn
+                  (should (equal messages '("Query cancelled")))
+                  (should-not clutch--buffer-error-details))
+              (should (string-match-p "ORA-12592"
+                                      (plist-get clutch--buffer-error-details :summary))))
+            (should-not (clutch-db--foreground-busy-p clutch-connection))))))))
 
 (ert-deftest clutch-test-async-batch-releases-its-connection-on-a-quit ()
   "A quit while a batch starts its next statement should end the batch.
