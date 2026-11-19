@@ -1509,7 +1509,7 @@ asks as a plain DELETE does."
       (let (captured)
         (cl-letf (((symbol-function 'clutch--preview-sql-buffer)
                    (lambda (sql &optional _product) (setq captured sql))))
-          (clutch-preview-execution-sql)
+          (clutch-result--preview-sql)
           (should (equal captured
                          (mapconcat #'identity
                                     '("INSERT INTO \"users\" (\"id\", \"name\", \"note\") VALUES ('3', 'cat', 'NULL');"
@@ -1666,21 +1666,8 @@ the filter wraps the base query, not the last query run."
                (should (equal (plist-get (nth 1 captured) :where-filter)
                               "id = 1")))
               ('preview
-               (clutch-preview-execution-sql)
+               (clutch-result--preview-sql)
                (should (equal captured filtered))))))))))
-
-(ert-deftest clutch-test-preview-execution-sql-prefers-semicolon-statement-bounds-in-sql-buffer ()
-  "Preview should mirror DWIM statement bounds for semicolon-delimited SQL buffers."
-  (with-temp-buffer
-    (insert "INSERT INTO demo(note) VALUES (E'first line\n\nthird line');\n\nSELECT 2")
-    (goto-char (point-min))
-    (search-forward "third")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--preview-sql-buffer)
-                 (lambda (sql &optional _product) (setq captured sql))))
-        (clutch-preview-execution-sql)
-        (should (equal captured
-                       "INSERT INTO demo(note) VALUES (E'first line\n\nthird line')"))))))
 
 (ert-deftest clutch-test-cassandra-dwim-keeps-a-whole-batch ()
   "Point inside a batch must select the batch, even without a final semicolon."
@@ -1711,7 +1698,7 @@ covered it and point at the end of that line picked the next statement."
       (should (equal (picked "second") "UPDATE b SET n = 2")))))
 
 (ert-deftest clutch-test-preview-leaves-the-result-buffer-selected ()
-  "\\`C-c C-c' after \\`C-c C-p' should submit from the result buffer.
+  "\\`C-c C-c' after previewing SQL should submit from the result buffer.
 The preview is in `sql-mode', where \\`C-c C-c' sends to an SQL process."
   (clutch-test--with-result-state (:base-query "UPDATE t SET a = 1 WHERE id = 1")
     (let ((result (current-buffer)))
@@ -1720,7 +1707,9 @@ The preview is in `sql-mode', where \\`C-c C-c' sends to an SQL process."
             (delete-other-windows)
             (split-window)
             (switch-to-buffer result)
-            (call-interactively (key-binding (kbd "C-c C-p")))
+            (call-interactively
+             (oref (clutch-test--transient-suffix-for-key 'clutch-result-dispatch "x")
+                   command))
             (should (eq (window-buffer (selected-window)) result))
             (should (eq (key-binding (kbd "C-c C-c")) #'clutch-result-submit))
             (should (get-buffer-window "*clutch-preview*")))

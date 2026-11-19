@@ -2723,14 +2723,16 @@ The password is resolved via `auth-source' before falling back to `read-passwd'.
         (clutch--saved-connection-params choice)
       (clutch--read-manual-connection-params))))
 
-(defun clutch--update-connection-params-for-buffers (conn update-fn)
-  "Apply UPDATE-FN to buffer-local connection params for buffers attached to CONN."
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when (eq clutch-connection conn)
-        (setq-local clutch--connection-params
-                    (funcall update-fn clutch--connection-params))
-        (clutch--update-mode-line)))))
+(defun clutch--remember-connection-namespace (conn)
+  "Record CONN's current namespace in its attached buffers' reconnect params."
+  (let* ((params (car (clutch--connection-context conn)))
+         (updated (and params (clutch-db-update-namespace-params conn params))))
+    (dolist (buf (buffer-list))
+      (when (eq (buffer-local-value 'clutch-connection buf) conn)
+        (with-current-buffer buf
+          (when updated
+            (setq-local clutch--connection-params updated))
+          (clutch--update-mode-line))))))
 
 (defun clutch--shown-namespace ()
   "Return the namespace in the current buffer's mode line."
@@ -2753,10 +2755,7 @@ only reported: the statement or command that ran has finished, and its
 outcome must still arrive."
   (condition-case err
       (progn
-        (clutch--update-connection-params-for-buffers
-         connection
-         (lambda (params)
-           (clutch-db-update-namespace-params connection params)))
+        (clutch--remember-connection-namespace connection)
         (unless (equal (list (clutch-db-current-schema connection)
                              (clutch-db-metadata-scope connection))
                        before)
@@ -2814,11 +2813,7 @@ with SET LOCAL when the transaction ends either way."
                   (progn
                     (clutch-db-set-current-schema conn namespace)
                     (clutch--clear-connection-problem-capture conn)
-                    (clutch--update-connection-params-for-buffers
-                     conn
-                     (lambda (connection-params)
-                       (clutch-db-update-namespace-params
-                        conn connection-params)))
+                    (clutch--remember-connection-namespace conn)
                     (clutch--clear-connection-metadata-caches conn)
                     (clutch--refresh-current-schema t)
                     (message "Current schema/database: %s" namespace))

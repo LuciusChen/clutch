@@ -272,7 +272,7 @@ Key bindings, result-browser workflows, object navigation, Embark integration, t
 Common entry points:
 
 - `C-c C-c` executes the region or statement at point
-- In SQL consoles, `C-c C-z` shows the current connection's existing result buffer; the inherited SQLi-only `C-c C-n` binding is disabled.
+- Switch to an existing result with `C-x o` or `C-x b`.
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
 - Accepted SQL identifiers retain their catalog spelling and use the connection's identifier escaping, including names with spaces or mixed case. Matching uses the name without surrounding quotes; existing identifier quotes are replaced rather than doubled. `clutch-sql-completion-case-style` controls keywords only. Names from derived-query projections retain their original SQL quoting and case-folding semantics.
 - Cross-schema SQL completion loads metadata on demand: type `schema.` after `FROM`, `JOIN` or a comma in a FROM list for tables, or `alias.` for columns from `schema.table alias`. Derived-table aliases complete their SELECT output columns, including renamed columns, `SELECT ALL` star projections and the first branch of set operations. It keeps the current schema unchanged and reuses cached metadata; see the [interactive guide](interactive-client.org) for supported backends and limits.

@@ -438,12 +438,34 @@ Signal `user-error' if the user declines."
       (clutch-result--confirm-discard-pending
        "Discard staged changes and re-run query? " "Execution cancelled"))))
 
-(defun clutch-result--preview-execution-sql ()
-  "Return the SQL that would execute from a result buffer."
+(defun clutch--preview-sql-buffer (sql product)
+  "Display SQL using PRODUCT without selecting the preview window."
+  (let ((buf (get-buffer-create "*clutch-preview*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (unless (derived-mode-p 'sql-mode)
+          (sql-mode))
+        (when (and product
+                   (not (and (local-variable-p 'sql-product)
+                             (eq sql-product product))))
+          (setq-local sql-product product)
+          (sql-set-product product))
+        (erase-buffer)
+        (insert sql)
+        (goto-char (point-min))
+        (setq buffer-read-only t)))
+    (display-buffer buf)))
+
+(defun clutch-result--preview-sql ()
+  "Show the SQL for the current result or its staged batch."
+  (interactive)
   (clutch-result--require-connection)
-  (if (clutch-result--pending-changes-p)
-      (string-trim-right (clutch-result--pending-sql-content))
-    (clutch-result--effective-query)))
+  (let ((sql (if (clutch-result--pending-changes-p)
+                 (string-trim-right (clutch-result--pending-sql-content))
+               (clutch-result--effective-query))))
+    (when (or (null sql) (string-empty-p sql))
+      (user-error "No SQL to preview"))
+    (clutch--preview-sql-buffer sql (or clutch--conn-sql-product sql-product))))
 
 (defun clutch-result--clear-staged-state ()
   "Clear staged mutation state in the current result buffer."
@@ -1022,7 +1044,6 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (define-key map "[" #'clutch-result-scroll-left)
     (define-key map "=" #'clutch-result-widen-column)
     (define-key map "-" #'clutch-result-narrow-column)
-    (define-key map (kbd "C-c C-p") #'clutch-preview-execution-sql)
     (define-key map "f" #'clutch-result-fullscreen-toggle)
     (define-key map (kbd "C-c ?") #'clutch-result-dispatch)
     ;; Cell navigation
@@ -1070,7 +1091,6 @@ Navigate (row):
 Copy:
   \\[clutch-result-copy-dispatch]	Copy… (transient: choose format, -r refine, -h header)
   \\[clutch-result-export]	Export all rows… (transient: -h header, -f file)
-  \\[clutch-preview-execution-sql]	Preview execution
 Inspect:
   \\[clutch-result-view-value]	View current cell once
 Edit:
@@ -4663,7 +4683,7 @@ The connection comes from the cached render state, not from the server."
     ("M->" "Last page"       clutch-result-last-page)]
    ["Query"
     ("g" "Re-execute"        clutch-result-rerun)
-    ("x" "Preview execution" clutch-preview-execution-sql)
+    ("x" "Preview SQL"        clutch-result--preview-sql)
     ("#" "Count total"       clutch-result-count-total
      :if clutch-result--server-rewritable-p)
     ("A" "Aggregate"         clutch-result-aggregate)]
