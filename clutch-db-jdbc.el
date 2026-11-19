@@ -1420,18 +1420,18 @@ This is allowed in the hot path."
                 clutch-jdbc--max-fetch-size))
   clutch-jdbc-fetch-size)
 
+(defun clutch-jdbc--fetch-params (conn cursor-id)
+  "Build fetch parameters for CURSOR-ID on CONN with a bounded timeout."
+  `((cursor-id . ,cursor-id)
+    (fetch-size . ,(clutch-jdbc--effective-fetch-size))
+    (query-timeout-seconds . ,(clutch-jdbc--conn-query-timeout conn))))
+
 (defun clutch-jdbc--fetch-all (conn cursor-id)
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
-  (let ((query-timeout (clutch-jdbc--conn-query-timeout conn))
-        (fetch-size (clutch-jdbc--effective-fetch-size))
+  (let ((params (clutch-jdbc--fetch-params conn cursor-id))
         batches done)
     (while (not done)
-      (let ((result (clutch-jdbc--rpc-on-conn
-                     conn
-                     "fetch"
-                     `((cursor-id  . ,cursor-id)
-                       (fetch-size . ,fetch-size)
-                       (query-timeout-seconds . ,query-timeout)))))
+      (let ((result (clutch-jdbc--rpc-on-conn conn "fetch" params)))
         (push (plist-get result :rows) batches)
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
@@ -2456,27 +2456,39 @@ not issue an additional empty-prefix `search-tables' scan here."
 Call CALLBACK on success or ERRBACK on failure.  When IDLE-DELAY is
 positive, wait for that many seconds of Emacs idle time before starting
 the metadata request."
-  (cl-labels
-      ((start ()
-         (if (clutch-db-live-p conn)
-             (clutch-jdbc--rpc-async
-              "get-tables"
-              `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                ,@(clutch-jdbc--metadata-scope-params conn))
-              (lambda (result)
-                (when callback
-                  (funcall callback
-                           (clutch-jdbc--table-entry-names
-                            (clutch-jdbc--collect-table-entries
-                             conn result)))))
-              errback
-              nil
-              conn)
-           (when errback
-             (funcall errback "Connection closed")))))
-    (if (and idle-delay (> idle-delay 0))
-        (run-with-idle-timer idle-delay nil #'start)
-      (start))
+  (let (batches)
+    (cl-labels
+        ((receive-page (result)
+           (push (plist-get result :rows) batches)
+           (if (eq t (plist-get result :done))
+               (when callback
+                 (funcall callback
+                          (clutch-jdbc--table-entry-names
+                           (mapcar #'clutch-jdbc--table-entry-from-row
+                                   (apply #'nconc (nreverse batches))))))
+             (let ((cursor (plist-get result :cursor-id)))
+               (clutch-jdbc--rpc-async
+                "fetch" (clutch-jdbc--fetch-params conn cursor) #'receive-page
+                (lambda (message)
+                  ;; An RPC timeout can leave the metadata cursor open.
+                  (when (clutch-db-live-p conn)
+                    (ignore-errors
+                      (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor)))))
+                  (if errback (funcall errback message)
+                    (message "%s" message)))
+                nil conn))))
+         (start ()
+           (if (clutch-db-live-p conn)
+               (clutch-jdbc--rpc-async
+                "get-tables"
+                `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                  ,@(clutch-jdbc--metadata-scope-params conn))
+                #'receive-page errback nil conn)
+             (when errback
+               (funcall errback "Connection closed")))))
+      (if (and idle-delay (> idle-delay 0))
+          (run-with-idle-timer idle-delay nil #'start)
+        (start)))
     t))
 
 (defun clutch-jdbc--column-detail-requests (conn table schema catalog)
