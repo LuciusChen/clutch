@@ -52,7 +52,7 @@ For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Deta
 - **Compare table definitions:** use the table's object actions to compare DDL with a saved connection in Ediff. PostgreSQL comparison covers column definitions. [Object workflow](docs/interactive-client.org#compare-table-definitions)
 - **See a table's relations:** navigate a clickable overview, inspect composite foreign keys, and save your own links in a Git-friendly file. [ER guide](docs/interactive-client.org#er-view-clutch-er-mode-key-bindings)
 - **Read a plan:** show a statement's PostgreSQL, MySQL or SQLite plan as a tree, with each step's own share of the cost, or of the measured time under `EXPLAIN ANALYZE`.
-- **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side substring filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations.
+- **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side substring filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations. JDBC fetches export rows in the background.
 - **See connection state where it matters:** keep separate query consoles, reconnect from preserved parameters, and view schema-refresh, transaction, timeout, and diagnostic state in the relevant buffers.
 - **Choose the backend path you need:** use native or pure-Elisp integrations when available, or the Java 17+ [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) for JDBC databases.
 
