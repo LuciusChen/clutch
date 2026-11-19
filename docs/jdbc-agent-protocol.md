@@ -167,7 +167,7 @@ Its success response returns:
 
 An execute stopped at entry by a cancel returns a diagnostic with category `cancel`. A connection validation failure can still be reported before that point, and Clutch does not retry SQL the user asked to cancel. For a running statement, the original response reports the outcome because the driver can accept the interruption request after the SQL has finished. The Elisp side matches replies by id and discards replies to requests it has stopped waiting for.
 
-Clutch normally fetches until the agent replies with `done=true` and closes the cursor. Clutch sends `close-cursor` with the `cursor-id` when it stops at a bounded Cassandra preview or tries to release a schema cursor after a continuation error.
+Clutch normally fetches until the agent replies with `done=true` and closes the cursor. Clutch sends `close-cursor` with the `cursor-id` when it stops at a bounded Cassandra preview or tries to release a cursor after a continuation error.
 
 `execute` accepts:
 
@@ -206,7 +206,7 @@ Clutch converts BLOB results without decoded `text` to an incomplete value previ
 
 - `cursor-id`
 
-For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1 through 10,000 and defaults to 500.  Invalid values are rejected before JDBC work or cursor advancement.
+For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1 through 10,000 and defaults to 500.  Invalid values are rejected before JDBC work or cursor advancement. Clutch keeps the foreground connection busy until all result batches arrive. Each asynchronous foreground `fetch` retains a positive query timeout and a client RPC deadline. A lost fetch reply retires only its own connection.
 
 `query-timeout-seconds` limits the statement through `Statement.setQueryTimeout`, and the agent waits one second longer for the statement and for each batch it fetches before cancelling it itself.  `0` sets no limit: the agent waits until the statement ends, is cancelled, or its connection is force-disconnected.  Omitting the field keeps a 29-second limit for older clients, and a negative value is rejected before JDBC work or cursor advancement.  Agents before 0.2.26 treat `0` like omission.  clutch sends a statement it runs without blocking the configured limit, or `0` without one; a request it waits on always carries a positive timeout: the configured limit when shorter, otherwise its RPC timeout less five seconds, and at least one second.
 

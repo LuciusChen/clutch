@@ -239,7 +239,7 @@ Entries without Maven coordinates require manual installation.")
   conn-id   ; integer handle in the agent's ConnectionManager
   driver    ; internal JDBC driver implementation symbol
   params    ; original connection plist (for metadata)
-  busy)     ; non-nil while a query is running
+  busy)     ; t during execution, or the state of an active foreground fetch
 
 (defun clutch-jdbc--conn-driver (conn)
   "Return the internal JDBC driver implementation for CONN."
@@ -333,14 +333,15 @@ If verification is disabled, return non-nil."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
-(defun clutch-jdbc--clear-async-callbacks (&optional conn)
+(defun clutch-jdbc--clear-async-callbacks (&optional conn foreground-only)
   "Cancel pending asynchronous JDBC callbacks.
-When CONN is non-nil, clear only callbacks for that connection.  Otherwise
-clear every callback.  Foreground requests are told that no response will
-arrive."
+When CONN is non-nil, clear only callbacks for that connection.
+With FOREGROUND-ONLY, let metadata callbacks keep their timeouts.
+Foreground requests are told that no response will arrive."
   (let (entries)
     (maphash (lambda (id entry)
-               (when (or (null conn) (eq conn (plist-get entry :conn)))
+               (when (and (or (null conn) (eq conn (plist-get entry :conn)))
+                          (or (not foreground-only) (plist-get entry :handler)))
                  (when-let* ((timer (plist-get entry :timer)))
                    (cancel-timer timer))
                  (push (cons id entry) entries)))
@@ -350,22 +351,10 @@ arrive."
       (when-let* ((handler (plist-get entry :handler)))
         (run-at-time 0 nil handler nil)))))
 
-(defun clutch-jdbc--abandon-foreground-requests ()
-  "Tell pending foreground requests that no response will arrive.
-Metadata callbacks keep their own timeouts."
-  (let (entries)
-    (maphash (lambda (id entry)
-               (when (plist-get entry :handler)
-                 (push (cons id entry) entries)))
-             clutch-jdbc--async-callbacks)
-    (pcase-dolist (`(,id . ,entry) entries)
-      (remhash id clutch-jdbc--async-callbacks)
-      (run-at-time 0 nil (plist-get entry :handler) nil))))
-
 (defun clutch-jdbc--agent-sentinel (proc _event)
   "Finish foreground requests when agent PROC is no longer running."
   (unless (process-live-p proc)
-    (clutch-jdbc--abandon-foreground-requests)))
+    (clutch-jdbc--clear-async-callbacks nil t)))
 
 (defun clutch-jdbc--clear-request-state ()
   "Clear connections and request bookkeeping owned by the retired agent."
@@ -1436,6 +1425,34 @@ This is allowed in the hot path."
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
 
+(defun clutch-jdbc--collect-cursor-async (conn first send outcome)
+  "Collect FIRST and later cursor batches on CONN, then call OUTCOME.
+SEND submits fetch parameters and calls its reply with (PAGE ERROR).
+On failure, ask the agent to release the cursor and report the original error."
+  (let (batches cursor)
+    (cl-labels
+        ((receive (page error)
+           (cond
+            (error
+             (when (and cursor (clutch-db-live-p conn))
+               (ignore-errors
+                 (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor)))))
+             (funcall outcome nil error))
+            (t
+             (push (plist-get page :rows) batches)
+             (if (eq t (plist-get page :done))
+                 (funcall outcome (apply #'nconc (nreverse batches)) nil)
+               (setq cursor (plist-get page :cursor-id))
+               (when-let* ((failure
+                            (condition-case err
+                                (progn
+                                  (funcall send (clutch-jdbc--fetch-params conn cursor) #'receive)
+                                  nil)
+                              (clutch-db-error err)
+                              (error (list 'clutch-db-error (error-message-string err))))))
+                 (receive nil failure)))))))
+      (receive first nil))))
+
 (defun clutch-jdbc--collect-table-entries (conn result)
   "Return table entry plists from get-tables RESULT on CONN.
 The agent returns cursor-style :rows batches."
@@ -1677,57 +1694,87 @@ ASYNC non-nil marks a request that nothing waits for."
         conn op (clutch-jdbc--execute-params conn payload)))
     (setf (clutch-jdbc-conn-busy conn) nil)))
 
+(defun clutch-jdbc--send-foreground (conn op params outcome)
+  "Send OP with PARAMS on CONN and pass its (RESULT ERROR) to OUTCOME.
+Only fetch requests have a client deadline.  Return the active request id."
+  (clutch-jdbc--require-current-connection conn)
+  (let* ((id (clutch-jdbc--send op params))
+         (fetch (equal op "fetch"))
+         (timer
+          (when fetch
+            (run-at-time
+             (clutch-jdbc--conn-rpc-timeout conn) nil
+             (lambda ()
+               (remhash id clutch-jdbc--async-callbacks)
+               (ignore-errors (clutch-jdbc--release-stuck-connection conn))
+               (funcall outcome nil
+                        '(clutch-db-error "Connection lost — reconnect with C-c C-e")))))))
+    (setf (clutch-jdbc-conn-busy conn) (if fetch 'fetching t))
+    (puthash conn id clutch-jdbc--busy-request-ids)
+    (puthash
+     id
+     (list :conn conn :timer timer
+           :handler
+           (lambda (response)
+             (pcase-let ((`(,result . ,error)
+                          (condition-case err
+                              (cons
+                               (cond
+                                ((eq (clutch-jdbc-conn-busy conn) 'fetch-interrupted)
+                                 (signal 'clutch-db-error
+                                         '("Query interrupted while fetching its rows")))
+                                ((and response (or (not fetch) (clutch-db-live-p conn)))
+                                 (clutch-jdbc--response-result-or-signal conn op response))
+                                (t
+                                 (signal 'clutch-db-error
+                                         (list
+                                          (if (clutch-jdbc--agent-live-p)
+                                              "JDBC request ended without a response; its outcome is unknown"
+                                            (clutch-jdbc--agent-exit-error-message))))))
+                               nil)
+                            (clutch-db-error (cons nil err))
+                            (error (cons nil (list 'clutch-db-error
+                                                   (error-message-string err)))))))
+               (funcall outcome result error))))
+     clutch-jdbc--async-callbacks)
+    id))
+
 (defun clutch-jdbc--execute-rpc-async (conn op payload callback)
   "Start JDBC RPC OP with PAYLOAD on CONN and pass the outcome to CALLBACK.
 CALLBACK receives a database result and nil, or nil and a `clutch-db-error'
-condition, exactly once.  The request has no client timeout, and no
-statement timeout unless CONN sets one; `clutch-db-interrupt-query'
-cancels it."
+condition, exactly once.  The initial request has no client deadline.
+Keep CONN busy through any cursor fetches."
   (setq conn (clutch-jdbc--require-current-connection conn))
-  (let ((id (clutch-jdbc--send op (clutch-jdbc--execute-params conn payload t))))
-    (setf (clutch-jdbc-conn-busy conn) t)
-    (puthash conn id clutch-jdbc--busy-request-ids)
-    (puthash id
-             (list :conn conn
-                   :handler (lambda (response)
-                              (clutch-jdbc--finish-foreground
-                               conn op id response callback)))
-             clutch-jdbc--async-callbacks)
-    nil))
-
-(defun clutch-jdbc--finish-foreground (conn op id response callback)
-  "Finish foreground request ID for OP on CONN, then call CALLBACK.
-RESPONSE is the agent's reply, or nil when no reply will arrive.  Every
-failure reaches CALLBACK as a `clutch-db-error'.  Rows the result still
-owes are fetched first; a quit while fetching them retires CONN, whose
-fetch and cursor are then in an unknown state."
-  (pcase-let ((`(,result . ,error)
-               (condition-case err
-                   ;; Timers run with quitting inhibited; let C-g stop a
-                   ;; long fetch of the remaining rows.
-                   (if-let* ((result
-                              (with-local-quit
-                                (clutch-jdbc--rpc-result
-                                 conn
-                                 (if response
-                                     (clutch-jdbc--response-result-or-signal
-                                      conn op response)
-                                   (signal 'clutch-db-error
-                                           (list
-                                            (if (clutch-jdbc--agent-live-p)
-                                                "JDBC request ended without a response; its outcome is unknown"
-                                              (clutch-jdbc--agent-exit-error-message)))))))))
-                       (cons result nil)
-                     (clutch-jdbc--release-stuck-connection conn)
-                     (cons nil '(clutch-db-error
-                                 "Query interrupted while fetching its rows")))
-                 (clutch-db-error (cons nil err))
-                 (error (cons nil (list 'clutch-db-error
-                                        (error-message-string err)))))))
-    (when (eql (gethash conn clutch-jdbc--busy-request-ids) id)
-      (remhash conn clutch-jdbc--busy-request-ids))
-    (setf (clutch-jdbc-conn-busy conn) nil)
-    (funcall callback result error)))
+  (let (request-id)
+    (cl-labels
+        ((finish (raw error)
+           (let ((result
+                  (unless error
+                    (condition-case err
+                        (clutch-jdbc--rpc-result conn raw)
+                      (clutch-db-error (setq error err) nil)
+                      (error
+                       (setq error (list 'clutch-db-error (error-message-string err)))
+                       nil)))))
+             (when (eql (gethash conn clutch-jdbc--busy-request-ids) request-id)
+               (remhash conn clutch-jdbc--busy-request-ids))
+             (setf (clutch-jdbc-conn-busy conn) nil)
+             (funcall callback result error)))
+         (receive (raw error)
+           (if (and (not error) (plist-get raw :cursor-id)
+                    (not (eq t (plist-get raw :done)))
+                    (not (clutch-jdbc--cassandra-conn-p conn)))
+               (clutch-jdbc--collect-cursor-async
+                conn raw
+                (lambda (params outcome)
+                  (setq request-id (clutch-jdbc--send-foreground conn "fetch" params outcome)))
+                (lambda (rows error)
+                  (finish (plist-put (plist-put raw :rows rows) :done t) error)))
+             (finish raw error))))
+      (setq request-id
+            (clutch-jdbc--send-foreground
+             conn op (clutch-jdbc--execute-params conn payload t) #'receive))))
+  nil)
 
 (defun clutch-jdbc--namespace-statement-p (conn sql)
   "Return non-nil when SQL may move JDBC CONN into another schema.
@@ -1837,24 +1884,30 @@ still arrive."
      (values . ,(mapcar #'clutch-jdbc--wire-param params)))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
-  "Interrupt the active JDBC request on CONN without dropping the session."
-  (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
-    (clutch-jdbc--require-current-connection conn)
-    ;; A foreground asynchronous request still reports the server's verdict;
-    ;; a synchronous one was abandoned by the quit, so nothing waits for its
-    ;; reply.
-    (unless (plist-get (gethash request-id clutch-jdbc--async-callbacks)
-                       :handler)
-      (remhash conn clutch-jdbc--busy-request-ids))
-    (let* ((id (clutch-jdbc--send
-                "cancel" `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                           (request-id . ,request-id))))
-           (response (clutch-jdbc--recv-response-nonfatal
-                      id clutch-jdbc-cancel-timeout-seconds)))
-      (when (eq t (plist-get response :ok))
-        (let ((result (plist-get response :result)))
-          (and (eq t (plist-get result :cancelled))
-               (eql request-id (plist-get result :request-id))))))))
+  "Interrupt the active JDBC request on CONN.
+Retire the connection if a foreground fetch is in progress."
+  (if (eq (clutch-jdbc-conn-busy conn) 'fetching)
+      (progn
+        (setf (clutch-jdbc-conn-busy conn) 'fetch-interrupted)
+        (clutch-jdbc--release-stuck-connection conn)
+        t)
+    (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
+      (clutch-jdbc--require-current-connection conn)
+      ;; A foreground asynchronous request still reports the server's verdict;
+      ;; a synchronous one was abandoned by the quit, so nothing waits for its
+      ;; reply.
+      (unless (plist-get (gethash request-id clutch-jdbc--async-callbacks)
+                         :handler)
+        (remhash conn clutch-jdbc--busy-request-ids))
+      (let* ((id (clutch-jdbc--send
+                  "cancel" `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+                             (request-id . ,request-id))))
+             (response (clutch-jdbc--recv-response-nonfatal
+                        id clutch-jdbc-cancel-timeout-seconds)))
+        (when (eq t (plist-get response :ok))
+          (let ((result (plist-get response :result)))
+            (and (eq t (plist-get result :cancelled))
+                 (eql request-id (plist-get result :request-id)))))))))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL for CONN.
@@ -2190,30 +2243,29 @@ JDBC drivers use backslash-escaped LIKE patterns."
                                       (string-replace "\\" "\\\\" name)))
     name))
 
+(defun clutch-jdbc--table-rows-async (conn scope callback errback)
+  "Read table rows on CONN using SCOPE, delivering CALLBACK or ERRBACK."
+  (clutch-jdbc--rpc-async
+   "get-tables"
+   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+     ,@(clutch-jdbc--metadata-scope-params scope))
+   (lambda (first)
+     (clutch-jdbc--collect-cursor-async
+      conn first
+      (lambda (params outcome)
+        (clutch-jdbc--send-metadata conn (cons "fetch" params) outcome))
+      (clutch-db--metadata-outcome
+       callback (or errback (lambda (text) (message "%s" text))))))
+   errback nil conn))
+
 (cl-defmethod clutch-db-schema-tables-async
     ((conn clutch-jdbc-conn) schema callback &optional errback)
   "Fetch JDBC table names in SCHEMA on CONN asynchronously."
-  (let ((scope (clutch-jdbc--metadata-conn-for-scope
-                conn (clutch-jdbc--literal-metadata-pattern conn schema))))
-    (clutch-jdbc--rpc-async
-     "get-tables"
-     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       ,@(clutch-jdbc--metadata-scope-params scope))
-     (let (batches)
-       (cl-labels
-           ((receive (result)
-              (push (plist-get result :rows) batches)
-              (if (eq t (plist-get result :done))
-                  (funcall callback
-                           (mapcar #'car (apply #'nconc (nreverse batches))))
-                (clutch-jdbc--rpc-async
-                 "fetch"
-                 `((cursor-id . ,(plist-get result :cursor-id))
-                   (fetch-size . ,(clutch-jdbc--effective-fetch-size))
-                   (query-timeout-seconds . ,(clutch-jdbc--conn-query-timeout conn)))
-                 #'receive errback nil conn))))
-         #'receive))
-     errback nil conn))
+  (clutch-jdbc--table-rows-async
+   conn (clutch-jdbc--metadata-conn-for-scope
+         conn (clutch-jdbc--literal-metadata-pattern conn schema))
+   (lambda (rows) (funcall callback (mapcar #'car rows)))
+   errback)
   t)
 
 (cl-defmethod clutch-db-list-schemas ((conn clutch-jdbc-conn))
@@ -2454,42 +2506,24 @@ not issue an additional empty-prefix `search-tables' scan here."
                                               &optional errback idle-delay)
   "Refresh JDBC table names for CONN asynchronously.
 Call CALLBACK on success or ERRBACK on failure.  When IDLE-DELAY is
-positive, wait for that many seconds of Emacs idle time before starting
-the metadata request."
-  (let (batches)
-    (cl-labels
-        ((receive-page (result)
-           (push (plist-get result :rows) batches)
-           (if (eq t (plist-get result :done))
-               (when callback
-                 (funcall callback
-                          (clutch-jdbc--table-entry-names
-                           (mapcar #'clutch-jdbc--table-entry-from-row
-                                   (apply #'nconc (nreverse batches))))))
-             (let ((cursor (plist-get result :cursor-id)))
-               (clutch-jdbc--rpc-async
-                "fetch" (clutch-jdbc--fetch-params conn cursor) #'receive-page
-                (lambda (message)
-                  ;; An RPC timeout can leave the metadata cursor open.
-                  (when (clutch-db-live-p conn)
-                    (ignore-errors
-                      (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor)))))
-                  (if errback (funcall errback message)
-                    (message "%s" message)))
-                nil conn))))
-         (start ()
-           (if (clutch-db-live-p conn)
-               (clutch-jdbc--rpc-async
-                "get-tables"
-                `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                  ,@(clutch-jdbc--metadata-scope-params conn))
-                #'receive-page errback nil conn)
-             (when errback
-               (funcall errback "Connection closed")))))
-      (if (and idle-delay (> idle-delay 0))
-          (run-with-idle-timer idle-delay nil #'start)
-        (start)))
-    t))
+positive, wait for that many seconds of Emacs idle time before starting."
+  (cl-labels
+      ((start ()
+         (if (clutch-db-live-p conn)
+             (clutch-jdbc--table-rows-async
+              conn conn
+              (lambda (rows)
+                (when callback
+                  (funcall callback
+                           (clutch-jdbc--table-entry-names
+                            (mapcar #'clutch-jdbc--table-entry-from-row rows)))))
+              errback)
+           (when errback
+             (funcall errback "Connection closed")))))
+    (if (and idle-delay (> idle-delay 0))
+        (run-with-idle-timer idle-delay nil #'start)
+      (start)))
+  t)
 
 (defun clutch-jdbc--column-detail-requests (conn table schema catalog)
   "Build the JDBC column metadata requests for TABLE on CONN.
