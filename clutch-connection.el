@@ -784,9 +784,10 @@ command.  Otherwise SQL runs synchronously and CALLBACK runs before this
 function returns.
 A third argument to CALLBACK is non-nil when \\[clutch-cancel-query-or-quit]
 asked to cancel SQL.  SQL may still have succeeded, its result arriving
-first, so a caller with more SQL to run stops instead.  SQL that fails
-once CONN is closed under it has an unknown outcome instead, since the
-server may still finish it.
+first, so a caller with more SQL to run stops instead.  A third argument
+of `confirmed' means the backend confirmed cancellation, and both
+RESULT and ERROR are nil.  A failure after CONN is closed has an
+unknown outcome instead, since the server may still finish the SQL.
 START, when non-nil, starts SQL in place of `clutch-db-query-async': it
 is called with the function that takes the outcome and returns non-nil
 once SQL runs.  When START declines, return nil and run nothing; otherwise
@@ -832,12 +833,45 @@ CANCEL, when non-nil, is a zero-argument function used in place of
         (funcall callback result error))
       t))))
 
+(defun clutch--confirmed-query-cancellation-p (conn error)
+  "Return non-nil when ERROR confirms cancel without losing CONN."
+  (let* ((details (nth 2 error))
+         (diag (plist-get details :diag))
+         (backend (clutch-db-backend-key conn))
+         (state (plist-get diag :sql-state)))
+    (and (clutch--connection-alive-p conn)
+         (pcase backend
+           ('pg
+            ;; Statement timeouts use the same SQLSTATE.
+            (and (equal state "57014")
+                 (equal (plist-get (plist-get details :debug) :message)
+                        "canceling statement due to user request")))
+           ('mysql
+            (string-prefix-p "[1317] " (clutch-db--error-message error)))
+           (_
+            ;; The agent's category records the request even on other errors.
+            (and (eq (plist-get details :backend) 'jdbc)
+                 (equal (plist-get diag :category) "cancel")
+                 (not (eq (plist-get diag :connection-invalidated) t))
+                 (or (equal state "HY008")
+                     (equal (plist-get diag :exception-class)
+                            "java.util.concurrent.CancellationException")
+                     (and (eq backend 'oracle)
+                          (eql (plist-get diag :vendor-code) 1013))
+                     (and (eq backend 'clickhouse)
+                          (eql (plist-get diag :vendor-code) 394))
+                     (equal (plist-get diag :raw-message)
+                            "INTERRUPT Error: Interrupted!"))))))))
+
 (defun clutch--finish-db-query (conn sql callback result error)
   "Account for SQL's outcome on CONN, then call CALLBACK with RESULT and ERROR.
-CALLBACK also gets whether cancelling SQL was asked for."
+CALLBACK also gets whether cancellation was requested or confirmed."
   (let ((cancelled (plist-get (gethash conn clutch--running-queries)
                               :cancelling)))
     (remhash conn clutch--running-queries)
+    (when (and cancelled error (clutch--confirmed-query-cancellation-p conn error))
+      (clutch-db-clear-error-details conn)
+      (setq cancelled 'confirmed error nil))
     (when result
       (clutch--clear-connection-problem-capture conn)
       (clutch--record-tx-state-after-query conn sql))
@@ -877,23 +911,25 @@ Even if the backend cannot cancel it, stop subsequent workflow steps."
         ;; Keep it so the reply stops a batch or export from running more SQL.
         (message "The query could not be cancelled; waiting for its result, then stopping")))))
 
-(defun clutch--cancel-running-query-on-quit (data _context _caller)
-  "Deliver DATA, a quit, as \\`C-g' while this buffer's query is running.
+(defun clutch--query-command-error (report data context caller)
+  "Call REPORT for DATA, hiding CALLER for an interrupted query.
+Preserve CONTEXT and deliver a raw quit as \\`C-g' while this buffer runs SQL.
 The key then runs `clutch-cancel-query-or-quit' as a command.  On
 MS-Windows, a \\`C-g' typed while Emacs is busy is not read as a key but
 quits whatever runs next, such as redisplay.  Only a query not already
 being cancelled, in a buffer where \\`C-g' runs that command, gets the
 key, so a quit the command itself raises does not come back."
-  (let ((entry (and clutch-connection
-                    (gethash clutch-connection clutch--running-queries))))
-    (when (and (eq (car-safe data) 'quit)
-               entry
-               (not (plist-get entry :cancelling))
-               (eq (key-binding [?\C-g]) #'clutch-cancel-query-or-quit))
-      (push ?\C-g unread-command-events))))
+  (prog1 (funcall report data context
+                  (unless (eq (car-safe data) 'clutch-query-interrupted) caller))
+    (when (eq (car-safe data) 'quit)
+      (let ((entry (and clutch-connection
+                        (gethash clutch-connection clutch--running-queries))))
+        (when (and entry
+                   (not (plist-get entry :cancelling))
+                   (eq (key-binding [?\C-g]) #'clutch-cancel-query-or-quit))
+          (push ?\C-g unread-command-events))))))
 
-(add-function :after command-error-function
-              #'clutch--cancel-running-query-on-quit)
+(add-function :around command-error-function #'clutch--query-command-error)
 
 (defun clutch--discard-lost-transaction (conn)
   "Record that CONN died before its open transaction was committed."

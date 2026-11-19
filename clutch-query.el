@@ -1232,7 +1232,7 @@ and signal `clutch-query-interrupted'."
                               (release)
                               (let* ((elapsed (- (float-time) start))
                                      (outcome
-                                      (if err
+                                      (if (or err (eq cancelled 'confirmed))
                                           (list :error err
                                                 :cancelled cancelled
                                                 :connection connection
@@ -1404,11 +1404,16 @@ already confirmed SQL."
 Text inserted at either edge stays outside the region."
   (cons (copy-marker beg t) (copy-marker end)))
 
-(defun clutch--present-statement-outcome (sql connection outcome &optional region)
+(cl-defun clutch--present-statement-outcome (sql connection outcome &optional region)
   "Present OUTCOME for SQL on CONNECTION.
 REGION, when non-nil, is the statement's source region; it is marked as
 executed or failed."
   (setq connection (or (plist-get outcome :connection) connection))
+  (when (eq (plist-get outcome :cancelled) 'confirmed)
+    (when region
+      (with-current-buffer (plist-get outcome :source-buffer)
+        (clutch--clear-executed-sql-overlay)))
+    (cl-return-from clutch--present-statement-outcome (message "Query cancelled")))
   (if-let* ((err (plist-get outcome :error)))
       (let* ((connection-lost (not (clutch--connection-alive-p connection)))
              (context (and connection-lost
@@ -1454,7 +1459,7 @@ The buffer's status marker then belongs to that statement."
                           (gethash clutch-connection clutch--running-queries))))
     (eq (plist-get entry :buffer) (current-buffer))))
 
-(defun clutch--report-moved-outcome (sql outcome &optional region)
+(cl-defun clutch--report-moved-outcome (sql outcome &optional region)
   "Report OUTCOME of SQL, whose buffer has left the statement's connection.
 REGION, when non-nil, is marked with the outcome, which the echo area also
 gives, unless the buffer now runs a statement whose marker that would
@@ -1462,8 +1467,12 @@ replace, and a failure is recorded for diagnostics.  No result or error page
 is drawn: the buffer's result buffer now belongs to another connection, or
 to none.  Return the text the echo area gives."
   (with-current-buffer (plist-get outcome :source-buffer)
+    (setq region (and (not (clutch--statement-running-here-p)) region))
+    (when (eq (plist-get outcome :cancelled) 'confirmed)
+      (cl-return-from clutch--report-moved-outcome
+        (clutch--present-statement-outcome
+         sql (plist-get outcome :connection) outcome region)))
     (let* ((connection (plist-get outcome :connection))
-           (region (and (not (clutch--statement-running-here-p)) region))
            (text
             (if-let* ((err (plist-get outcome :error)))
                 (let ((summary (cdr (clutch--remember-execute-error
@@ -1775,6 +1784,12 @@ Stops and reports on the first error."
          (handle (outcome stmt region final-p)
            ;; Return non-nil when the next statement should run.
            (cond
+            ((eq (plist-get outcome :cancelled) 'confirmed)
+             (clutch--finish-query-activity
+              activity
+              (lambda ()
+                (clutch--present-statement-outcome stmt connection outcome region)))
+             nil)
             ((plist-get outcome :error)
              (let (failure)
                (clutch--finish-query-activity
@@ -1827,7 +1842,9 @@ Stops and reports on the first error."
               (when (handle outcome stmt region final-p)
                 (funcall continue)))
             :moved (lambda ()
-                     (stop-moved outcome stmt region))))
+                     (if (eq (plist-get outcome :cancelled) 'confirmed)
+                         (clutch--report-moved-outcome stmt outcome region)
+                       (stop-moved outcome stmt region)))))
          (run ()
            ;; Run statements until one finishes asynchronously or the batch ends.
            (catch 'wait
@@ -2262,7 +2279,10 @@ Accumulates input until a top-level semicolon ends it, then executes."
                         activity
                         (lambda ()
                           (condition-case err
-                              (present outcome)
+                              (if (eq (plist-get outcome :cancelled) 'confirmed)
+                                  (output (concat "\nQuery cancelled\n\n"
+                                                  (clutch-repl--prompt)))
+                                (present outcome))
                             (error (report-error err))))))
                      :moved
                      (lambda ()

@@ -4358,7 +4358,7 @@ orai18n warning."
 ;;;; Unit tests — props normalization
 
 (ert-deftest clutch-db-test-jdbc-connect-normalizes-plist-props ()
-  "JDBC connect should send props as an alist even when given a plist."
+  "JDBC should normalize plist properties and preserve Oracle cancel overrides."
   (let (captured-params)
     (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
               ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
@@ -4366,13 +4366,16 @@ orai18n warning."
                (lambda (_conn _op params &optional _timeout-seconds)
                  (setq captured-params params)
                  '(:conn-id 1))))
-      (clutch-db-jdbc-connect
-       'oracle
-       '(:host "db" :port 1521 :database "svc"
-         :user "scott" :password "tiger"
-         :props (:role "reporting" :schema "HR"))))
-    (should (equal (alist-get 'props captured-params)
-                   '(("role" . "reporting") ("schema" . "HR"))))))
+      (dolist (disable-oob '(nil "false"))
+        (clutch-db-jdbc-connect
+         'oracle
+         `(:host "db" :port 1521 :database "svc"
+           :user "scott" :password "tiger"
+           :props (,@(when disable-oob (list :oracle.net.disableOob disable-oob))
+                   :role "reporting" :schema "HR")))
+        (should (equal (alist-get 'props captured-params)
+                       `(("oracle.net.disableOob" . ,(or disable-oob "true"))
+                         ("role" . "reporting") ("schema" . "HR"))))))))
 
 (ert-deftest clutch-db-test-jdbc-connect-generic-requires-driver-class ()
   "Generic JDBC connections must explicitly name the JDBC driver class."

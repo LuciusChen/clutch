@@ -890,11 +890,16 @@ property even when the URL includes a default auth database."
       (signal 'clutch-db-error
               (list "MongoDB SQL Interface JDBC connections require :database or :props ((\"database\" . ...))"))))))
 
-(defun clutch-jdbc--driver-props (driver params)
-  "Return normalized JDBC connection properties for DRIVER and PARAMS."
+(defun clutch-jdbc--driver-props (driver params url)
+  "Return normalized JDBC properties for DRIVER connecting to URL with PARAMS."
   (if (clutch-jdbc--mongodb-driver-p driver params)
       (clutch-jdbc--sql-interface-props params)
-    (clutch-jdbc--normalize-props (plist-get params :props))))
+    (let ((props (clutch-jdbc--normalize-props (plist-get params :props))))
+      (if (and (eq driver 'oracle)
+               (string-prefix-p "jdbc:oracle:thin:" url t)
+               (not (assoc "oracle.net.disableOob" props)))
+          (cons '("oracle.net.disableOob" . "true") props)
+        props))))
 
 (defun clutch-jdbc--driver-class (driver params)
   "Return the concrete JDBC driver class for DRIVER and PARAMS."
@@ -1026,7 +1031,7 @@ Returns a `clutch-jdbc-conn'."
          (url      (clutch-jdbc--build-url driver normalized-params))
          (user     (plist-get normalized-params :user))
          (password (plist-get normalized-params :password))
-         (props    (clutch-jdbc--driver-props driver normalized-params))
+         (props    (clutch-jdbc--driver-props driver normalized-params url))
          (driver-class (clutch-jdbc--driver-class driver normalized-params))
          (connect-timeout (plist-get normalized-params :connect-timeout))
          (read-idle-timeout (plist-get normalized-params :read-idle-timeout))
