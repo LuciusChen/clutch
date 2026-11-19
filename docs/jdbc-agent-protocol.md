@@ -167,7 +167,7 @@ Its success response returns:
 
 An execute stopped at entry by a cancel returns a diagnostic with category `cancel`. A connection validation failure can still be reported before that point, and Clutch does not retry SQL the user asked to cancel. For a running statement, the original response reports the outcome because the driver can accept the interruption request after the SQL has finished. The Elisp side matches replies by id and discards replies to requests it has stopped waiting for.
 
-The current Elisp client closes cursor state implicitly by fetching until the agent replies with `done=true`; it does not issue a separate `close-cursor` RPC.
+Clutch normally fetches until the agent replies with `done=true` and closes the cursor. Clutch sends `close-cursor` with the `cursor-id` when it stops at a bounded Cassandra preview or tries to release a schema cursor after a continuation error.
 
 `execute` accepts:
 

@@ -2210,28 +2210,30 @@ order, and a table is found as referenced however its name is cased."
       (should-not (clutch-db-row-identity-candidates conn "ALL_TABLES")))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-returns-table-names ()
-  "Async JDBC schema refresh should return only table names to its callback."
+  "Read every schema page asynchronously and publish only table names."
   (let ((conn (make-clutch-jdbc-conn :conn-id 9
-                                     :params `(:driver oracle :user "scott"
-                                               :rpc-timeout ,clutch-jdbc-rpc-timeout-seconds)))
-        callback-result)
+                                     :params '(:driver oracle :user "scott" :rpc-timeout 30)))
+        pending callback-result)
     (cl-letf (((symbol-function 'clutch-db-live-p) (lambda (_conn) t))
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (&rest _) (ert-fail "Schema refresh waited synchronously")))
               ((symbol-function 'clutch-jdbc--rpc-async)
-               (lambda (_op _params callback &optional errback _timeout-seconds _conn)
-                 (should-not errback)
-                 (funcall callback '(:cursor-id nil
-                                    :columns ("name" "type" "schema" "source_schema")
-                                    :rows (("USERS" "TABLE" "SCOTT" "SCOTT")
-                                           ("ORDERS_VIEW" "VIEW" "SCOTT" "SCOTT")
-                                           ("PUBLIC_ORDERS" "SYNONYM" "APP" "PUBLIC")
-                                           ("ORDERS" "TABLE" "SCOTT" "SCOTT"))
-                                    :done t))
+               (lambda (op _params callback &rest _)
+                 (push (cons op callback) pending)
                  42)))
       (should (clutch-db-refresh-schema-async
-               conn
-               (lambda (tables)
-                 (setq callback-result tables))))
-      (should (equal callback-result '("USERS" "ORDERS"))))))
+               conn (lambda (tables) (setq callback-result tables))))
+      (should (equal (caar pending) "get-tables"))
+      (funcall (cdr (pop pending))
+               '(:cursor-id 7 :rows (("USERS" "TABLE" "SCOTT" "SCOTT")
+                                    ("ORDERS_VIEW" "VIEW" "SCOTT" "SCOTT"))))
+      (should-not callback-result)
+      (should (equal (caar pending) "fetch"))
+      (funcall (cdr (pop pending))
+               '(:done t :rows (("PUBLIC_ORDERS" "SYNONYM" "APP" "PUBLIC")
+                                ("ORDERS" "TABLE" "SCOTT" "SCOTT"))))
+      (should (equal callback-result '("USERS" "ORDERS")))
+      (should-not pending))))
 
 (ert-deftest clutch-db-test-jdbc-list-table-entries-preserves-source-schema ()
   "JDBC table entry listing should preserve schema/source metadata."
