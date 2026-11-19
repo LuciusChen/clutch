@@ -19,14 +19,6 @@ The product is for developers, data engineers, analysts, and researchers who pre
 
 The authoritative support-level definitions and current backend matrix live in [`docs/backend-support.org`](docs/backend-support.org). Installation instructions live in [`README.md`](README.md), and user configuration in [`docs/user-guide.md`](docs/user-guide.md).
 
-| Surface | Product requirement |
-|---|---|
-| Core relational SQL | MySQL, PostgreSQL, SQLite, Oracle, and SQL Server should provide query execution, metadata discovery, result browsing, completion, pagination, and staged mutations when row identity and transaction semantics are available. |
-| Generic or query-first JDBC | DuckDB, ClickHouse, Snowflake, Redshift, DB2, and generic JDBC URLs should provide reliable query and metadata workflows without claiming unsupported mutation or dialect behavior. |
-| Native MongoDB | The `mongodb` backend should provide a bounded, read-oriented document workflow through the external `mongodb.el` client and a documented subset of MongoDB helper syntax. |
-| MongoDB SQL Interface | `:backend mongodb :surface sql-interface` should use JDBC only when the target deployment exposes that SQL endpoint; it is not a second MongoDB backend. |
-| Native Redis | The `redis` backend should provide bounded key discovery, command buffers, key browsing, TTL metadata, and type-aware values through the external `redis.el` client. |
-
 ## Required user workflows
 
 ### Connection and discovery
