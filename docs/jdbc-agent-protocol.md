@@ -157,7 +157,7 @@ Successful commit, rollback, an auto-commit transition, and disconnect invalidat
 `cancel` accepts:
 
 - `conn-id`
-- `request-id` (optional target). A matching `execute` or `execute-params` can be cancelled as soon as the agent reads it. Omitting the field only targets a running statement for the connection. Older agents ignore this field and only target a running statement.
+- `request-id` (optional target, supported since agent 0.2.31). A matching `execute` or `execute-params` can be cancelled as soon as the agent reads it. Omitting the field only targets a running statement for the connection. Older agents ignore this field and only target a running statement.
 
 Its success response returns:
 
@@ -165,7 +165,7 @@ Its success response returns:
 - `request-id` when the agent accepted the cancellation
 - `cancelled` (`true` when the agent stopped a request before execution or asked a JDBC driver to interrupt it, `false` when there was no match)
 
-An execute stopped before it starts returns a diagnostic with category `cancel`. For a running statement, the original response reports the outcome because the driver can accept the interruption request after the SQL has finished. The Elisp side matches replies by id and discards replies to requests it has stopped waiting for.
+An execute stopped at entry by a cancel returns a diagnostic with category `cancel`. A connection validation failure can still be reported before that point, and Clutch does not retry SQL the user asked to cancel. For a running statement, the original response reports the outcome because the driver can accept the interruption request after the SQL has finished. The Elisp side matches replies by id and discards replies to requests it has stopped waiting for.
 
 The current Elisp client closes cursor state implicitly by fetching until the agent replies with `done=true`; it does not issue a separate `close-cursor` RPC.
 

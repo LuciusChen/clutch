@@ -1234,6 +1234,7 @@ and signal `clutch-query-interrupted'."
                                      (outcome
                                       (if err
                                           (list :error err
+                                                :cancelled cancelled
                                                 :connection connection
                                                 :elapsed elapsed
                                                 :result-context result-context
@@ -1311,6 +1312,7 @@ already confirmed SQL."
            ;; that could not reconnect.
            (condition-case err
                (if (and (not no-idle-retry-p)
+                        (not (plist-get outcome :cancelled))
                         (not unresolved)
                         (eq (car-safe (plist-get outcome :error))
                             'clutch-db-execution-not-started)
