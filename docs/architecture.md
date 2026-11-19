@@ -137,14 +137,11 @@ flowchart LR
   Registry["Backend registry<br/>:support-level<br/>:data-model<br/>:query-mode<br/>:surfaces"]
 
   subgraph Relational["Relational SQL data model"]
-    MySQLCore["mysql<br/>core SQL<br/>clutch-db-mysql.el"]
-    PGCore["pg<br/>core SQL<br/>clutch-db-pg.el"]
-    XTDBBasic["xtdb<br/>basic SQL over the<br/>PostgreSQL protocol"]
-    SQLiteCore["sqlite<br/>core SQL<br/>clutch-db-sqlite.el"]
-    OracleCore["oracle<br/>core SQL via JDBC"]
-    SQLServerCore["sqlserver<br/>core SQL via JDBC"]
-    GenericJDBC["jdbc, clickhouse,<br/>snowflake, redshift, db2<br/>basic SQL / query-first"]
+    NativeSQL["Native SQL adapters"]
+    JdbcSQL["SQL via JDBC"]
   end
+
+  Cassandra["Cassandra<br/>CQL via JDBC<br/>read-only result grid"]
 
   subgraph DocumentDB["Document data model"]
     MongoBackend["mongodb backend<br/>basic document support"]
@@ -157,17 +154,11 @@ flowchart LR
     RedisNative["native command surface<br/>clutch-redis-mode"]
   end
 
-  Registry --> MySQLCore
-  Registry --> PGCore
-  Registry --> XTDBBasic
-  Registry --> SQLiteCore
-  Registry --> OracleCore
-  Registry --> SQLServerCore
-  Registry --> GenericJDBC
+  Registry --> NativeSQL
+  Registry --> JdbcSQL
+  Registry --> Cassandra
   Registry --> MongoBackend
   Registry --> RedisBackend
-
-  XTDBBasic -.->|PostgreSQL adapter| PGCore
 
   MongoBackend --> MongoNative
   MongoBackend --> MongoSQL
@@ -178,7 +169,7 @@ flowchart LR
   RedisNative --> RedisExt["redis.el native RESP client"]
 ```
 
-Backends fall into two groups by where their registration lives. `mysql`, `pg`, `xtdb`, `sqlite`, `mongodb` and `redis` are entries in `clutch-backend--registry`. `jdbc`, `oracle`, `sqlserver`, `db2`, `snowflake`, `redshift` and `clickhouse` are described by `clutch-jdbc--driver-metadata` in `clutch-db-jdbc.el` and added to the same registry when that file loads; all of them go through the JDBC adapter.
+Native backends register in `clutch-backend--registry`. The JDBC adapter adds entries from `clutch-jdbc--driver-metadata` when it loads. See the [backend support matrix](backend-support.org) for the current inventory and capabilities.
 
 `mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path. `xtdb` is a backend of its own for XTDB 2, which speaks the PostgreSQL protocol: it reuses the PostgreSQL adapter, whose connection subtype overrides it where XTDB differs (postmortem 208).
 
