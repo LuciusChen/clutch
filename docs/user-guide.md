@@ -47,7 +47,7 @@ This guide covers saved connections, the query workflow, transactions, credentia
 - `:profile-entry` can load missing connection fields from encrypted `pass` or `.authinfo.gpg` profiles when host/user/database metadata should not live in Emacs init files.
 - Network backends accept `:connect-timeout` and `:read-idle-timeout`. PostgreSQL and JDBC also accept `:query-timeout`; JDBC additionally accepts `:rpc-timeout`.
 - `clutch-jdbc-validate-after-idle-seconds` is a global JDBC safety threshold, not a saved-connection timeout. It defaults to 300 seconds; set it to `nil` or 0 to disable the pre-execution validation and retain next-command-only recovery.
-- TLS can be enabled with `:tls t`. For explicit plaintext, prefer `:ssl-mode disabled` on MySQL and `:sslmode disable` on PostgreSQL.
+- TLS can be enabled with `:tls t`. For explicit plaintext, prefer `:ssl-mode disabled` on MySQL and `:sslmode disable` on PostgreSQL. See [Custom TLS certificates](#custom-tls-certificates) if your server uses a CA Emacs does not already trust.
 - `:ssh-host` and `:tramp-default-directory` both create local forwards for structured `:host` / `:port` endpoints. `:ssh-host` uses a `~/.ssh/config` host alias, while `:tramp-default-directory` derives the origin from an ssh-like or container TRAMP directory.
 - Query-console SQL is saved by connection identity rather than saved connection name, so renaming a saved connection keeps the same console SQL.
 - `:relations-file` names the file that keeps relations added by hand in the ER view, for example a file checked into a project and shared by the connections to its databases; give an absolute or `~` path. Without it, each connection keeps its own file in `clutch-er-relations-directory`, named after its backend, endpoint and database, so renaming a saved connection keeps its relations. See the [interactive guide](interactive-client.org) for the ER view and the file format.
@@ -117,6 +117,20 @@ Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source ro
 | Other JDBC backends | Non-null unique keys only |
 
 Joined, grouped, derived, or otherwise ambiguous result sets remain read-only unless Clutch can identify one source table and a matching row identity. A simple query of CTEs that read one table edits that table: Clutch carries the table's row identity out through each CTE and maps column aliases and CTE column lists back to the table's columns. It stays read-only when a CTE on the way joins, groups, aggregates or combines rows, is recursive, is read more than once, or has the name of a column, as in `WITH name AS (SELECT name FROM people) SELECT * FROM name`, because Clutch counts every use of the name; renaming the CTE makes it editable. A CTE column list over `SELECT *`, as in `WITH c (k, v) AS (SELECT * FROM t)`, keeps rows deletable but no column editable, because only the table knows the order of `*`. A query of a table as of another time, with a temporal clause such as `FOR SYSTEM_TIME ALL` or Oracle's `AS OF TIMESTAMP`, stays read-only, because its rows may be past versions while an edit by key changes the current row. Schema-qualified JDBC sources retain their schema for identity lookup and staged mutations; Oracle views and synonyms, including dictionary relations such as `USER_TABLES`, remain read-only and skip unsafe identity probes.
+
+## Custom TLS certificates
+
+Save the PEM CA bundle supplied by your database provider or administrator. To extend the Emacs GnuTLS trust list, add this to your Emacs configuration and adjust the path to the bundle:
+
+```elisp
+(with-eval-after-load 'gnutls
+  (add-to-list 'gnutls-trustfiles
+               (expand-file-name "certs/database-ca.pem" user-emacs-directory)))
+```
+
+Use a hostname covered by the server certificate. For PostgreSQL, set `:sslmode verify-full` in the connection entry. For MySQL and native MongoDB, set `:tls t` and keep the default server verification enabled. If you set `mysql-tls-trustfiles` to a nonempty list, add the CA to that list because it overrides the shared one for MySQL.
+
+For native connections over Clutch's SSH or TRAMP forwarding, TLS verifies `127.0.0.1` against the certificate. A certificate issued only for the remote database hostname fails this check. For JDBC, use the driver or JVM trust settings. See [JDBC connection properties](jdbc-backend.org#additional-jdbc-connection-properties).
 
 ## Password Management
 
