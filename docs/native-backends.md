@@ -9,11 +9,11 @@
 - `clutch-document.el` — document query-console layer for MongoDB native buffers
 - `clutch-redis.el` over external `redis.el` — native Redis key/value adapter and command buffers
 
-Use this document for backend-specific connection, protocol, TLS, timeout, and usage notes for the native backends.  The JDBC sidecar has its own document in [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are defined in [`docs/backend-support.org`](./backend-support.org).
+Use this document for backend-specific connection, protocol, TLS, timeout, and usage notes for the native backends.  The JDBC sidecar has its own document in [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are defined in [`docs/backend-support.md`](./backend-support.md).
 
 ## MongoDB and Redis
 
-MongoDB backend details live in [`docs/mongodb-backend.org`](./mongodb-backend.org). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
+MongoDB backend details live in [`docs/mongodb-backend.md`](./mongodb-backend.md). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
 
 MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires the JDBC sidecar plus the MongoDB JDBC driver jar.
 

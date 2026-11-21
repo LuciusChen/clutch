@@ -1,6 +1,6 @@
 # User Guide
 
-This guide covers saved connections, the query workflow, transactions, credentials, SSH and TRAMP transports, and SQL files. Key bindings and result-buffer workflows are in the [interactive guide](interactive-client.org); backend specifics are in the guides listed in the [README](../README.md#documentation).
+This guide covers saved connections, the query workflow, transactions, credentials, SSH and TRAMP transports, and SQL files. Key bindings and result-buffer workflows are in the [interactive guide](interactive-client.md); backend specifics are in the guides listed in the [README](../README.md#documentation).
 
 ## Saved Connections and Query Workflow
 
@@ -50,9 +50,9 @@ This guide covers saved connections, the query workflow, transactions, credentia
 - TLS can be enabled with `:tls t`. For explicit plaintext, prefer `:ssl-mode disabled` on MySQL and `:sslmode disable` on PostgreSQL. See [Custom TLS certificates](#custom-tls-certificates) if your server uses a CA Emacs does not already trust.
 - `:ssh-host` and `:tramp-default-directory` both create local forwards for structured `:host` / `:port` endpoints. `:ssh-host` uses a `~/.ssh/config` host alias, while `:tramp-default-directory` derives the origin from an ssh-like or container TRAMP directory.
 - Query-console SQL is saved by connection identity rather than saved connection name, so renaming a saved connection keeps the same console SQL.
-- `:relations-file` names the file that keeps relations added by hand in the ER view, for example a file checked into a project and shared by the connections to its databases; give an absolute or `~` path. Without it, each connection keeps its own file in `clutch-er-relations-directory`, named after its backend, endpoint and database, so renaming a saved connection keeps its relations. See the [interactive guide](interactive-client.org) for the ER view and the file format.
+- `:relations-file` names the file that keeps relations added by hand in the ER view, for example a file checked into a project and shared by the connections to its databases; give an absolute or `~` path. Without it, each connection keeps its own file in `clutch-er-relations-directory`, named after its backend, endpoint and database, so renaming a saved connection keeps its relations. See the [interactive guide](interactive-client.md) for the ER view and the file format.
 
-JDBC-backed databases use their clutch driver/dialect symbol as `:backend`, such as `oracle`; `:backend` does not merely select the Java driver. Reserve `:backend jdbc` for databases without a dedicated clutch backend. See [docs/jdbc-backend.org](jdbc-backend.org) for supported databases and setup.
+JDBC-backed databases use their clutch driver/dialect symbol as `:backend`, such as `oracle`; `:backend` does not merely select the Java driver. Reserve `:backend jdbc` for databases without a dedicated clutch backend. See [docs/jdbc-backend.md](jdbc-backend.md) for supported databases and setup.
 
 ### 2. Open a query console
 
@@ -75,9 +75,9 @@ SELECT * FROM users LIMIT 10;
 
 Press `C-c C-c` to execute. If a region is selected, the selected SQL runs; otherwise the statement at point runs. Select a region first when exact execution boundaries matter. Results appear in a split result buffer below.
 
-Use `M-x clutch-export-query` or Run → Export query to file (`C-c ?`, then `e`) to export one read-only SELECT to CSV or TSV. The command uses the query's row limits and leaves any open result grid alone. See the [interactive guide](interactive-client.org#export-a-query-to-a-file) for paging, backend behavior and cancellation.
+Use `M-x clutch-export-query` or Run → Export query to file (`C-c ?`, then `e`) to export one read-only SELECT to CSV or TSV. The command uses the query's row limits and leaves any open result grid alone. See the [interactive guide](interactive-client.md#export-a-query-to-a-file) for paging, backend behavior and cancellation.
 
-Configure the offered format with `clutch-export-default-format`, encoding with `clutch-csv-export-default-coding-system`, and file destinations with `clutch-export-default-directory` and, for CSV and TSV, `clutch-export-default-file-name`. Defaults remain editable in the minibuffer. CSV/TSV copy and export also share the NULL marker `clutch-export-null-value-text`, and CSV copy and export the field delimiter `clutch-csv-delimiter`, a comma by default; see the [interactive guide](interactive-client.org) for examples and NULL conventions.
+Configure the offered format with `clutch-export-default-format`, encoding with `clutch-csv-export-default-coding-system`, and file destinations with `clutch-export-default-directory` and, for CSV and TSV, `clutch-export-default-file-name`. Defaults remain editable in the minibuffer. CSV/TSV copy and export also share the NULL marker `clutch-export-null-value-text`, and CSV copy and export the field delimiter `clutch-csv-delimiter`, a comma by default; see the [interactive guide](interactive-client.md) for examples and NULL conventions.
 
 While a long script or a large export runs, the SQL buffer is redisplayed repeatedly to show progress, and `display-line-numbers-mode` makes each redisplay costlier. On a 3,200-statement batch of `UPDATE`s it roughly doubled the run time (about 14 s to 28 s), and it added one to a few seconds to a 180 MB export. Turn it off in that buffer with `M-x display-line-numbers-mode` before such a run, or keep it out of SQL buffers with `(add-hook 'clutch-mode-hook (lambda () (display-line-numbers-mode -1)))`.
 
@@ -130,7 +130,7 @@ Save the PEM CA bundle supplied by your database provider or administrator. To e
 
 Use a hostname covered by the server certificate. For PostgreSQL, set `:sslmode verify-full` in the connection entry. For MySQL and native MongoDB, set `:tls t` and keep the default server verification enabled. If you set `mysql-tls-trustfiles` to a nonempty list, add the CA to that list because it overrides the shared one for MySQL.
 
-For native connections over Clutch's SSH or TRAMP forwarding, TLS verifies `127.0.0.1` against the certificate. A certificate issued only for the remote database hostname fails this check. For JDBC, use the driver or JVM trust settings. See [JDBC connection properties](jdbc-backend.org#additional-jdbc-connection-properties).
+For native connections over Clutch's SSH or TRAMP forwarding, TLS verifies `127.0.0.1` against the certificate. A certificate issued only for the remote database hostname fails this check. For JDBC, use the driver or JVM trust settings. See [JDBC connection properties](jdbc-backend.md#additional-jdbc-connection-properties).
 
 ## Password Management
 
@@ -279,7 +279,7 @@ To activate `clutch-mode` automatically for `.sql` files, add to your config:
 
 ## Everyday Commands
 
-Key bindings, result-browser workflows, object navigation, Embark integration, transient menus, faces, timeouts, and customization are in the [interactive guide](interactive-client.org).
+Key bindings, result-browser workflows, object navigation, Embark integration, transient menus, faces, timeouts, and customization are in the [interactive guide](interactive-client.md).
 
 Common entry points:
 
@@ -287,7 +287,7 @@ Common entry points:
 - Switch to an existing result with `C-x o` or `C-x b`.
 - Standard completion completes SQL identifiers at point, including empty column positions; `C-c TAB` invokes it explicitly
 - Accepted SQL identifiers retain their catalog spelling and use the connection's identifier escaping, including names with spaces or mixed case. Matching uses the name without surrounding quotes; existing identifier quotes are replaced rather than doubled. `clutch-sql-completion-case-style` controls keywords only. Names from derived-query projections retain their original SQL quoting and case-folding semantics.
-- Cross-schema SQL completion loads metadata on demand: type `schema.` after `FROM`, `JOIN` or a comma in a FROM list for tables, or `alias.` for columns from `schema.table alias`. Derived-table aliases complete their SELECT output columns, including renamed columns, `SELECT ALL` star projections and the first branch of set operations. It keeps the current schema unchanged and reuses cached metadata; see the [interactive guide](interactive-client.org) for supported backends and limits.
+- Cross-schema SQL completion loads metadata on demand: type `schema.` after `FROM`, `JOIN` or a comma in a FROM list for tables, or `alias.` for columns from `schema.table alias`. Derived-table aliases complete their SELECT output columns, including renamed columns, `SELECT ALL` star projections and the first branch of set operations. It keeps the current schema unchanged and reuses cached metadata; see the [interactive guide](interactive-client.md) for supported backends and limits.
 - SQL table/alias context is cached per statement and refreshed after edits or scope changes; incomplete statements do not scan other statements to infer source tables.
 - `M-.` jumps SQL aliases to their statement definition; object lookup uses `C-c C-d` / `C-c C-j`
 - In Result Browser buffers, `{` and `}` jump to the first and last visible data columns; Clutch's own row-number column replaces native display line numbers there
@@ -302,7 +302,7 @@ Common entry points:
 - Copy (`c`) identifies its scope as the current cell or selected cells. Export (`e`) explicitly targets all result rows, fetching all pages when supported, and warns in its menu when an active local filter is ignored. Export does not adopt the selected cells or local filter; SQL `WHERE` and explicit row limits still apply.
 - Insert forms use `C-c C-n` for SQL NULL, `C-c C-e` for an empty string, and `C-c C-d` to omit a field and use its server default. Typing `NULL` inserts literal text; cloning preserves SQL NULL and empty strings as distinct values. Single-row CSV/TSV imports replace a field's previous special state with the imported value. Opening and cancelling a JSON child editor preserves the insert field's value and state. Clones and INSERT exports target the source table, schema included.
 - JDBC CLOBs longer than the returned preview remain explicitly marked as incomplete. They can be viewed, but editing, cloning a copied incomplete field, and exporting that value are blocked to prevent data loss. Complete short CLOBs, including emoji and empty text, remain usable as ordinary text.
-- See the [interactive guide](interactive-client.org) for JDBC binary values whose content is unavailable.
+- See the [interactive guide](interactive-client.md) for JDBC binary values whose content is unavailable.
 - CSV, TSV, INSERT and UPDATE file exports write in batches and replace the destination only after the export succeeds. Symbolic links are preserved and their final target receives the output; the selected filename determines transformations such as `.gz` compression, even if the link target has a different extension. These transformations run on the complete encoded output and may hold it in memory. A failed or cancelled export preserves the existing file. CSV/TSV default to UTF-8 with one BOM for Excel; custom UTF-16 exports retain their byte order and line endings without adding BOMs between batches. Clipboard exports and native document `insertMany` helpers retain their complete output in memory; backends may also materialize a bounded or nonpageable query before formatting begins.
 - Explicit SQL row limits (`LIMIT`, `OFFSET`, `TOP`, `FETCH`) remain part of the query during pagination and export. Ordinary column, table and alias names such as `top` or `fetch` do not disable pagination.
 - A statement that writes is not paginated, even when it returns rows. `SELECT ... INTO` runs as written and copies every row; `INSERT ... RETURNING`, a PostgreSQL `SELECT` whose `WITH` clause modifies data, and a DB2 or H2 `SELECT` over a data change table such as `FINAL TABLE (INSERT ...)` run once, and all their rows show on one page.
@@ -310,11 +310,11 @@ Common entry points:
 - `C-c C-k` discards the staged change at point from a result cell or record-view field. Closing a result buffer with staged changes asks before discarding them; it does not submit changes or end a database transaction.
 - `M-x clutch-copy-context-for-agent` copies SQL, table metadata, and the latest matching visible result sample as Markdown for an external agent; the same command is available as `k` in the main and result transients. Table metadata reuses the existing object describe path.
 
-Native isearch in a result buffer also finds column names. While a search runs, the column names exist as real buffer text, so `C-r` finds a header above the data and `C-s` can reach it after wrapping. `RET` leaves point on the matching column's first data cell; `C-g` returns to where the search began. The header is not in the buffer otherwise, and the fixed header line stays while browsing. See the [interactive guide](interactive-client.org).
+Native isearch in a result buffer also finds column names. While a search runs, the column names exist as real buffer text, so `C-r` finds a header above the data and `C-s` can reach it after wrapping. `RET` leaves point on the matching column's first data cell; `C-g` returns to where the search began. The header is not in the buffer otherwise, and the fixed header line stays while browsing. See the [interactive guide](interactive-client.md).
 
 ## Timeouts, Interrupts, and Customization
 
-Timeouts can be configured globally or per connection. On native MySQL and PostgreSQL connections and on JDBC connections a statement runs without blocking Emacs, and `C-g` in the console, REPL or result buffer cancels it; on other backends the statement blocks and `C-g` interrupts it. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV/TSV encoding, and completion customization are documented in [Query Timeout and Interrupt](interactive-client.org#query-timeout-and-interrupt).
+Timeouts can be configured globally or per connection. On native MySQL and PostgreSQL connections and on JDBC connections a statement runs without blocking Emacs, and `C-g` in the console, REPL or result buffer cancels it; on other backends the statement blocks and `C-g` interrupts it. Backend-specific cancel behavior, debug workflow, result displayers, schema warmup, CSV/TSV encoding, and completion customization are documented in [Query Timeout and Interrupt](interactive-client.md#query-timeout-and-interrupt).
 
 ## Upgrading From Pre-Split Checkouts
 

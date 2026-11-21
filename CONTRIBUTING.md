@@ -87,7 +87,7 @@ CLUTCH_TEST_JDBC_AGENT_DIR=/absolute/path/to/isolated-runtime \
 ./test/run-ci.sh native-live
 ```
 
-This adds Oracle, SQL Server and ClickHouse containers plus local DuckDB and their supported UI/backend checks. MongoDB SQL Interface and other service-specific endpoints require separate configuration; a community mongod container does not provide SQL Interface. Report passes and capability skips separately, and identify the tested jar. Do not replace the user's installed runtime to run tests. See [JDBC setup](docs/jdbc-backend.org) for the runtime and drivers.
+This adds Oracle, SQL Server and ClickHouse containers plus local DuckDB and their supported UI/backend checks. MongoDB SQL Interface and other service-specific endpoints require separate configuration; a community mongod container does not provide SQL Interface. Report passes and capability skips separately, and identify the tested jar. Do not replace the user's installed runtime to run tests. See [JDBC setup](docs/jdbc-backend.md) for the runtime and drivers.
 
 Live tests read ordinary host/port connection variables, so a server you start yourself works too; Docker here is only a portable example:
 
