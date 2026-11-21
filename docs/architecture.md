@@ -169,7 +169,7 @@ flowchart LR
   RedisNative --> RedisExt["redis.el native RESP client"]
 ```
 
-Native backends register in `clutch-backend--registry`. The JDBC adapter adds entries from `clutch-jdbc--driver-metadata` when it loads. See the [backend support matrix](backend-support.org) for the current inventory and capabilities.
+Native backends register in `clutch-backend--registry`. The JDBC adapter adds entries from `clutch-jdbc--driver-metadata` when it loads. See the [backend support matrix](backend-support.md) for the current inventory and capabilities.
 
 `mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path. `xtdb` is a backend of its own for XTDB 2, which speaks the PostgreSQL protocol: it reuses the PostgreSQL adapter, whose connection subtype overrides it where XTDB differs (postmortem 208).
 
