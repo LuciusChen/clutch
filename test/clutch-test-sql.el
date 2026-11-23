@@ -465,7 +465,6 @@ after them asked for no confirmation."
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
-                 "DELETE FROM [foo--bar] WHERE id=2"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
                  "WITH d AS (DELETE FROM users WHERE id=1 RETURNING id) SELECT * FROM d"
                  "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id=1)"
@@ -477,7 +476,14 @@ after them asked for no confirmation."
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
     (should-not (clutch--high-risk-query-reason sql)))
+  (dolist (clutch--conn-sql-product '(ms sqlite))
+    (should-not (clutch--high-risk-query-reason "DELETE FROM [foo--bar] WHERE id=2")))
   (let ((clutch--conn-sql-product 'postgres))
+    (should-not (clutch--high-risk-query-reason "UPDATE t SET a[b[1]] = 0 WHERE id=1"))
+    (dolist (array '("arr[idx[1]]" "ARRAY['a]b']"))
+      (should (equal (clutch--high-risk-query-reason
+                      (concat "DELETE FROM t WHERE " array " IS NULL OR 1=1"))
+                     "WHERE is always true")))
     (dolist (literal '("$$ WHERE id=1 $$" "$tag$ ) WHERE id=1 $tag$"))
       (let ((update (concat "UPDATE users SET name=" literal)))
         (should (equal (clutch--high-risk-query-reason update) "no WHERE"))
@@ -1355,7 +1361,7 @@ Keywords inside a function body are literal text, not clauses."
                     ("backslash is plain" "'a\\'b' c" nil nil 4)
                     ("doubled double quote" "\"a\"\"b\" c" t nil 6)
                     ("doubled bracket" "[a]]b] c" t nil 6)
-                    ("bracket has no escape" "[a\\] c" t ,mysql 4)
+                    ("bracket identifier has no backslash escape" "[a\\] c" t ,(clutch-db-sql-dialect 'ms) 4)
                     ("identifier only with flag" "\"a\" c" nil nil nil)
                     ("single dash" "-x" nil nil nil)
                     ("single slash" "/x" nil nil nil)

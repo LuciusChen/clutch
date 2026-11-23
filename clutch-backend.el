@@ -356,9 +356,11 @@ only cover constructs that change where a literal or statement ends:
 `:dollar-quotes' for PostgreSQL dollar-quoted bodies, and
 `:backslash-escapes' for the MySQL family, where a backslash escapes the
 next character inside a string literal.  `:hash-comments' enables MySQL's
-# line comments.  PRODUCT is an `sql-mode' product
+# line comments.  SQL Server and SQLite accept `:bracket-identifiers'.
+PRODUCT is an `sql-mode' product
 symbol as registered by `clutch-backend-sql-product'."
   (pcase product
+    ((or 'ms 'sqlite) '(:bracket-identifiers t))
     ('postgres '(:dollar-quotes t))
     ('mysql '(:backslash-escapes t :hash-comments t))
     (_ nil)))
@@ -398,7 +400,8 @@ match data is left untouched."
              (cond
               ((eq ch ?\') ?\')
               ((and identifiers (memq ch '(?\" ?`))) ch)
-              ((and identifiers (eq ch ?\[)) ?\]))))
+              ((and identifiers (eq ch ?\[)
+                    (or (null dialect) (plist-get dialect :bracket-identifiers))) ?\]))))
         (when delimiter
           ;; Bracket-quoted identifiers have no backslash escape even in
           ;; dialects that use one inside quoted strings.
@@ -483,35 +486,42 @@ Quote delimiters are preserved.  Double-quoted and backtick-quoted
 identifiers are left intact, and a quote or `--' inside one opens nothing.
 Brackets are not taken for quoted identifiers, since they also index
 arrays.  With MASK-IDENTIFIERS, mask the contents of quoted identifiers
-as well, including bracketed names, for keyword-only analysis.
+as well for keyword-only analysis.  Array brackets then become parentheses
+so subsequent keyword scans preserve subscript nesting.
 DIALECT is a `clutch-db-sql-dialect' plist deciding where a literal ends.
 Code between literals is copied by searching for the next possible opener."
   (let ((pieces nil)
-        (openers (if mask-identifiers (rx (in "-#'/$\"`[")) "[-#'/$\"`]"))
+        (openers (if mask-identifiers (rx (in "-#'/$\"`[]")) "[-#'/$\"`]"))
         (copy-from 0)
         (pos 0)
         (len (length sql)))
     (save-match-data
       (while (and (< pos len)
                   (setq pos (string-match openers sql pos)))
-        (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
-                         sql pos t dialect)))
-            (let* ((ch (aref sql pos))
-                   (close (if (eq ch ?\[) ?\] ch)))
-              (cond
-               ((and (not mask-identifiers) (memq ch '(?\" ?`)))
-                (setq pos skip))
-               ((memq ch '(?\' ?\" ?` ?\[))
-                (let ((closed (and (> skip (1+ pos)) (= (aref sql (1- skip)) close))))
-                  (push (substring sql copy-from (1+ pos)) pieces)
-                  (push (make-string (- skip pos (if closed 2 1)) ?\s) pieces)
-                  (when closed (push (string close) pieces))
-                  (setq copy-from skip pos skip)))
-               (t
-                (push (substring sql copy-from pos) pieces)
-                (push (make-string (- skip pos) ?\s) pieces)
-                (setq copy-from skip pos skip))))
-          (cl-incf pos))))
+        (let* ((ch (aref sql pos))
+               (array-bracket (and mask-identifiers (memq ch '(?\[ ?\]))
+                                   (not (plist-get dialect :bracket-identifiers))))
+               (skip (unless array-bracket
+                       (clutch-db-sql-skip-literal-or-comment sql pos t dialect))))
+          (cond
+           (array-bracket
+            (push (substring sql copy-from pos) pieces)
+            (push (if (= ch ?\[) "(" ")") pieces)
+            (setq copy-from (cl-incf pos)))
+           ((null skip) (cl-incf pos))
+           ((and (not mask-identifiers) (memq ch '(?\" ?`)))
+            (setq pos skip))
+           ((memq ch '(?\' ?\" ?` ?\[))
+            (let* ((close (if (eq ch ?\[) ?\] ch))
+                   (closed (and (> skip (1+ pos)) (= (aref sql (1- skip)) close))))
+              (push (substring sql copy-from (1+ pos)) pieces)
+              (push (make-string (- skip pos (if closed 2 1)) ?\s) pieces)
+              (when closed (push (string close) pieces))
+              (setq copy-from skip pos skip)))
+           (t
+            (push (substring sql copy-from pos) pieces)
+            (push (make-string (- skip pos) ?\s) pieces)
+            (setq copy-from skip pos skip))))))
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
