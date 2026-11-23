@@ -465,6 +465,7 @@ after them asked for no confirmation."
     (should (clutch--high-risk-query-reason sql)))
   (dolist (sql '("UPDATE users SET name='x' WHERE id=1"
                  "DELETE FROM users WHERE id=1"
+                 "DELETE FROM [foo--bar] WHERE id=2"
                  "WITH x AS (SELECT 1) UPDATE users SET name='x' WHERE id=1"
                  "WITH d AS (DELETE FROM users WHERE id=1 RETURNING id) SELECT * FROM d"
                  "SELECT id FROM OLD TABLE (DELETE FROM users WHERE id=1)"
@@ -475,7 +476,15 @@ after them asked for no confirmation."
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
-    (should-not (clutch--high-risk-query-reason sql))))
+    (should-not (clutch--high-risk-query-reason sql)))
+  (let ((clutch--conn-sql-product 'postgres))
+    (dolist (literal '("$$ WHERE id=1 $$" "$tag$ ) WHERE id=1 $tag$"))
+      (let ((update (concat "UPDATE users SET name=" literal)))
+        (should (equal (clutch--high-risk-query-reason update) "no WHERE"))
+        (should-not (clutch--high-risk-query-reason (concat update " WHERE id=1")))
+        (should (equal (clutch--high-risk-query-reason
+                        (concat "WITH u AS (" update " RETURNING id) SELECT * FROM u"))
+                       "no WHERE"))))))
 
 (ert-deftest clutch-test-mysql-backslash-quote-keeps-statement-visible ()
   "A backslash-escaped quote in MySQL must not hide the rest of the statement."
@@ -484,6 +493,9 @@ after them asked for no confirmation."
     (should (equal (clutch--high-risk-query-reason
                     "DELETE FROM users WHERE name = 'it\\'s' OR 1 = 1")
                    "WHERE is always true"))
+    (should (equal (clutch--high-risk-query-reason "UPDATE users SET name=1 # WHERE id=1")
+                   "no WHERE"))
+    (should-not (clutch--high-risk-query-reason "UPDATE users SET name=1 # comment\nWHERE id=1"))
     (let ((sql "SELECT 'it\\'s', o.id FROM users u JOIN orders o ON o.uid = u.id"))
       (should (equal (car (clutch--extract-tables-and-aliases sql 0 (length sql)))
                      '("users" "orders")))

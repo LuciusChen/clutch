@@ -10,6 +10,8 @@
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 
+- High-risk SQL confirmation ignores apparent clauses inside dialect-specific string literals when checking updates and deletes.
+
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
 
 - JDBC schema refresh fetches all table-list pages in the background. Opening an Oracle console no longer blocks cursor movement while the remaining pages load.

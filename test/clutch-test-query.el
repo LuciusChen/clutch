@@ -1761,7 +1761,7 @@ statement."
 (ert-deftest clutch-test-sql-dialect-rules ()
   "Dialect lookup should only claim rules a product actually has."
   (should (equal (clutch-db-sql-dialect 'postgres) '(:dollar-quotes t)))
-  (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t)))
+  (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t :hash-comments t)))
   (dolist (product '(sqlite oracle ms db2 nil))
     (should-not (clutch-db-sql-dialect product))))
 

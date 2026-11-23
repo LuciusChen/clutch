@@ -1030,17 +1030,14 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--risky-dml-trivially-true-expression-p (expr)
   "Return non-nil when EXPR is visibly true without row data."
   (cl-labels
-      ((code (expr)
-         (string-trim (clutch-db-sql-mask-literal-or-comment
-                       expr (clutch--buffer-sql-dialect))))
-       (strip-parens (expr)
-         (let ((expr (code expr)))
+      ((strip-parens (expr)
+         (let ((expr (string-trim expr)))
            (while (and (> (length expr) 1)
                        (= (aref expr 0) ?\()
                        (let ((close
                               (clutch-db-sql-matching-paren-position expr 0)))
                          (and close (= close (1- (length expr))))))
-             (setq expr (code (substring expr 1 (1- (length expr))))))
+             (setq expr (string-trim (substring expr 1 -1))))
            expr))
        (split-keyword (expr keyword)
          (let ((case-fold-search t)
@@ -1088,11 +1085,13 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--high-risk-query-reason (sql)
   "Return a confirmation reason for high-risk SQL, or nil.
 An UPDATE or DELETE embedded in SQL is checked like the main statement."
-  (if (equal (clutch-db-sql-leading-keyword sql) "TRUNCATE")
-      "TRUNCATE removes all rows"
-    (cl-some #'clutch--risky-dml-reason
-             (cons (clutch-db-sql-normalize sql)
-                   (clutch-db-sql-embedded-statements sql)))))
+  (let ((code (clutch-db-sql-mask-literal-or-comment
+               sql (clutch--buffer-sql-dialect) t)))
+    (if (equal (clutch-db-sql-leading-keyword code) "TRUNCATE")
+        "TRUNCATE removes all rows"
+      (cl-some #'clutch--risky-dml-reason
+               (cons (clutch-db-sql-normalize code)
+                     (clutch-db-sql-embedded-statements code))))))
 
 (defun clutch--confirm-high-risk-query (sql)
   "Apply the configured high-risk confirmation to SQL.
