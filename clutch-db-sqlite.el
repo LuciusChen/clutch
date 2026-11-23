@@ -226,6 +226,11 @@ NAME is the PRAGMA's argument, a table or an index."
 WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
       (mapcar #'car rows))))
 
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-sqlite-conn) &optional _all-schemas)
+  "Return the tables listed in the main SQLite catalog on CONN."
+  (mapcar (lambda (name) (list :name name :schema "main" :type "TABLE"))
+          (clutch-db-list-tables conn)))
+
 (cl-defmethod clutch-db-list-columns ((conn clutch-db-sqlite-conn) table)
   "Return column names for TABLE on SQLite CONN."
   (clutch-db--translate-library-error sqlite-error
@@ -256,7 +261,9 @@ SQLite metadata needs no network wait, so retain synchronous completion."
   (let ((schema (clutch-db-sql-table-schema token))
         (name (clutch-db-sql-table-name token)))
     (when-let* ((row (clutch-db-sqlite--table-record conn name schema)))
-      (list :name (car row) :schema schema :type "TABLE"))))
+      (list :name (car row) :schema (if (and schema (string-equal-ignore-case schema "main"))
+                                        "main" schema)
+            :type "TABLE"))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."

@@ -274,14 +274,23 @@ inside string literals, comments, or nested parentheses are ignored."
            (t (setq end boundary boundaries nil)))))
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
+(defconst clutch--sql-table-modifiers
+  (let ((gap (concat clutch-db-sql--keyword-gap-regexp "+")))
+    `(("UPDATE" . ,(concat "\\(?:OR" gap
+                           (regexp-opt '("ROLLBACK" "ABORT" "REPLACE" "FAIL" "IGNORE"))
+                           "\\b\\)?"))
+      ("TABLE" . ,(concat "\\(?:IF" gap "\\(?:NOT" gap "\\)?EXISTS\\b\\)?"))))
+  "Optional keywords before the table name in UPDATE and table DDL.")
+
 (defun clutch--sql-from-source-positions (sql &optional table-lookup)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
-For TABLE-LOOKUP, also visit grouped tables and UPDATE/INTO targets."
-  (let* ((sources-after (if table-lookup '("FROM" "JOIN" "UPDATE" "INTO") '("FROM" "JOIN")))
+For TABLE-LOOKUP, also visit grouped tables and DML or DDL targets."
+  (let* ((case-fold-search t)
+         (sources-after (if table-lookup '("FROM" "JOIN" "UPDATE" "INTO" "TABLE") '("FROM" "JOIN")))
          (matches (clutch-db-sql-code-match-positions
                    sql 0 nil
                    (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
-                           (when table-lookup "update\\|into\\|")
+                           (when table-lookup "update\\|into\\|table\\|")
                            (clutch--sql-set-operators-regexp)
                            "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
@@ -297,15 +306,12 @@ For TABLE-LOOKUP, also visit grouped tables and UPDATE/INTO targets."
         (while (string-match "," sql pos)
           (puthash (match-beginning 0) (match-end 0) matches)
           (setq pos (match-end 0)))))
-    (cl-flet ((source (end depth &optional update)
+    (cl-flet ((source (end depth &optional keyword)
                 (let ((start (if table-lookup (clutch-db-sql--skip-blank sql end) end)))
-                  ;; SQLite permits UPDATE OR <conflict-action> table.
-                  (when-let* (update
-                              (word (clutch-db-sql--token-end sql start))
-                              ((equal (upcase (substring sql start word)) "OR"))
-                              (action (clutch-db-sql--token-end
-                                       sql (clutch-db-sql--skip-blank sql word))))
-                    (setq start (clutch-db-sql--skip-blank sql action)))
+                  (when-let* ((pattern (cdr (assoc keyword clutch--sql-table-modifiers))))
+                    (with-syntax-table clutch-db-sql--syntax-table
+                      (string-match pattern sql start))
+                    (setq start (clutch-db-sql--skip-blank sql (match-end 0))))
                   (puthash depth t clauses)
                   (push (cons start depth) sources))))
       (clutch-db-sql-scan-code
@@ -322,7 +328,7 @@ For TABLE-LOOKUP, also visit grouped tables and UPDATE/INTO targets."
            (let* ((end (gethash pos matches))
                   (token (upcase (substring sql pos end))))
              (if (member token sources-after)
-                 (source end depth (equal token "UPDATE"))
+                 (source end depth (and table-lookup token))
                (remhash depth clauses)))))
          nil)
        (clutch-db-connection-sql-dialect clutch-connection) matches))
@@ -763,55 +769,38 @@ Always claims the backend to prevent fallthrough to etags, which
 triggers syntax_table errors in `sql-mode' derived buffers."
   (when clutch-connection 'clutch))
 
-(defun clutch--xref-bare-identifier-char-p (ch)
-  "Return non-nil when CH is part of an unquoted SQL identifier."
-  (or (and (>= ch ?0) (<= ch ?9))
-      (and (>= ch ?A) (<= ch ?Z))
-      (and (>= ch ?a) (<= ch ?z))
-      (memq ch '(?_ ?$ ?#))))
+(defun clutch--sql-identifier-at-offset (sql offset &optional qualified-from)
+  "Return (START . NAME) for the identifier at OFFSET in SQL, or nil.
+With QUALIFIED-FROM, start there and keep dotted names with their delimiters."
+  (let ((pos (or qualified-from 0)) (len (length sql)))
+    ;; Object commands also work just after a name, as at the end of FROM t.
+    (when (and qualified-from (< 0 offset) (<= offset len)
+               (or (= offset len) (memq (aref sql offset) '(?\s ?\t ?\n ?\r ?\; ?, ?\)))))
+      (cl-decf offset))
+    (catch 'found
+      (while (and (< pos len) (<= pos offset))
+        (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
+            (setq pos skip)
+          (let ((start pos) parts end)
+            (while (and pos (< pos len)
+                        (or qualified-from (not (eq (aref sql pos) ?\[)))
+                        (setq end (clutch-db-sql--token-end sql pos "[[:alnum:]_$#@]*"))
+                        (> end pos))
+              (push (substring sql pos end) parts)
+              (setq pos (when qualified-from
+                          (let ((dot (clutch-db-sql--skip-blank sql end)))
+                            (when (and (< dot len) (= (aref sql dot) ?.))
+                              (clutch-db-sql--skip-blank sql (1+ dot)))))))
+            (when (and parts (< offset end))
+              (throw 'found (cons start (string-join (nreverse parts) "."))))
+            (setq pos (max (1+ start) (or end start)))))))))
 
 (defun clutch--xref-symbol-at-point ()
-  "Return the SQL identifier at point without relying on syntax tables.
-Returns (BEG . SYMBOL) or nil.  Uses SQL-aware token scanning so comments,
-single-quoted strings, and multi-word quoted identifiers are handled
-without consulting syntax tables."
-  (pcase-let* ((`(,stmt-beg . ,stmt-end) (clutch--statement-bounds))
-               (text (buffer-substring-no-properties stmt-beg stmt-end))
-               (len (length text))
-               (target (- (point) stmt-beg))
-               (i 0))
-    (when (and (>= target 0) (< target len))
-      (catch 'hit
-        (while (< i len)
-          (if-let* ((skip (clutch-db-sql-skip-literal-or-comment text i)))
-              (progn
-                (when (and (<= i target) (< target skip))
-                  (throw 'hit nil))
-                (setq i skip))
-            (let ((ch (aref text i)))
-              (cond
-               ((memq ch '(?\" ?`))
-                (let* ((quote ch)
-                       (end (or (cl-loop for j from (1+ i) below len
-                                         when (= (aref text j) quote)
-                                         return (1+ j))
-                                len)))
-                  (when (and (<= i target) (< target end))
-                    (throw 'hit (cons (+ stmt-beg i)
-                                      (substring text i end))))
-                  (setq i end)))
-               ((clutch--xref-bare-identifier-char-p ch)
-                (let ((end (1+ i)))
-                  (while (and (< end len)
-                              (clutch--xref-bare-identifier-char-p
-                               (aref text end)))
-                    (cl-incf end))
-                  (when (and (<= i target) (< target end))
-                    (throw 'hit (cons (+ stmt-beg i)
-                                      (substring text i end))))
-                  (setq i end)))
-               (t
-                (cl-incf i))))))))))
+  "Return (BEG . SYMBOL) for the SQL identifier at point, or nil."
+  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+               (hit (clutch--sql-identifier-at-offset
+                     (buffer-substring-no-properties beg end) (- (point) beg))))
+    (when hit (cons (+ beg (car hit)) (cdr hit)))))
 
 (defun clutch--xref-qualified-identifier-qualifier (beg)
   "Return the qualifier immediately preceding identifier start BEG."
@@ -843,24 +832,21 @@ not treat schema qualifiers in `schema.table' as aliases."
              (clutch--find-alias-definition-position sym-alias))
         sym-alias)))))
 
-(defun clutch--sql-source-table-at-point ()
-  "Return the source table token at point, including its qualifiers."
+(defun clutch--sql-source-table-at-point (&optional object-lookup)
+  "Return the SQL table reference at point, including its qualifiers.
+For OBJECT-LOOKUP, also accept bare names and a standalone qualified name."
   (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
                (sql (buffer-substring-no-properties beg end))
                (offset (- (point) beg))
                (source (cl-find-if (lambda (s) (<= (car s) offset))
                                    (clutch--sql-from-source-positions sql t) :from-end t)))
-    (when source
-      (let* ((start (car source))
-             (pos start) finish parts)
-        (while (and pos (setq finish (clutch-db-sql--token-end
-                                      sql pos "[[:alnum:]_$#@]+")))
-          (push (substring sql pos finish) parts)
-          (let ((dot (clutch-db-sql--skip-blank sql finish)))
-            (setq pos (when (and (< dot (length sql)) (= (aref sql dot) ?.))
-                        (clutch-db-sql--skip-blank sql (1+ dot))))))
-        (when (and finish (<= start offset finish))
-          (string-join (nreverse parts) "."))))))
+    (when (or source object-lookup)
+      (when-let* ((hit (clutch--sql-identifier-at-offset sql offset (or (car source) 0)))
+                  ((or (eql (car hit) (car source))
+                       (and object-lookup
+                            (or (= (car hit) (clutch-db-sql--skip-blank sql 0))
+                                (not (clutch-db-sql-table-schema (cdr hit))))))))
+        (cdr hit)))))
 
 (cl-defmethod xref-backend-identifier-at-point ((_backend (eql 'clutch)))
   "Return the identifier at point, preferring normalized alias names."
