@@ -2190,6 +2190,15 @@ Derived from `clutch-db-list-tables'."
 (cl-defgeneric clutch-db-list-columns (conn table)
   "Return a list of column name strings for TABLE on CONN.")
 
+(cl-defgeneric clutch-db-completion-prefix-fetcher (conn)
+  "Return a background prefix search function for CONN, or nil.
+The function takes CONN, TABLE (nil for table names), PREFIX, a callback
+receiving names, and an error callback receiving a message.")
+
+(cl-defmethod clutch-db-completion-prefix-fetcher ((_conn t))
+  "Use ordinary completion on backends without background prefix search."
+  nil)
+
 (cl-defgeneric clutch-db-complete-tables (conn prefix)
   "Return table name candidates for PREFIX on CONN, or nil when unsupported.")
 

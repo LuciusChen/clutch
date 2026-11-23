@@ -2405,14 +2405,18 @@ throughout."
                              "UserName"
                              (clutch-test--completion-candidates
                               (clutch-completion-at-point))))))
-                (when (eq (clutch-test-live-backend-id) 'oracle)
-                  ;; Empty quoted prefixes must reach Oracle's cold search path.
-                  (puthash table nil (gethash conn clutch--schema-cache))
+                (when (memq (clutch-test-live-backend-id) '(oracle sqlserver duckdb))
+                  ;; An empty quoted prefix must also work on a cold connection.
+                  (clutch--clear-table-metadata-caches conn table)
                   (erase-buffer)
                   (insert (format "SELECT u.\"\" FROM %s u" table))
                   (goto-char (point-min)) (search-forward "u.\"")
-                  (let ((capf (clutch-completion-at-point)))
-                    (should (member "UserName" (clutch-test--completion-candidates capf))))))))
+                  (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+                             (lambda (&rest _) (ert-fail "Completion waited for a synchronous RPC"))))
+                    (clutch-test--await
+                     (lambda ()
+                       (when-let* ((capf (clutch-completion-at-point)))
+                         (member "UserName" (clutch-test--completion-candidates capf))))))))))
         (ignore-errors (clutch-db-query conn (format "DROP TABLE %s" table)))))))
 
 (ert-deftest clutch-test-live-cross-schema-completion ()

@@ -1395,8 +1395,7 @@ so an object name is matched by prefix search instead."
   (clutch-jdbc--oracle-conn-p conn))
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
-  "Return non-nil when CONN may synchronously load completion columns.
-This is allowed in the hot path."
+  "Return non-nil when CONN may load a complete column list."
   (not (clutch-jdbc--oracle-conn-p conn)))
 
 ;;;; Query methods
@@ -2626,16 +2625,31 @@ schemas reports an empty one, which is left out."
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
-(cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
-  "Return table name candidates matching PREFIX for JDBC CONN."
+(defun clutch-jdbc--complete-prefix (conn table prefix &optional callback errback)
+  "Find Oracle tables or TABLE columns matching PREFIX on CONN.
+With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
   (when (clutch-jdbc--oracle-conn-p conn)
-    (let ((result (clutch-jdbc--rpc
-                   conn "search-tables"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (prefix  . ,prefix)
-                     ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (mapcar (lambda (tbl) (plist-get tbl :name))
-              (plist-get result :tables)))))
+    (let ((op (if table "search-columns" "search-tables"))
+          (params (cons (cons 'prefix prefix)
+                        (if table (clutch-jdbc--table-metadata-params conn table)
+                          (cons (cons 'conn-id (clutch-jdbc-conn-conn-id conn))
+                                (clutch-jdbc--metadata-scope-params conn))))))
+      (cl-flet ((names (result)
+                  (mapcar (lambda (entry) (plist-get entry :name))
+                          (plist-get result (if table :columns :tables)))))
+        (if callback
+            (clutch-jdbc--rpc-async
+             op params (lambda (result) (funcall callback (names result)))
+             errback nil conn)
+          (names (clutch-jdbc--rpc conn op params)))))))
+
+(cl-defmethod clutch-db-completion-prefix-fetcher ((conn clutch-jdbc-conn))
+  "Return the prefix search used for completion on Oracle CONN."
+  (and (clutch-jdbc--oracle-conn-p conn) #'clutch-jdbc--complete-prefix))
+
+(cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
+  "Return table names matching PREFIX on CONN."
+  (clutch-jdbc--complete-prefix conn nil prefix))
 
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-jdbc-conn) prefix)
   "Return table entry plists matching PREFIX for JDBC CONN."
@@ -2676,16 +2690,8 @@ schemas reports an empty one, which is left out."
       t)))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
-  "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
-  (let ((driver (clutch-jdbc--conn-driver conn)))
-    (cond
-     ((eq driver 'oracle)
-      (let* ((result (clutch-jdbc--rpc
-                      conn "search-columns"
-                      (append (clutch-jdbc--table-metadata-params conn table)
-                              `((prefix . ,prefix))))))
-        (mapcar (lambda (col) (plist-get col :name))
-                (plist-get result :columns)))))))
+  "Return column names matching PREFIX for TABLE on CONN."
+  (clutch-jdbc--complete-prefix conn table prefix))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."

@@ -1516,6 +1516,46 @@ appropriate."
            (clutch--cached-columns schema (clutch--table-key-name key)))
       (clutch--completion-qualified-columns conn key)))
 
+(defun clutch--completion-await-metadata (conn key property)
+  "Let interactive completion use the pending CONN request at KEY and PROPERTY.
+Plain CAPF probes only read the cache.  A completion UI can wait for the
+first answer until the next keystroke, leaving the background fetch alive."
+  (when-let* ((status (clutch--metadata-status conn key property))
+              ((eq (plist-get status :state) 'loading)))
+    (cl-flet ((wait-for-reply ()
+                (while (and (eq status (clutch--metadata-status conn key property))
+                            (clutch-db-live-p conn))
+                  (sit-for 0.05))))
+      (cond
+       (throw-on-input (wait-for-reply))
+       ((memq this-command '(completion-at-point clutch-complete-at-point
+                             clutch-complete-qualified-or-indent))
+        (pcase (while-no-input (wait-for-reply) 'ready)
+          ;; Claim the old slot so another CAPF cannot complete it.
+          ('t (throw 'clutch--completion-interrupted (list (point) (point) nil)))
+          ('nil (keyboard-quit))))))))
+
+(defun clutch--completion-prefix-names (conn table prefix)
+  "Return cached PREFIX matches for TABLE on CONN, or search in the background.
+A nil TABLE searches table names.  Keep only the last prefix for each source."
+  (if-let* ((fetch (clutch-db-completion-prefix-fetcher conn)))
+      (let ((entry (plist-get (clutch--table-metadata conn table) :completion-prefix)))
+        (when (and (clutch-db-live-p conn) (not (equal prefix (car entry))))
+          (setq entry (cons prefix nil))
+          (clutch--set-table-metadata conn table :completion-prefix entry)
+          (clutch--start-table-metadata-request
+           conn table table :prefix-status "completion"
+           (lambda (connection source done fail)
+             (funcall fetch connection source prefix done fail))
+           (lambda (names) (setcdr entry names))
+           (lambda (msg) (clutch--report-completion-error conn (list 'clutch-db-error msg)))))
+        (clutch--completion-await-metadata conn table :prefix-status)
+        (cdr entry))
+    (clutch--safe-completion-call
+     (lambda ()
+       (if table (clutch-db-complete-columns conn table prefix)
+         (clutch-db-complete-tables conn prefix))))))
+
 (defun clutch--completion-column-values (conn schema table prefix sync-columns-p)
   "Return raw column names for TABLE on CONN in completion context.
 SCHEMA supplies cached columns.  PREFIX is passed to direct backend completion
@@ -1527,9 +1567,12 @@ when SYNC-COLUMNS-P is nil."
      ((clutch-db-completion-deferred-columns-p conn)
       (when schema (clutch--ensure-columns-async conn schema table))
       nil)
-     (sync-columns-p (and schema (clutch--ensure-columns conn schema table)))
-     (t (clutch--safe-completion-call
-         (lambda () (clutch-db-complete-columns conn table prefix)))))))
+     (sync-columns-p
+      (when schema
+        (clutch--ensure-columns-async conn schema table)
+        (clutch--completion-await-metadata conn table :columns-status)
+        (clutch--cached-columns schema table)))
+     (t (clutch--completion-prefix-names conn table prefix)))))
 
 (defun clutch--completion-column-candidates (conn schema tables prefix
                                                   sync-columns-p)
@@ -1681,16 +1724,20 @@ it, so nothing is scanned there."
       (`(,beg ,end ,collection . ,plist)
        (let ((completion-extra-properties plist)
              (completion-in-region-mode-predicate #'always))
-         (unless (completion-in-region beg end collection
-                                       (plist-get plist :predicate))
+         (unless (or (null collection)
+                     (completion-in-region beg end collection
+                                           (plist-get plist :predicate)))
            (user-error "No completion at point"))))
       (_
        (user-error "No completion at point")))))
 
 (defun clutch-completion-at-point ()
-  "Completion-at-point function for SQL identifiers.
-Skips column loading if the connection is busy (prevents re-entrancy
-when completion triggers during an in-flight query)."
+  "Complete SQL identifiers at point without delaying further input."
+  (catch 'clutch--completion-interrupted
+    (clutch--sql-identifier-capf)))
+
+(defun clutch--sql-identifier-capf ()
+  "Build identifier candidates for the SQL at point."
   (let* ((quoted (and clutch-connection (clutch--completion-quoted-identifier)))
          (symbol-bounds (or (plist-get quoted :bounds)
                             (bounds-of-thing-at-point 'symbol)))
@@ -1729,8 +1776,7 @@ when completion triggers during an in-flight query)."
             (when (and table-context-p (not namespace) (not busy)
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
               (or (clutch--schema-table-candidates conn schema prefix)
-                  (clutch--safe-completion-call
-                   (lambda () (clutch-db-complete-tables conn prefix))))))
+                  (clutch--completion-prefix-names conn nil prefix))))
            (derived (and (not table-context-p)
                          (clutch--completion-derived-source
                           (clutch--tables-in-query-cache-entry schema)
