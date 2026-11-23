@@ -85,20 +85,14 @@ Compatibility entry files live in the [ob-clutch](https://github.com/LuciusChen/
 
 ## Header Arguments
 
-| Argument | Description |
-|----|----|
-| `:connection` | Name from `clutch-connection-alist` (overrides all inline params) |
-| `:backend` | `mysql`, `pg`, `sqlite`, `oracle`, `sqlserver`, `redshift`, etc. |
-| `:host` | Database host (default: `127.0.0.1`) |
-| `:port` | Database port (omit to use driver default) |
-| `:user` | Database user |
-| `:database` | Database name or file path (SQLite) |
-| `:pass-entry` | auth-source entry name for password lookup |
-| `:ssh-host` | OpenSSH host alias for Clutch SSH forwarding |
-| `:tramp-default-directory` | ssh-like TRAMP directory for Clutch TRAMP forwarding |
+A block displays up to 1000 data rows by default. Use `:max-rows N` to set a limit for the block or `:max-rows nil` to request all rows.
+
+Use `:async yes` on native MySQL, PostgreSQL or JDBC connections to keep editing while a block runs. With point on the block, `M-x ob-clutch-cancel-block-at-point` cancels its latest run. SQLite blocks run synchronously.
+
+See the [ob-clutch header arguments](https://github.com/LuciusChen/ob-clutch#header-arguments) for connection parameters and backend-specific options.
 
 ## Connection Caching
 
 Connections are cached by parameter hash and source TRAMP origin, then reused across source block evaluations in the same Emacs session. All cached connections are cleanly disconnected when Emacs exits (via `kill-emacs-hook`).
 
-Local SQLite filenames are resolved against the command's source directory during connection preparation. With the matching `ob-clutch` cache fix, relative `:database app.db` headers in different directories open different databases; `:memory:` remains an in-memory connection.
+Local SQLite filenames are resolved against the command's source directory during connection preparation. Relative `:database app.db` headers in different directories open different databases.

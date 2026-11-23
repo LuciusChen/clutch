@@ -128,7 +128,7 @@ flowchart LR
   ER --> Viz
 ```
 
-Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. `clutch.el` requires all of them. The backend adapters require only `clutch-backend.el`. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.
+Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. Loading `clutch.el` brings in the SQL and result workflows. The MongoDB document mode loads on demand. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.
 
 ## Backend And Surface Model
 

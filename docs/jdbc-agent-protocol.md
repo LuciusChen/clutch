@@ -31,8 +31,7 @@ The stdin reader submits decoded requests to a pool. The dispatcher serializes o
 - Format: one complete JSON object per line
 - Process stderr: startup failures, JVM/agent diagnostics, and quarantined third-party Java console output
 
-The agent emits an initial ready response on startup before normal RPC traffic begins.
-Before loading any third-party driver code, the agent retains a dedicated operating-system stdout handle for protocol responses and redirects Java's global `System.out` to UTF-8 stderr. This keeps unconditional driver messages, including Snowflake external-browser login status, out of the JSON stream while preserving them in Clutch's captured diagnostics.
+The agent emits an initial ready response on startup before normal RPC traffic begins. Before loading any third-party driver code, the agent retains a dedicated operating-system stdout handle for protocol responses and redirects Java's global `System.out` to UTF-8 stderr. This keeps unconditional driver messages, including Snowflake external-browser login status, out of the JSON stream while preserving them in Clutch's captured diagnostics.
 
 ## Message shape
 
@@ -57,7 +56,7 @@ Error responses:
 Error responses with opt-in debug payload:
 
 ```json
-{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"pool-1-thread-2","request-context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>","user":"system","property-keys":["oracle.net.wallet_location"]},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
+{"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"clutch-jdbc-request","request-context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>","user":"system","property-keys":["oracle.net.wallet_location"]},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
 ```
 
 Rules:
@@ -118,7 +117,6 @@ Schema and object metadata:
 - `get-object-source`
 - `get-object-ddl`
 - `get-referencing-objects`
-- `get-referencing-keys` (agent 0.2.28+)
 
 Not every backend implements every metadata operation.  On the Elisp side, unsupported capabilities are represented by normal feature fallbacks rather than a separate protocol version.
 

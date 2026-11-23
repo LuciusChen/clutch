@@ -76,7 +76,7 @@ Set this to nil to disable checksum verification for a locally built jar."
                                         "-Dpolyglot.engine.WarnInterpreterOnly=false")
   "Extra JVM arguments passed when starting clutch-jdbc-agent.
 Examples:
-  (\"-Xss512k\")          — smaller thread stack, faster startup (default)
+  (\"-Xss512k\")          — use a smaller thread stack
   (\"-Xss512k\" \"-Xmx256m\") — also cap heap at 256 MB"
   :type '(repeat string)
   :group 'clutch-jdbc)

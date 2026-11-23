@@ -108,7 +108,7 @@ Current native MySQL validation targets are MySQL 5.6, 8.0, 8.4 LTS, and MariaDB
 
 ## Release and documentation details
 
-- Keep CHANGELOG sections version-based: `## VERSION - Unreleased` until an intentional release. Accumulate related changes without bumping a version for each commit.
+- Collect changes under `## Unreleased`. Set the version and date when cutting a release.
 - Before 1.0, use patch releases for bug-fix-only changes and minor releases for new backends, substantial features or public configuration/API/backend-contract breaks. A real Breaking Changes section precedes Added; omit empty sections.
 - Update README and the relevant guide for changed user-facing behavior. Pure tests, internal cleanup and instruction maintenance need no release note unless they change a documented product contract.
 - Export data-path changes require content and encoding regressions. Preserve explicit encoding, Excel guidance, atomic replacement, SQL bounds and copy/export scope; a menu-only wording change does not require a new encoding test.
