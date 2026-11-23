@@ -541,6 +541,17 @@ The exact-name match only needs entries under the name's prefix."
                 (search-backward "orders")
                 (push (call-interactively #'clutch-object-show-ddl-or-source) buffers)
                 (should (string-search "attached_only" (buffer-string))))))
+          (with-temp-buffer
+            (clutch-mode)
+            (setq-local clutch-connection first)
+            (push (clutch-object-describe '(:name "orders" :schema "aux" :type "TABLE")) buffers)
+            (should (string-search "attached_only" (buffer-string)))
+            (clutch-db-query first "DROP TABLE aux.orders")
+            (call-interactively #'clutch-describe-refresh)
+            (should (string-search "aux.orders" (buffer-string)))
+            (should (string-search "Columns (0)" (buffer-string)))
+            (should-not (string-search "dev_only" (buffer-string)))
+            (should-not (string-search "attached_only" (buffer-string))))
           (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
             (ert-info ((symbol-name command))
               (let ((views

@@ -14,6 +14,8 @@
 
 - Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
 
+- Refreshing Describe for a missing qualified table no longer shows columns from a same-named table in another database.
+
 - Typing during JDBC identifier completion no longer waits for column metadata or an Oracle prefix search.
 
 - MongoDB queries decode Unicode string escapes and reject malformed numeric literals before sending a command.
