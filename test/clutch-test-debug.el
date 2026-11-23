@@ -104,14 +104,15 @@ error 1045 is, and an unknown database, error 1049, had no hint."
                                          :message "reason-71")
                                         (:exception-class "java.net.ConnectException"
                                          :message "root-71")))
-                   :stderr-tail "Connect request 71 failed: jdbc:example://app:url-secret@host/db?token=token-secret&ssl=true;password={a b;brace-secret}}tail}")))
+                   :stderr-tail "Connect request 71 failed: jdbc:example://app:url-secret@host/db?token=token-secret&ssl=true;trustStorePassword={a b;brace-secret}}tail}")))
     (with-temp-buffer
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
         (clutch--remember-problem-record
          :buffer (current-buffer)
          :problem details)
-        (should-not (string-search "url-secret" (plist-get clutch--buffer-error-details :stderr-tail)))
+        (should-not (string-match-p "url-secret\\|brace-secret"
+                                    (plist-get clutch--buffer-error-details :stderr-tail)))
         (let ((text (clutch-test--debug-buffer-string)))
           (should (string-match-p "Connection failed" text))
           (should (string-match-p "08071" text))

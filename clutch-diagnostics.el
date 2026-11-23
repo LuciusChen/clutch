@@ -204,18 +204,20 @@ Each section is a cons cell (TITLE . VALUE)."
     (dolist (range (nthcdr (max 0 clutch-debug-event-limit) ranges))
       (delete-region (max (point-min) (- (car range) 2)) (cdr range)))))
 
-(defconst clutch--url-secret-param-prefix
-  (concat "\\([?&;]"
-          (regexp-opt '("access_token" "pass" "password" "passwd"
-                        "private_key" "private-key" "pwd" "secret" "token"))
-          "=\\)")
-  "Regexp matching URL parameters holding connection secrets.")
-
 (defun clutch--redact-url (url &optional legacy)
   "Mask URL credentials.  LEGACY reproduces old console file names."
   (let ((case-fold-search t))
     (replace-regexp-in-string
-     (concat clutch--url-secret-param-prefix
+     (concat "\\([?&;]\\(?:"
+             (if legacy
+                 ;; Keep the old filenames reproducible with their exact key list.
+                 (rx (or "access_token" "pass" "password" "passwd" "private_key"
+                         "private-key" "pwd" "secret" "token"))
+               (rx (or "pass" "private_key" "private-key"
+                       (seq (* (in alnum "_.-"))
+                            (or "password" "passwd" "pwd" "secret" "token"
+                                "cookie" "authorization" "credential" "credentials")))))
+             "\\)=\\)"
              (if legacy "[^&;]*"
                ;; SQL Server braces allow semicolons, spaces and doubled }.
                (rx (group (or (seq "{" (* (or (not (in "}\n")) "}}")) "}")
