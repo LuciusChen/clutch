@@ -1116,13 +1116,31 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
                        clutch-high-risk-query-confirmation))))
     t))
 
+(defun clutch--plsql-confirmation-statements (sql dialect)
+  "Return the statements to check before running an anonymous block in SQL.
+A BEGIN opens a statement just as a semicolon ends one.  Ignore both
+inside literals and comments according to DIALECT."
+  (let ((delimiters (clutch-db-sql-code-match-positions sql 0 nil "\\bBEGIN\\b\\|;"))
+        (start 0)
+        statements)
+    (clutch-db-sql-scan-code
+     sql 0 nil
+     (lambda (pos _ch depth)
+       (when (zerop depth)
+         (when (< start pos) (push (substring sql start pos) statements))
+         (setq start (gethash pos delimiters)))
+       nil)
+     dialect delimiters)
+    (when (< start (length sql)) (push (substring sql start) statements))
+    (nreverse statements)))
+
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
   (let* ((dialect (clutch--buffer-sql-dialect))
          (statements
           (pcase (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-kind sql 0))
             ('stored nil) ; Compiling the definition does not run its body.
-            ('anonymous (mapcar #'car (clutch--split-statement-specs sql nil '(:oracle-quotes t))))
+            ('anonymous (clutch--plsql-confirmation-statements sql dialect))
             (_ (list (if (plist-get dialect :cql)
                          (clutch-db-sql-strip-leading-comments sql dialect)
                        sql))))))
@@ -1625,9 +1643,8 @@ also split on blank lines."
           statement-bounds))
     (clutch--query-bounds-at-point)))
 
-(defun clutch--split-statement-specs (sql &optional base-position dialect)
+(defun clutch--split-statement-specs (sql &optional base-position)
   "Split SQL into `(STATEMENT BEG END)' specs on unquoted semicolons.
-DIALECT defaults to the current buffer dialect.
 BEG and END are buffer positions when BASE-POSITION is non-nil.  Semicolons
 inside single-quoted strings, -- line comments, and /* */ block comments are
 skipped.  PostgreSQL dollar-quoted bodies are skipped when the current SQL
@@ -1636,7 +1653,7 @@ the last semicolon, is no statement and is dropped unless it contains /*! or
 /*M!, which open a comment whose body MySQL and MariaDB run."
   (let ((stmts nil)
         (start 0)
-        (dialect (or dialect (clutch--buffer-sql-dialect)))
+        (dialect (clutch--buffer-sql-dialect))
         (len (length sql)))
     (cl-labels
         ((blank-char-p (ch)

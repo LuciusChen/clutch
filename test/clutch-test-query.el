@@ -1679,7 +1679,12 @@ the filter wraps the base query, not the last query run."
         (should-not (clutch--confirm-query-execution
                      "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; DELETE FROM logs; END;"))
         (should-error (clutch--confirm-query-execution "BEGIN UPDATE demo SET val=1 WHERE id=1; DELETE FROM logs; END;")
-                      :type 'user-error)))
+                      :type 'user-error))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+        (dolist (prefix '("BEGIN" "BEGIN NULL;"))
+          (should-error (clutch--confirm-query-execution
+                         (concat prefix " DELETE FROM logs WHERE id=1; END;"))
+                        :type 'user-error))))
     (let ((sql "SELECT 1 FROM dual WHERE 'x'=q'[it's;fine]'"))
       (with-temp-buffer
         (clutch-repl-mode)
