@@ -39,7 +39,7 @@ Select a SQLite database file. Clutch opens a connected query console in an edit
 SELECT sqlite_version();
 ```
 
-Press `C-c C-c`. Clutch executes the region when one is active, otherwise the statement at point, and displays the result below the query buffer. In Oracle scripts, separate PL/SQL blocks with a slash on its own line.
+Press `C-c C-c`. Clutch executes the region when one is active, otherwise the statement at point, and displays the result below the query buffer.
 
 For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Details](#installation-details) and the [user guide](docs/user-guide.md).
 
