@@ -16,6 +16,8 @@
 
 - Typing during JDBC identifier completion no longer waits for column metadata or an Oracle prefix search.
 
+- MongoDB queries decode Unicode string escapes and reject malformed numeric literals before sending a command.
+
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.

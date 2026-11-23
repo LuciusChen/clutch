@@ -3130,6 +3130,10 @@ passes validation fails the test instead of failing on the fake client."
                (lambda (&rest _)
                  (ert-fail "Invalid MongoDB query reached the server"))))
       (dolist (query '("db.users.find('name')"
+                       "db.users.find({n: 1.2.3})"
+                       "db.users.find({n: +1.2.3})"
+                       "db.users.find({name: '\\u12x4'})"
+                       "db.users.find({name: '\\uD83D\\UDE00'})"
                        "db.users.find({}, {}, {})"
                        "db.users.findOne({}).limit(1)"
                        "db.users.aggregate([]).sort({_id: 1})"
@@ -3335,12 +3339,14 @@ passes validation fails the test instead of failing on the fake client."
        (concat
         "db.events.find({"
         "_id: ObjectId('507f1f77bcf86cd799439011'), "
+        "name: '\\u0041\\uD83D\\uDE00', "
         "createdAt: ISODate('2024-01-02T03:04:05.678Z')"
         "})")))
     (should (mongodb-document-p captured-filter))
     (let* ((pairs (mongodb-document-pairs captured-filter))
            (id (cdr (assoc "_id" pairs)))
            (created-at (cdr (assoc "createdAt" pairs))))
+      (should (equal (cdr (assoc "name" pairs)) "A😀"))
       (should (mongodb-object-id-p id))
       (should (equal (mongodb-object-id-hex id)
                      "507f1f77bcf86cd799439011"))
@@ -7833,7 +7839,7 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
              (format
               (concat
                "db.getCollection(%S).insertMany(["
-               "{_id: 'a', n: 1, s: 'hello', code: 'a);b]/c', "
+               "{_id: 'a', n: +1, s: 'hell\\u006f', code: 'a);b]/c', "
                "createdAt: ISODate('2024-01-02T03:04:05.678Z')},"
                "{_id: 'b', n: 2, nested: {ok: true}}"
                "])")
@@ -7841,7 +7847,7 @@ price int, doubled int GENERATED ALWAYS AS (price * 2) STORED)"
             (should (member collection (clutch-db-list-tables conn)))
             (let* ((code (format
                           (concat
-                           "db.getCollection(%S).find({}, "
+                           "db.getCollection(%S).find({n: {$gte: .5}}, "
                            "{_id: 1, n: 1, s: 1, nested: 1})")
                           collection))
                    (result (clutch-db-query conn code))

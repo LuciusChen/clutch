@@ -244,6 +244,22 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
   (or (null char)
       (memq char '(?\s ?\t ?\n ?\r ?{ ?} ?\[ ?\] ?\( ?\) ?: ?, ?\;))))
 
+(defun clutch-mongodb--mql-read-unicode (reader)
+  "Read a Unicode escape after its backslash and u in READER."
+  (let ((text (clutch-mongodb--mql-reader-text reader))
+        (start (- (clutch-mongodb--mql-reader-pos reader) 2)))
+    (with-temp-buffer
+      ;; One UTF-16 escape, or two for a surrogate pair.
+      (insert (substring text start (min (length text) (+ start 12))))
+      (goto-char (point-min))
+      (let* ((case-fold-search nil)
+             (char (condition-case nil (json-read-escaped-char)
+                     (json-error nil))))
+        (unless (and char (not (<= #xd800 char #xdfff)))
+          (signal 'clutch-db-error '("Invalid Unicode escape in MongoDB string")))
+        (setf (clutch-mongodb--mql-reader-pos reader) (+ start (1- (point))))
+        char))))
+
 (defun clutch-mongodb--mql-parse-string (reader)
   "Parse a quoted string from READER."
   (let ((quote (clutch-mongodb--mql-read reader))
@@ -253,10 +269,8 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
       (let ((char (clutch-mongodb--mql-read reader)))
         (if (eq char ?\\)
             (push (pcase (clutch-mongodb--mql-read reader)
-                    (?n ?\n)
-                    (?r ?\r)
-                    (?t ?\t)
-                    (escaped escaped))
+                    (?u (clutch-mongodb--mql-read-unicode reader))
+                    (escaped (or (cdr (assq escaped json-special-chars)) escaped)))
                   chars)
           (push char chars))))
     (unless (eq (clutch-mongodb--mql-read reader) quote)
@@ -276,16 +290,10 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
 
 (defun clutch-mongodb--mql-parse-number (reader)
   "Parse a numeric literal from READER."
-  (let ((start (clutch-mongodb--mql-reader-pos reader)))
-    (while (and (not (clutch-mongodb--mql-end-p reader))
-                (string-match-p
-                 "[0-9eE+.-]"
-                 (char-to-string (clutch-mongodb--mql-peek reader))))
-      (clutch-mongodb--mql-read reader))
-    (let ((token (substring (clutch-mongodb--mql-reader-text reader)
-                            start
-                            (clutch-mongodb--mql-reader-pos reader))))
-      (string-to-number token))))
+  (let ((token (clutch-mongodb--mql-parse-identifier reader)))
+    (unless (string-match-p clutch-db-number-regexp token)
+      (signal 'clutch-db-error (list (format "Invalid MongoDB number: %s" token))))
+    (string-to-number token)))
 
 (defun clutch-mongodb--mql-nonnegative-integer-arg (value method)
   "Return VALUE as a non-negative integer argument for MongoDB METHOD."
@@ -434,9 +442,7 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (?\[ (clutch-mongodb--mql-parse-array reader))
     (?/ (signal 'clutch-db-error
                 (list "MongoDB regex literals are not supported; use {$regex: \"pattern\"}")))
-    ((or ?- (guard (and (clutch-mongodb--mql-peek reader)
-                        (<= ?0 (clutch-mongodb--mql-peek reader))
-                        (<= (clutch-mongodb--mql-peek reader) ?9))))
+    ((or ?+ ?- ?. (cl-type (integer ?0 ?9)))
      (clutch-mongodb--mql-parse-number reader))
     (_ (clutch-mongodb--mql-parse-identifier-value reader))))
 
