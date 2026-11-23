@@ -1120,12 +1120,12 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
   "Prompt for any confirmation required before executing SQL."
   (let* ((dialect (clutch--buffer-sql-dialect))
          (statements
-          (cond
-           ((and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-p sql 0))
-            ;; Send the unit whole, but retain the checks on its SQL fragments.
-            (mapcar #'car (clutch--split-statement-specs sql nil '(:oracle-quotes t))))
-           ((plist-get dialect :cql) (list (clutch-db-sql-strip-leading-comments sql dialect)))
-           (t (list sql)))))
+          (pcase (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-kind sql 0))
+            ('stored nil) ; Compiling the definition does not run its body.
+            ('anonymous (mapcar #'car (clutch--split-statement-specs sql nil '(:oracle-quotes t))))
+            (_ (list (if (plist-get dialect :cql)
+                         (clutch-db-sql-strip-leading-comments sql dialect)
+                       sql))))))
     (dolist (statement statements)
       (unless (clutch--confirm-high-risk-query statement)
         (when (or (clutch-db-sql-destructive-p statement)
@@ -1582,7 +1582,7 @@ when `clutch-pulse-statement-at-point' is non-nil."
   "Return non-nil when statement delimiters or a PL/SQL unit select the bounds."
   (let ((text (buffer-substring-no-properties (point-min) (point-max)))
         (dialect (clutch--buffer-sql-dialect)))
-    (or (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-p text 0))
+    (or (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-kind text 0))
         (consp (clutch-db-sql-statement-breaks text dialect)))))
 
 ;;;; Interactive commands

@@ -1675,8 +1675,17 @@ the filter wraps the base query, not the last query run."
     (setq-local clutch-connection (make-clutch-jdbc-conn :driver 'oracle))
     (let ((clutch-high-risk-query-confirmation 'typed))
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "no")))
+        ;; Compiling a stored procedure does not execute its body.
+        (should-not (clutch--confirm-query-execution
+                     "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; DELETE FROM logs; END;"))
         (should-error (clutch--confirm-query-execution "BEGIN UPDATE demo SET val=1 WHERE id=1; DELETE FROM logs; END;")
                       :type 'user-error)))
+    (let ((sql "SELECT 1 FROM dual WHERE 'x'=q'[it's;fine]'"))
+      (with-temp-buffer
+        (clutch-repl-mode)
+        (setq-local clutch-connection (make-clutch-jdbc-conn :driver 'oracle))
+        (should-not (clutch-repl--input-complete-p sql))
+        (should (clutch-repl--input-complete-p (concat sql ";")))))
     (dolist (block '("DECLARE s VARCHAR2(80) := q'[it's;\n/\nstill text]';\n\nBEGIN NULL; END;"
                      "-- install\nCREATE OR /* note */ REPLACE PROCEDURE p AS BEGIN NULL; END;"))
       (erase-buffer)

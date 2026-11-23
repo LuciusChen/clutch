@@ -400,7 +400,7 @@ match data is left untouched."
                                         (memq (aref sql (- pos 2)) '(?n ?N)))
                                    2 1))))
              (or (zerop start)
-                 (not (memq (char-syntax (aref sql (1- start))) '(?w ?_))))))
+                 (not (string-match-p "[[:alnum:]_$#]" (substring sql (1- start) start))))))
       (let* ((open (aref sql (1+ pos)))
              (close (or (cdr (assq open '((?\[ . ?\]) (?\{ . ?\}) (?\( . ?\)) (?< . ?>)))) open))
              (end (string-search (string close ?\') sql (+ pos 2))))
@@ -656,8 +656,8 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
 
 ;;;; SQL helpers (statement boundaries)
 
-(defun clutch-db-sql-plsql-unit-p (sql start)
-  "Return non-nil for an Oracle PL/SQL unit at START in SQL."
+(defun clutch-db-sql-plsql-unit-kind (sql start)
+  "Return `anonymous' or `stored' for an Oracle PL/SQL unit at START in SQL."
   (let ((pos (clutch-db-sql--skip-blank sql start)))
     (cl-flet ((word ()
                 (when-let* (((< pos (length sql)))
@@ -665,22 +665,24 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
                             (end (clutch-db-sql--token-end sql pos)))
                   (prog1 (upcase (substring sql pos end))
                     (setq pos (clutch-db-sql--skip-blank sql end))))))
-      (or (and (< (1+ pos) (length sql))
+      (if (and (< (1+ pos) (length sql))
                (= (aref sql pos) ?<) (= (aref sql (1+ pos)) ?<))
-          (pcase (word)
-            ((or "BEGIN" "DECLARE") t)
-            ("CREATE"
-             (let ((kind (word)))
-               (when (and (equal kind "OR") (equal (word) "REPLACE"))
-                 (setq kind (word)))
-               (when (member kind '("EDITIONABLE" "NONEDITIONABLE"))
-                 (setq kind (word)))
-               (member kind '("PROCEDURE" "FUNCTION" "PACKAGE" "TRIGGER" "TYPE")))))))))
+          'anonymous
+        (pcase (word)
+          ((or "BEGIN" "DECLARE") 'anonymous)
+          ("CREATE"
+           (let ((kind (word)))
+             (when (and (equal kind "OR") (equal (word) "REPLACE"))
+               (setq kind (word)))
+             (when (member kind '("EDITIONABLE" "NONEDITIONABLE"))
+               (setq kind (word)))
+             (when (member kind '("PROCEDURE" "FUNCTION" "PACKAGE" "TRIGGER" "TYPE"))
+               'stored))))))))
 
 (defun clutch-db-sql--oracle-statement-breaks (sql dialect start)
   "Find SQL terminators and PL/SQL slash lines in SQL from START under DIALECT."
   (let* ((from (or start 0))
-         (unit (clutch-db-sql-plsql-unit-p sql from))
+         (unit (clutch-db-sql-plsql-unit-kind sql from))
          breaks)
     (clutch-db-sql-scan-code
      sql from nil
@@ -696,7 +698,7 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
                              (or (null end) (= (aref sql end) ?\n))))
                     (= ch ?\;)))
          (push pos breaks)
-         (setq unit (clutch-db-sql-plsql-unit-p sql (1+ pos))))
+         (setq unit (clutch-db-sql-plsql-unit-kind sql (1+ pos))))
        nil)
      dialect ";/")
     (nreverse breaks)))
