@@ -174,6 +174,8 @@ controls liveness and defaults to t."
              (puthash conn schema clutch--schema-cache)
              (dolist (case '(("SELECT p. FROM main.people p" "name")
                              ("SELECT p. FROM other.people p" "other_name")
+                             ("SELECT p. FROM (other.people AS p)" "other_name")
+                             ("SELECT p. FROM (other.people) AS p" "other_name")
                              ("SELECT d. FROM (SELECT minus FROM metrics) d" "minus")
                              ("SELECT minus. FROM metrics minus" "id" "minus")
                              ;; SQLite ignores case, quoted or not.
@@ -2447,6 +2449,8 @@ then failed with \"Connection busy\"."
   "Alias xref should jump to the scoped source alias definition."
   (dolist (case
            (list
+            (list :label "alias inside grouped table" :sql "SELECT u.id FROM (aux.users AS u)"
+                  :needle "u.id" :id "u" :before "AS " :char ?u)
             (list :label "SQLite UPDATE target" :sql "UPDATE OR IGNORE aux.users AS u SET id = u.id"
                   :needle "u.id" :id "u" :before "AS " :char ?u)
             (list :label "where alias"

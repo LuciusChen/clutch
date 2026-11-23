@@ -457,53 +457,62 @@ wins.  Return nil when no scope around point has the source."
       source
     (clutch--normalize-statement-table-token source)))
 
+(defun clutch--completion-read-source (sql masked start output-plans &optional group-end)
+  "Read a FROM source at START in SQL, returning (ALIAS . SOURCE).
+MASKED preserves positions in SQL.  Inside parentheses, GROUP-END requires
+a single table and its optional alias to consume the whole group.
+OUTPUT-PLANS holds the output columns of derived queries."
+  (let ((start (clutch-db-sql--skip-blank masked start))
+        source end alias)
+    (cond
+     ((and (null group-end) (< start (length sql)) (= (aref sql start) ?\())
+      (when-let* ((close (clutch-db-sql-matching-paren-position sql start)))
+        (let ((table (clutch--completion-read-source sql masked (1+ start) output-plans close)))
+          (setq alias (car table)
+                source (or (cdr table)
+                           (cons 'output (clutch--completion-query-output
+                                          (substring sql (1+ start) close) output-plans)))
+                end (1+ close)))))
+     ((and (eq start (string-match "[[:alnum:]_$#.`\"]+" masked start))
+           (not (string-suffix-p "." (match-string 0 masked)))
+           ;; SELECT id in (SELECT id) is a projection, not a table and alias.
+           (not (and group-end (member-ignore-case (match-string 0 masked)
+                                                   '("SELECT" "VALUES" "TABLE")))))
+      (setq source (match-string 0 sql) end (match-end 0)
+            alias (clutch--sql-alias-name (clutch-db-sql-table-qualifier source)))))
+    (when (and end (or (not group-end) (< end group-end))
+               (string-match clutch--sql-source-alias-regexp masked end)
+               (= (match-beginning 0) end))
+      (let* ((alias-end (match-end 0))
+             (alias-beg (match-beginning 1))
+             (token (match-string 1 sql))
+             (name (clutch--sql-alias-name token)))
+        (when (clutch--sql-source-alias-p token)
+          ;; Where the alias is written, for `M-.'.
+          (put-text-property 0 (length name) 'clutch--sql-position
+                             alias-beg name)
+          (setq alias name end alias-end))))
+    ;; A column-name list overrides this projection.  Do not offer the
+    ;; original names until that separate SQL form is supported.
+    (when (and end (= (aref masked start) ?\()
+               (string-match "[ \t\n\r]*(" masked end)
+               (= (match-beginning 0) end))
+      (setq source '(output)))
+    (when (and alias source
+               (or (not group-end) (= group-end (clutch-db-sql--skip-blank masked end))))
+      (cons alias source))))
+
 (defun clutch--completion-query-sources (sql output-plans)
   "Return (ALIAS . SOURCE) pairs for the outer FROM list of SQL.
 SOURCE is a table token or (output . PLAN) for a derived SELECT.
 OUTPUT-PLANS shares parsed subquery outputs during this statement analysis."
   (let ((masked (clutch-db-sql-mask-literal-or-comment
                  sql (clutch-db-connection-sql-dialect clutch-connection)))
-        (case-fold-search t)
-        sources)
-    (dolist (entry (clutch--sql-from-source-positions sql))
-      (when (zerop (cdr entry))
-        (let ((start (car entry)) source end alias)
-          (when (string-match "[ \t\n\r]*" masked start)
-            (setq start (match-end 0)))
-          (cond
-           ((and (< start (length sql)) (= (aref sql start) ?\())
-            (when-let* ((close (clutch-db-sql-matching-paren-position sql start)))
-              (setq source (cons 'output
-                                 (clutch--completion-query-output
-                                  (substring sql (1+ start) close) output-plans))
-                    end (1+ close))))
-           ((and (string-match "[[:alnum:]_$#.`\"]+" masked start)
-                 (= (match-beginning 0) start)
-                 ;; A name still being typed, as side. is, names nothing yet.
-                 (not (string-suffix-p "." (match-string 0 masked))))
-            (setq source (match-string 0 sql) end (match-end 0)
-                  alias (clutch--sql-alias-name
-                         (clutch-db-sql-table-qualifier source)))))
-          (when (and end
-                     (string-match clutch--sql-source-alias-regexp masked end)
-                     (= (match-beginning 0) end))
-            (let* ((alias-end (match-end 0))
-                   (alias-beg (match-beginning 1))
-                   (token (match-string 1 sql))
-                   (name (clutch--sql-alias-name token)))
-              (when (clutch--sql-source-alias-p token)
-                ;; Where the alias is written, for `M-.'.
-                (put-text-property 0 (length name) 'clutch--sql-position
-                                   alias-beg name)
-                (setq alias name end alias-end))))
-          ;; A column-name list overrides this projection.  Do not offer the
-          ;; original names until that separate SQL form is supported.
-          (when (and (consp source) end
-                     (string-match "[ \t\n\r]*(" masked end)
-                     (= (match-beginning 0) end))
-            (setq source '(output)))
-          (when (and alias source) (push (cons alias source) sources)))))
-    (nreverse sources)))
+        (case-fold-search t))
+    (cl-loop for (start . depth) in (clutch--sql-from-source-positions sql)
+             for source = (and (zerop depth)
+                               (clutch--completion-read-source sql masked start output-plans))
+             when source collect source)))
 
 (defun clutch--completion-query-output (sql output-plans)
   "Describe named output columns of a derived SELECT in SQL.
