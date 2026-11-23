@@ -2466,6 +2466,15 @@ unknown.")
   "Fallback implementation for backends without live symbol help."
   nil)
 
+(cl-defgeneric clutch-db-symbol-help-async (conn symbol callback)
+  "Start looking up SYMBOL on CONN without blocking.
+Call CALLBACK with the help plist and an error condition, either of which
+may be nil.  Return non-nil when dispatched.")
+
+(cl-defmethod clutch-db-symbol-help-async ((_conn t) _symbol _callback)
+  "Decline background help on backends without a server help facility."
+  nil)
+
 (cl-defgeneric clutch-db-table-comment-async (conn table callback &optional errback)
   "Start an asynchronous table-comment fetch for TABLE on CONN.
 CALLBACK receives the comment string or nil on success.  ERRBACK receives an
