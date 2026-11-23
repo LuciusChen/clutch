@@ -247,22 +247,26 @@ Return non-nil when the wire protocol is synchronized again."
     (mysql-query-error t)
     (mysql-error nil)))
 
-(defun clutch-db-mysql--parse-help-text (text)
-  "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.
-Return nil when TEXT has no Syntax section."
-  (when (string-match "\\(?:\\`\\|\n\\)Syntax:[[:blank:]\r\n]*" text)
-    (when-let* ((paragraphs (split-string (substring text (match-end 0))
-                                           "\n[[:blank:]\r\n]*\n"
-                                           t "[[:blank:]\r\n]+"))
-                (sig (car paragraphs)))
-      (let* ((desc (cadr paragraphs))
-             (sig (string-join (split-string sig "\n" t "[[:blank:]]+")
-                               " / "))
-             (desc (car (split-string (or desc "") "\nURL:" t)))
-             (desc (string-join (split-string (or desc "") "\n" t "[[:blank:]]+")
-                                " ")))
-        (unless (string-empty-p sig)
-          (list :sig sig :desc desc))))))
+(defun clutch-db-mysql--help-sql (symbol)
+  "Return the MySQL HELP query for SYMBOL."
+  (format "HELP %s" (mysql-escape-literal (upcase (format "%s" symbol)))))
+
+(defun clutch-db-mysql--parse-help-rows (rows)
+  "Return the signature and description from single-topic MySQL HELP ROWS."
+  (when-let* ((text (nth 1 (car rows))) ((stringp text))
+              ((string-match "\\(?:\\`\\|\n\\)Syntax:[[:blank:]\r\n]*" text))
+              (paragraphs (split-string (substring text (match-end 0))
+                                        "\n[[:blank:]\r\n]*\n"
+                                        t "[[:blank:]\r\n]+"))
+              (sig (car paragraphs)))
+    (let* ((desc (cadr paragraphs))
+           (sig (string-join (split-string sig "\n" t "[[:blank:]]+")
+                             " / "))
+           (desc (car (split-string (or desc "") "\nURL:" t)))
+           (desc (string-join (split-string (or desc "") "\n" t "[[:blank:]]+")
+                              " ")))
+      (unless (string-empty-p sig)
+        (list :sig sig :desc desc)))))
 
 (defun clutch-db-mysql--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
@@ -729,14 +733,18 @@ Decline when the installed mysql.el cannot execute asynchronously."
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
   "Return MySQL HELP metadata for SYMBOL on CONN, or nil when unknown."
   (clutch-db--translate-library-error mysql-error
-    (let* ((result (clutch-db-mysql--metadata-query
-                    conn (format "HELP %s"
-                                 (mysql-escape-literal
-                                  (upcase (format "%s" symbol))))))
-           (row (car (mysql-result-rows result)))
-           (desc (nth 1 row)))
-      (when (stringp desc)
-        (clutch-db-mysql--parse-help-text desc)))))
+    (clutch-db-mysql--parse-help-rows
+     (mysql-result-rows
+      (clutch-db-mysql--metadata-query conn (clutch-db-mysql--help-sql symbol))))))
+
+(cl-defmethod clutch-db-symbol-help-async ((conn mysql-conn) symbol callback)
+  "Read MySQL HELP for SYMBOL on CONN and deliver it to CALLBACK."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--translate-library-error mysql-error
+      (clutch-db-mysql--send-metadata
+       conn (clutch-db-mysql--help-sql symbol)
+       (lambda (rows err) (funcall callback (clutch-db-mysql--parse-help-rows rows) err))
+       t))))
 
 (cl-defmethod clutch-db-execute-params ((conn mysql-conn) sql params)
   "Execute parameterized SQL on MySQL CONN with PARAMS."

@@ -6100,13 +6100,21 @@ out, which broke the Oracle statement and left SQL Server unpaged."
           ,(concat "HELP " (mysql-escape-literal "X' UNION SELECT 1 -- ")) nil)))
     (ert-info (symbol)
       (let ((conn (make-mysql-conn :host "localhost"))
-            captured-sql)
-        (cl-letf (((symbol-function 'mysql-query)
-                   (lambda (_conn sql)
-                     (setq captured-sql sql)
-                     (make-mysql-result :rows rows))))
-          (should (equal (clutch-db-symbol-help conn symbol) expected))
-          (should (equal captured-sql expected-sql)))))))
+            (result (make-mysql-result :rows rows))
+            reply (doc 'pending))
+        (when expected
+          (cl-letf (((symbol-function 'mysql-query) (lambda (_conn _sql) result)))
+            (should (equal (clutch-db-symbol-help conn symbol) expected))))
+        (cl-letf (((symbol-function 'mysql-query-async)
+                   (lambda (_conn sql callback)
+                     (should (equal sql expected-sql))
+                     (setq reply callback))))
+          (should (clutch-db-symbol-help-async conn symbol
+                                               (lambda (value err)
+                                                 (should-not err)
+                                                 (setq doc value))))
+          (funcall reply result nil)
+          (should (equal doc expected)))))))
 
 (ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
   "MySQL table discovery should return comments with table entries."
