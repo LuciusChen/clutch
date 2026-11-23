@@ -18,7 +18,7 @@
 
 - JDBC schema refresh fetches all table-list pages in the background. Opening an Oracle console no longer blocks cursor movement while the remaining pages load.
 
-- Late output and exit notifications from a replaced JDBC agent no longer interrupt its replacement’s requests.
+- Late output and exit notifications from a replaced JDBC agent no longer interrupt its replacement’s requests. Pending metadata requests finish when the agent exits, and a failed startup handshake releases its process.
 
 - Oracle Thin uses in-band cancellation so `C-g` works across network routes that drop TCP urgent data. Confirmed cancellations now show `Query cancelled` without recording a problem.
 

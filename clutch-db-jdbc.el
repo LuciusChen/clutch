@@ -333,28 +333,27 @@ If verification is disabled, return non-nil."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
-(defun clutch-jdbc--clear-async-callbacks (&optional conn foreground-only)
-  "Cancel pending asynchronous JDBC callbacks.
-When CONN is non-nil, clear only callbacks for that connection.
-With FOREGROUND-ONLY, let metadata callbacks keep their timeouts.
-Foreground requests are told that no response will arrive."
+(defun clutch-jdbc--clear-async-callbacks (&optional conn)
+  "Finish pending asynchronous JDBC callbacks.
+When CONN is non-nil, clear only callbacks for that connection."
   (let (entries)
     (maphash (lambda (id entry)
-               (when (and (or (null conn) (eq conn (plist-get entry :conn)))
-                          (or (not foreground-only) (plist-get entry :handler)))
+               (when (or (null conn) (eq conn (plist-get entry :conn)))
                  (when-let* ((timer (plist-get entry :timer)))
                    (cancel-timer timer))
                  (push (cons id entry) entries)))
              clutch-jdbc--async-callbacks)
     (pcase-dolist (`(,id . ,entry) entries)
       (remhash id clutch-jdbc--async-callbacks)
-      (when-let* ((handler (plist-get entry :handler)))
-        (run-at-time 0 nil handler nil)))))
+      (cond ((plist-get entry :handler)
+             (run-at-time 0 nil (plist-get entry :handler) nil))
+            ((plist-get entry :errback)
+             (run-at-time 0 nil (plist-get entry :errback) "JDBC connection closed"))))))
 
 (defun clutch-jdbc--agent-sentinel (proc _event)
-  "Finish foreground requests when agent PROC is no longer running."
+  "Finish pending requests when agent PROC is no longer running."
   (when (and (eq proc clutch-jdbc--agent-process) (not (process-live-p proc)))
-    (clutch-jdbc--clear-async-callbacks nil t)))
+    (clutch-jdbc--clear-async-callbacks)))
 
 (defun clutch-jdbc--clear-request-state ()
   "Clear connections and request bookkeeping owned by the retired agent."
@@ -472,10 +471,14 @@ Return non-nil when a request was waiting for it."
       (clutch-jdbc--clear-async-callbacks)
       (clutch-jdbc--clear-request-state)
       ;; Wait for the ready message (id=0).
-      (let ((ready (clutch-jdbc--recv-response 0)))
-        (unless (plist-get ready :ok)
-          (error "JDBC agent failed to start: %s" (plist-get ready :error))))
-      proc)))
+      (let (started)
+        (unwind-protect
+            (let ((ready (clutch-jdbc--recv-response 0)))
+              (unless (eq t (plist-get ready :ok))
+                (error "JDBC agent failed to start: %s" (plist-get ready :error)))
+              (setq started proc))
+          (when (and (not started) (eq proc clutch-jdbc--agent-process))
+            (clutch-jdbc--stop-agent)))))))
 
 (defun clutch-jdbc--kill-agent-process (proc)
   "Delete agent PROC together with its process buffer.
