@@ -356,8 +356,7 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-pg-source-table-names-fold-as-postgresql-does ()
   "A PostgreSQL source table should be named as PostgreSQL stores it.
-An unquoted name folds to lower case and a quoted one keeps its case, and
-the relation is resolved with both quoted."
+An unquoted name folds to lower case and a quoted one keeps its case."
   (require 'clutch-db-pg)
   (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
     (pcase-dolist (`(,token ,name ,schema)
@@ -367,11 +366,14 @@ the relation is resolved with both quoted."
                      ("other.\"MiXed\"" "MiXed" "other")))
       (ert-info (token)
         (should (equal (clutch-db--source-table-name conn token) name))
-        (should (equal (clutch-db--source-table-schema conn token) schema))))
-    (should (equal (clutch-db-pg--relation "MiXed" "other")
-                   "'\"other\".\"MiXed\"'::regclass"))
-    (should (equal (clutch-db-pg--relation "people" nil)
-                   "'\"people\"'::regclass"))))
+        (should (equal (clutch-db--source-table-schema conn token) schema)))))
+  (dolist (schema '(nil "pg_temp" "Team's"))
+    (let ((sql (clutch-db-pg--relation "People" schema)))
+      (if (member schema '(nil "pg_temp"))
+          (should (equal sql (format "pg_catalog.to_regclass('%s\"People\"')"
+                                     (if schema "pg_temp." ""))))
+        (should (string-search "n.nspname = 'Team''s' AND c.relname = 'People'" sql))
+        (should (string-search "has_schema_privilege" sql))))))
 
 (ert-deftest clutch-db-test-pg-param-rewrite-skips-quoted-identifiers ()
   "PostgreSQL parameter rewriting should ignore quoted identifier text."
@@ -4115,7 +4117,8 @@ connection's own schema.  A driver without schemas reports an empty one."
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (clutch-jdbc-rpc-timeout-seconds 1)
         timeout-message
@@ -6111,13 +6114,21 @@ out, which broke the Oracle statement and left SQL Server unpaged."
           ,(concat "HELP " (mysql-escape-literal "X' UNION SELECT 1 -- ")) nil)))
     (ert-info (symbol)
       (let ((conn (make-mysql-conn :host "localhost"))
-            captured-sql)
-        (cl-letf (((symbol-function 'mysql-query)
-                   (lambda (_conn sql)
-                     (setq captured-sql sql)
-                     (make-mysql-result :rows rows))))
-          (should (equal (clutch-db-symbol-help conn symbol) expected))
-          (should (equal captured-sql expected-sql)))))))
+            (result (make-mysql-result :rows rows))
+            reply (doc 'pending))
+        (when expected
+          (cl-letf (((symbol-function 'mysql-query) (lambda (_conn _sql) result)))
+            (should (equal (clutch-db-symbol-help conn symbol) expected))))
+        (cl-letf (((symbol-function 'mysql-query-async)
+                   (lambda (_conn sql callback)
+                     (should (equal sql expected-sql))
+                     (setq reply callback))))
+          (should (clutch-db-symbol-help-async conn symbol
+                                               (lambda (value err)
+                                                 (should-not err)
+                                                 (setq doc value))))
+          (funcall reply result nil)
+          (should (equal doc expected)))))))
 
 (ert-deftest clutch-db-test-mysql-list-table-entries-carries-comments ()
   "MySQL table discovery should return comments with table entries."
@@ -7416,6 +7427,10 @@ Skips if `clutch-db-test-pg-password' is nil."
     (clutch-db-set-auto-commit conn nil)
     (clutch-db-query
      conn "INSERT INTO clutch_failed_commit_contract VALUES (1)")
+    (should-not (clutch-db-column-details conn "clutch_missing_relation"))
+    (should (= (caar (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT count(*) FROM clutch_failed_commit_contract")))
+               1))
     (should-error (clutch-db-query conn "SELECT 1 / 0")
                   :type 'clutch-db-error)
     (should (eq (clutch-db-commit conn) 'rolled-back))
@@ -7552,7 +7567,20 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                        (regexp-quote "\"tenant_id\" smallint") ddl))
               (should (string-match-p
                        (regexp-quote "\"id\" integer DEFAULT nextval(") ddl))
-              (should-not (string-match-p "pgsql-null" ddl))))
+              (should-not (string-match-p "pgsql-null" ddl)))
+            (let* ((view (concat table "_v"))
+                   (drop-view (format "DROP VIEW IF EXISTS %s" view)))
+              (clutch-db-query conn (format "CREATE VIEW %s AS SELECT 1 AS id" view))
+              (unwind-protect
+                  (clutch-db-test--with-pg reader
+                    (clutch-db-query reader "BEGIN ISOLATION LEVEL REPEATABLE READ")
+                    (let ((entry (seq-find (lambda (e) (equal (plist-get e :name) view))
+                                           (clutch-db-list-table-entries reader))))
+                      (should entry)
+                      (clutch-db-query conn drop-view)
+                      (should-not (clutch-db-object-definition reader entry)))
+                    (clutch-db-test--assert-live-basic-query reader))
+                (clutch-db-query conn drop-view))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-foreign-keys-pair-columns-across-schemas ()
@@ -9208,6 +9236,7 @@ That holds whether the old agent was stopped or exited on its own."
             (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
             (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
             (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+            (ready '(:ok t))
             (before (buffer-list))
             (real-make-process (symbol-function 'make-process)))
         (cl-flet ((new-agent-buffers ()
@@ -9222,7 +9251,7 @@ That holds whether the old agent was stopped or exited on its own."
                 (cl-letf (((symbol-function 'clutch-jdbc--validate-agent-jar) #'ignore)
                           ((symbol-function 'executable-find) (lambda (_cmd) "java"))
                           ((symbol-function 'clutch-jdbc--recv-response)
-                           (lambda (&rest _args) '(:ok t)))
+                           (lambda (&rest _args) ready))
                           ((symbol-function 'make-process)
                            (lambda (&rest args)
                              (if exits-on-its-own
@@ -9234,6 +9263,10 @@ That holds whether the old agent was stopped or exited on its own."
                                (make-pipe-process :name (plist-get args :name)
                                                   :buffer (plist-get args :buffer)
                                                   :noquery t)))))
+                  (setq ready '(:ok :json-false :error "unable to start"))
+                  (should-error (clutch-jdbc--ensure-agent))
+                  (should-not clutch-jdbc--agent-process)
+                  (setq ready '(:ok t))
                   ;; Two restart cycles, then a third start left running.
                   (dotimes (_ 2)
                     (clutch-jdbc--ensure-agent)
@@ -9266,7 +9299,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
                       (lambda (&rest _)
                         (when ,pending
                           (clutch-jdbc--agent-filter
-                           'fake-proc
+                           clutch-jdbc--agent-process
                            (mapconcat (lambda (line) (concat line "\n"))
                                       (prog1 ,pending (setq ,pending nil))
                                       ""))
@@ -9819,7 +9852,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (next-id 40)
-        outcomes)
+        metadata-errors outcomes)
     (puthash 7 conn clutch-jdbc--connections-by-id)
     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'clutch-jdbc--send)
@@ -9849,18 +9882,22 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
             '("{\"id\":43,\"ok\":true,\"result\":{\"cancelled\":true,\"request-id\":42}}")
           (should (clutch-db-interrupt-query conn)))
         (should (eql (gethash conn clutch-jdbc--busy-request-ids) 42))
-        ;; An exiting agent finishes foreground requests, not metadata ones.
-        (puthash 99 (list :callback #'ignore :conn conn :op "get-tables")
+        ;; The old sentinel leaves both requests to their owner.
+        (puthash 99 (list :errback (lambda (reason) (push reason metadata-errors))
+                          :conn conn :op "get-tables")
                  clutch-jdbc--async-callbacks)
         (setq outcomes nil)
         (cl-letf (((symbol-function 'process-live-p) #'ignore)
                   ((symbol-function 'clutch-jdbc--agent-exit-error-message)
                    (lambda () "clutch-jdbc-agent exited")))
+          (clutch-jdbc--agent-sentinel 'retired "finished\n")
+          (should (gethash 42 clutch-jdbc--async-callbacks))
           (clutch-jdbc--agent-sentinel 'fake-proc "exited abnormally\n")
           (run-timers)
-          (should (gethash 99 clutch-jdbc--async-callbacks))
+          (should-not (gethash 99 clutch-jdbc--async-callbacks))
           (clutch-jdbc--clear-async-callbacks conn)
           (run-timers))
+        (should (equal metadata-errors '("JDBC connection closed")))
         (should (equal outcomes
                        '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
         (should-not (gethash 42 clutch-jdbc--async-callbacks))
@@ -10016,6 +10053,9 @@ told that no reply will arrive."
     (unwind-protect
         (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
                   ((symbol-function 'delete-process) #'ignore))
+          (clutch-jdbc--agent-filter 'retired "{\"id\":1,\"ok\":true}\nnot-json\n")
+          (should-not (car reply))
+          (should (eq clutch-jdbc--agent-process 'fake-proc))
           (clutch-jdbc--agent-filter 'fake-proc
                                      "{\"id\":1,\"ok\":true}\nnot-json\n")
           (accept-process-output nil 0.01)
@@ -10034,7 +10074,8 @@ told that no reply will arrive."
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-scans-fragments-incrementally ()
   "JDBC response fragments should not rescan bytes seen by earlier filter calls."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (fragments '("{\"id\":" "17,\"ok\":" "true}" "\n"))
         (replies (mapcar (lambda (id) (list id nil)) '(17 18 19)))
@@ -10073,7 +10114,8 @@ told that no reply will arrive."
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-drops-unregistered-replies ()
   "A reply that no request waits for should be dropped and others delivered."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (reply (list nil)))
     (puthash 42 (list :reply reply) clutch-jdbc--async-callbacks)
