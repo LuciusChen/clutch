@@ -282,15 +282,15 @@ inside string literals, comments, or nested parentheses are ignored."
       ("TABLE" . ,(concat "\\(?:IF" gap "\\(?:NOT" gap "\\)?EXISTS\\b\\)?"))))
   "Optional keywords before the table name in UPDATE and table DDL.")
 
-(defun clutch--sql-from-source-positions (sql &optional table-lookup)
+(defun clutch--sql-from-source-positions (sql &optional targets)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
-For TABLE-LOOKUP, also visit grouped tables and DML or DDL targets."
+TARGETS lists other source keywords, such as UPDATE.  For object lookups
+that include TABLE, also descend into parenthesized table lists."
   (let* ((case-fold-search t)
-         (sources-after (if table-lookup '("FROM" "JOIN" "UPDATE" "INTO" "TABLE") '("FROM" "JOIN")))
+         (sources-after (append '("FROM" "JOIN") targets))
          (matches (clutch-db-sql-code-match-positions
                    sql 0 nil
-                   (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
-                           (when table-lookup "update\\|into\\|table\\|")
+                   (concat "\\b\\(?:" (string-join sources-after "\\|") "\\|select\\|where\\|group\\|order\\|having\\|"
                            (clutch--sql-set-operators-regexp)
                            "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
@@ -307,7 +307,7 @@ For TABLE-LOOKUP, also visit grouped tables and DML or DDL targets."
           (puthash (match-beginning 0) (match-end 0) matches)
           (setq pos (match-end 0)))))
     (cl-flet ((source (end depth &optional keyword)
-                (let ((start (if table-lookup (clutch-db-sql--skip-blank sql end) end)))
+                (let ((start (if targets (clutch-db-sql--skip-blank sql end) end)))
                   (when-let* ((pattern (cdr (assoc keyword clutch--sql-table-modifiers))))
                     (with-syntax-table clutch-db-sql--syntax-table
                       (string-match pattern sql start))
@@ -319,7 +319,7 @@ For TABLE-LOOKUP, also visit grouped tables and DML or DDL targets."
        (lambda (pos ch depth)
          (cond
           ((= ch ?\()
-           (if (and table-lookup (eql pos (caar sources)))
+           (if (and (member "TABLE" targets) (eql pos (caar sources)))
                (source (1+ pos) (1+ depth)) ; FROM (table, ...)
              (remhash (1+ depth) clauses)))
           ((= ch ?\)) nil)
@@ -328,7 +328,7 @@ For TABLE-LOOKUP, also visit grouped tables and DML or DDL targets."
            (let* ((end (gethash pos matches))
                   (token (upcase (substring sql pos end))))
              (if (member token sources-after)
-                 (source end depth (and table-lookup token))
+                 (source end depth (and targets token))
                (remhash depth clauses)))))
          nil)
        (clutch-db-connection-sql-dialect clutch-connection) matches))
@@ -709,21 +709,13 @@ MASKED is the literal/comment-masked version of TEXT.  The alias of each
 source, whether a table or a subquery, follows the source after FROM, JOIN,
 UPDATE, INTO or a comma in a FROM list.
 Returns the buffer position (offset by STMT-BEG), or nil."
-  (let ((case-fold-search t)
-        (pos search-beg)
-        starts)
-    (while (and (< pos search-end)
-                (string-match
-                 "\\b\\(?:from\\|join\\|update\\|into\\)[ \t\n\r]+" masked pos)
-                (< (match-beginning 0) search-end))
-      (push (match-end 0) starts)
-      (setq pos (match-end 0)))
-    (dolist (source (clutch--sql-from-source-positions text))
-      (when (and (>= (car source) search-beg) (< (car source) search-end))
-        (push (car source) starts)))
+  (let ((case-fold-search t))
     (cl-some
-     (lambda (start)
-       (when-let* ((source-end (clutch--source-end masked start))
+     (lambda (source)
+       (when-let* ((start (car source))
+                   ((<= search-beg start))
+                   ((< start search-end))
+                   (source-end (clutch--source-end masked start))
                    ((string-match clutch--sql-source-alias-regexp
                                   masked source-end))
                    ((= (match-beginning 0) source-end))
@@ -732,7 +724,7 @@ Returns the buffer position (offset by STMT-BEG), or nil."
                    ((clutch--sql-source-alias-p token))
                    ((clutch--sql-names-alias-p token alias)))
          (+ stmt-beg (match-beginning 1))))
-     (sort (delete-dups starts) #'<))))
+     (clutch--sql-from-source-positions text '("UPDATE" "INTO")))))
 
 (defun clutch--find-alias-definition-position (alias)
   "Return buffer position of ALIAS definition in the current statement.
@@ -839,7 +831,8 @@ For OBJECT-LOOKUP, also accept bare names and a standalone qualified name."
                (sql (buffer-substring-no-properties beg end))
                (offset (- (point) beg))
                (source (cl-find-if (lambda (s) (<= (car s) offset))
-                                   (clutch--sql-from-source-positions sql t) :from-end t)))
+                                   (clutch--sql-from-source-positions sql '("UPDATE" "INTO" "TABLE"))
+                                   :from-end t)))
     (when (or source object-lookup)
       (when-let* ((hit (clutch--sql-identifier-at-offset sql offset (or (car source) 0)))
                   ((or (eql (car hit) (car source))
