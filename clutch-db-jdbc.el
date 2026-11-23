@@ -55,13 +55,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.31"
+(defcustom clutch-jdbc-agent-version "0.2.32"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "a48d12c89a5c2293279d2e59043adb713e1106cf3b3f18e9c9568f54934a4b08"
+  "164c4ac1235fbaf30ac1c36ab8584f2c2b50ad0dcb8d4d4527ff31fe5a312ccd"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -333,28 +333,27 @@ If verification is disabled, return non-nil."
   (and clutch-jdbc--agent-process
        (process-live-p clutch-jdbc--agent-process)))
 
-(defun clutch-jdbc--clear-async-callbacks (&optional conn foreground-only)
-  "Cancel pending asynchronous JDBC callbacks.
-When CONN is non-nil, clear only callbacks for that connection.
-With FOREGROUND-ONLY, let metadata callbacks keep their timeouts.
-Foreground requests are told that no response will arrive."
+(defun clutch-jdbc--clear-async-callbacks (&optional conn)
+  "Finish pending asynchronous JDBC callbacks.
+When CONN is non-nil, clear only callbacks for that connection."
   (let (entries)
     (maphash (lambda (id entry)
-               (when (and (or (null conn) (eq conn (plist-get entry :conn)))
-                          (or (not foreground-only) (plist-get entry :handler)))
+               (when (or (null conn) (eq conn (plist-get entry :conn)))
                  (when-let* ((timer (plist-get entry :timer)))
                    (cancel-timer timer))
                  (push (cons id entry) entries)))
              clutch-jdbc--async-callbacks)
     (pcase-dolist (`(,id . ,entry) entries)
       (remhash id clutch-jdbc--async-callbacks)
-      (when-let* ((handler (plist-get entry :handler)))
-        (run-at-time 0 nil handler nil)))))
+      (cond ((plist-get entry :handler)
+             (run-at-time 0 nil (plist-get entry :handler) nil))
+            ((plist-get entry :errback)
+             (run-at-time 0 nil (plist-get entry :errback) "JDBC connection closed"))))))
 
 (defun clutch-jdbc--agent-sentinel (proc _event)
-  "Finish foreground requests when agent PROC is no longer running."
-  (unless (process-live-p proc)
-    (clutch-jdbc--clear-async-callbacks nil t)))
+  "Finish pending requests when agent PROC is no longer running."
+  (when (and (eq proc clutch-jdbc--agent-process) (not (process-live-p proc)))
+    (clutch-jdbc--clear-async-callbacks)))
 
 (defun clutch-jdbc--clear-request-state ()
   "Clear connections and request bookkeeping owned by the retired agent."
@@ -407,7 +406,7 @@ Return non-nil when a request was waiting for it."
 (defun clutch-jdbc--agent-filter (proc string)
   "Process filter: deliver complete JSON lines from PROC output STRING."
   (let ((buf (process-buffer proc)))
-    (when (buffer-live-p buf)
+    (when (and (eq proc clutch-jdbc--agent-process) (buffer-live-p buf))
       (with-current-buffer buf
         (goto-char (point-max))
         (insert string)
@@ -472,10 +471,14 @@ Return non-nil when a request was waiting for it."
       (clutch-jdbc--clear-async-callbacks)
       (clutch-jdbc--clear-request-state)
       ;; Wait for the ready message (id=0).
-      (let ((ready (clutch-jdbc--recv-response 0)))
-        (unless (plist-get ready :ok)
-          (error "JDBC agent failed to start: %s" (plist-get ready :error))))
-      proc)))
+      (let (started)
+        (unwind-protect
+            (let ((ready (clutch-jdbc--recv-response 0)))
+              (unless (eq t (plist-get ready :ok))
+                (error "JDBC agent failed to start: %s" (plist-get ready :error)))
+              (setq started proc))
+          (when (and (not started) (eq proc clutch-jdbc--agent-process))
+            (clutch-jdbc--stop-agent)))))))
 
 (defun clutch-jdbc--kill-agent-process (proc)
   "Delete agent PROC together with its process buffer.
@@ -1395,8 +1398,7 @@ so an object name is matched by prefix search instead."
   (clutch-jdbc--oracle-conn-p conn))
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((conn clutch-jdbc-conn))
-  "Return non-nil when CONN may synchronously load completion columns.
-This is allowed in the hot path."
+  "Return non-nil when CONN may load a complete column list."
   (not (clutch-jdbc--oracle-conn-p conn)))
 
 ;;;; Query methods
@@ -2626,16 +2628,31 @@ schemas reports an empty one, which is left out."
     (mapcar (lambda (col) (plist-get col :name))
             (plist-get result :columns))))
 
-(cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
-  "Return table name candidates matching PREFIX for JDBC CONN."
+(defun clutch-jdbc--complete-prefix (conn table prefix &optional callback errback)
+  "Find Oracle tables or TABLE columns matching PREFIX on CONN.
+With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
   (when (clutch-jdbc--oracle-conn-p conn)
-    (let ((result (clutch-jdbc--rpc
-                   conn "search-tables"
-                   `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-                     (prefix  . ,prefix)
-                     ,@(clutch-jdbc--metadata-scope-params conn)))))
-      (mapcar (lambda (tbl) (plist-get tbl :name))
-              (plist-get result :tables)))))
+    (let ((op (if table "search-columns" "search-tables"))
+          (params (cons (cons 'prefix prefix)
+                        (if table (clutch-jdbc--table-metadata-params conn table)
+                          (cons (cons 'conn-id (clutch-jdbc-conn-conn-id conn))
+                                (clutch-jdbc--metadata-scope-params conn))))))
+      (cl-flet ((names (result)
+                  (mapcar (lambda (entry) (plist-get entry :name))
+                          (plist-get result (if table :columns :tables)))))
+        (if callback
+            (clutch-jdbc--rpc-async
+             op params (lambda (result) (funcall callback (names result)))
+             errback nil conn)
+          (names (clutch-jdbc--rpc conn op params)))))))
+
+(cl-defmethod clutch-db-completion-prefix-fetcher ((conn clutch-jdbc-conn))
+  "Return the prefix search used for completion on Oracle CONN."
+  (and (clutch-jdbc--oracle-conn-p conn) #'clutch-jdbc--complete-prefix))
+
+(cl-defmethod clutch-db-complete-tables ((conn clutch-jdbc-conn) prefix)
+  "Return table names matching PREFIX on CONN."
+  (clutch-jdbc--complete-prefix conn nil prefix))
 
 (cl-defmethod clutch-db-search-table-entries ((conn clutch-jdbc-conn) prefix)
   "Return table entry plists matching PREFIX for JDBC CONN."
@@ -2676,16 +2693,8 @@ schemas reports an empty one, which is left out."
       t)))
 
 (cl-defmethod clutch-db-complete-columns ((conn clutch-jdbc-conn) table prefix)
-  "Return column name candidates for TABLE matching PREFIX on JDBC CONN."
-  (let ((driver (clutch-jdbc--conn-driver conn)))
-    (cond
-     ((eq driver 'oracle)
-      (let* ((result (clutch-jdbc--rpc
-                      conn "search-columns"
-                      (append (clutch-jdbc--table-metadata-params conn table)
-                              `((prefix . ,prefix))))))
-        (mapcar (lambda (col) (plist-get col :name))
-                (plist-get result :columns)))))))
+  "Return column names matching PREFIX for TABLE on CONN."
+  (clutch-jdbc--complete-prefix conn table prefix))
 
 (cl-defmethod clutch-db-list-objects ((conn clutch-jdbc-conn) category)
   "Return object entry plists for CATEGORY on JDBC CONN."

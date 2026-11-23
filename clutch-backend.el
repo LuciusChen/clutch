@@ -355,11 +355,15 @@ These describe how a statement is tokenized, not how it executes, so they
 only cover constructs that change where a literal or statement ends:
 `:dollar-quotes' for PostgreSQL dollar-quoted bodies, and
 `:backslash-escapes' for the MySQL family, where a backslash escapes the
-next character inside a string literal.  PRODUCT is an `sql-mode' product
-symbol as registered by `clutch-backend-sql-product'."
+next character inside a string literal.  `:hash-comments' enables MySQL's
+# line comments.  SQL Server and SQLite accept `:bracket-identifiers'.
+Oracle recognizes alternative-quoted literals and slash-terminated PL/SQL units.
+PRODUCT is the `sql-mode' symbol registered by `clutch-backend-sql-product'."
   (pcase product
+    ((or 'ms 'sqlite) '(:bracket-identifiers t))
     ('postgres '(:dollar-quotes t))
-    ('mysql '(:backslash-escapes t))
+    ('mysql '(:backslash-escapes t :hash-comments t))
+    ('oracle '(:plsql t :oracle-quotes t))
     (_ nil)))
 
 (defun clutch-db-connection-sql-dialect (conn)
@@ -391,13 +395,26 @@ match data is left untouched."
         (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
     (cond
+     ((and (eq ch ?\') (plist-get dialect :oracle-quotes) (> pos 0)
+           (memq (aref sql (1- pos)) '(?q ?Q)) (< (1+ pos) len)
+           ;; Q'...' and NQ'...' start a literal at a token boundary.
+           (let ((start (- pos (if (and (> pos 1)
+                                        (memq (aref sql (- pos 2)) '(?n ?N)))
+                                   2 1))))
+             (or (zerop start)
+                 (not (string-match-p "[[:alnum:]_$#]" (substring sql (1- start) start))))))
+      (let* ((open (aref sql (1+ pos)))
+             (close (or (cdr (assq open '((?\[ . ?\]) (?\{ . ?\}) (?\( . ?\)) (?< . ?>)))) open))
+             (end (string-search (string close ?\') sql (+ pos 2))))
+        (if end (+ end 2) len)))
      ((and (eq ch ?$) (plist-get dialect :dollar-quotes))
       (clutch-db-sql--skip-dollar-quote sql pos))
      ((let ((delimiter
              (cond
               ((eq ch ?\') ?\')
               ((and identifiers (memq ch '(?\" ?`))) ch)
-              ((and identifiers (eq ch ?\[)) ?\]))))
+              ((and identifiers (eq ch ?\[)
+                    (or (null dialect) (plist-get dialect :bracket-identifiers))) ?\]))))
         (when delimiter
           ;; Bracket-quoted identifiers have no backslash escape even in
           ;; dialects that use one inside quoted strings.
@@ -420,11 +437,11 @@ match data is left untouched."
                   (setq from (+ hit 2)))
                  (t (setq end (1+ hit))))))
             (or end len)))))
-     ((eq ch ?-)  ;; Possible -- line comment.
-      (when (and (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
-        (if-let* ((newline (string-search "\n" sql (+ pos 2))))
-            (1+ newline)
-          len)))
+     ((or (and (eq ch ?-) (< (1+ pos) len) (= (aref sql (1+ pos)) ?-))
+          (and (eq ch ?#) (plist-get dialect :hash-comments)))
+      (if-let* ((newline (string-search "\n" sql (1+ pos))))
+          (1+ newline)
+        len))
      ((and (eq ch ?/) (< (1+ pos) len))
       (pcase (aref sql (1+ pos))
         (?* (if-let* ((close (string-search "*/" sql (+ pos 2))))
@@ -475,44 +492,49 @@ selection fails closed.  This parser is linear and does not alter match data."
                  (close (string-search delimiter sql tag-end)))
             (if close (+ close (length delimiter)) len)))))))
 
-(defun clutch-db-sql-mask-literal-or-comment (sql &optional dialect)
+(defun clutch-db-sql-mask-literal-or-comment (sql &optional dialect mask-identifiers)
   "Return a string the same length as SQL with literals/comments blanked.
 Single-quoted content (between the quotes) and comment text become spaces.
 Quote delimiters are preserved.  Double-quoted and backtick-quoted
 identifiers are left intact, and a quote or `--' inside one opens nothing.
 Brackets are not taken for quoted identifiers, since they also index
-arrays.  DIALECT is a `clutch-db-sql-dialect' plist deciding where a
-literal ends.  Safe for multibyte strings (avoids `aset').  Code between
-literals is copied by searching for the next possible opener, so the cost
-follows the number of literals and comments rather than the length of SQL."
+arrays.  With MASK-IDENTIFIERS, mask the contents of quoted identifiers
+as well for keyword-only analysis.  Array brackets then become parentheses
+so subsequent keyword scans preserve subscript nesting.
+DIALECT is a `clutch-db-sql-dialect' plist deciding where a literal ends.
+Code between literals is copied by searching for the next possible opener."
   (let ((pieces nil)
+        (openers (if mask-identifiers (rx (in "-#'/$\"`[]")) "[-#'/$\"`]"))
         (copy-from 0)
         (pos 0)
         (len (length sql)))
     (save-match-data
       (while (and (< pos len)
-                  (setq pos (string-match "[-'/$\"`]" sql pos)))
-        (if-let* ((skip (clutch-db-sql-skip-literal-or-comment
-                         sql pos t dialect)))
-            (pcase (aref sql pos)
-              ((or ?\" ?`)
-               ;; Quoted identifier: keep it as written.
-               (setq pos skip))
-              (?\'
-               ;; String literal: preserve quote delimiters, blank content.
-               (let* ((has-close (and (> skip (1+ pos))
-                                      (= (aref sql (1- skip)) ?\')))
-                      (content-end (if has-close (1- skip) skip)))
-                 (push (substring sql copy-from (1+ pos)) pieces)
-                 (push (make-string (- content-end (1+ pos)) ?\s) pieces)
-                 (when has-close (push "'" pieces))
-                 (setq copy-from skip pos skip)))
-              (_
-               ;; Comment: blank entirely.
-               (push (substring sql copy-from pos) pieces)
-               (push (make-string (- skip pos) ?\s) pieces)
-               (setq copy-from skip pos skip)))
-          (cl-incf pos))))
+                  (setq pos (string-match openers sql pos)))
+        (let* ((ch (aref sql pos))
+               (array-bracket (and mask-identifiers (memq ch '(?\[ ?\]))
+                                   (not (plist-get dialect :bracket-identifiers))))
+               (skip (unless array-bracket
+                       (clutch-db-sql-skip-literal-or-comment sql pos t dialect))))
+          (cond
+           (array-bracket
+            (push (substring sql copy-from pos) pieces)
+            (push (if (= ch ?\[) "(" ")") pieces)
+            (setq copy-from (cl-incf pos)))
+           ((null skip) (cl-incf pos))
+           ((and (not mask-identifiers) (memq ch '(?\" ?`)))
+            (setq pos skip))
+           ((memq ch '(?\' ?\" ?` ?\[))
+            (let* ((close (if (eq ch ?\[) ?\] ch))
+                   (closed (and (> skip (1+ pos)) (= (aref sql (1- skip)) close))))
+              (push (substring sql copy-from (1+ pos)) pieces)
+              (push (make-string (- skip pos (if closed 2 1)) ?\s) pieces)
+              (when closed (push (string close) pieces))
+              (setq copy-from skip pos skip)))
+           (t
+            (push (substring sql copy-from pos) pieces)
+            (push (make-string (- skip pos) ?\s) pieces)
+            (setq copy-from skip pos skip))))))
     (push (substring sql copy-from) pieces)
     (apply #'concat (nreverse pieces))))
 
@@ -553,7 +575,7 @@ string and the number of placeholders replaced."
       (emit len len))
     (cons (apply #'concat (nreverse parts)) count)))
 
-(defconst clutch-db-sql--code-structure-chars "()'\"`[/-$"
+(defconst clutch-db-sql--code-structure-chars "()'\"`[/-$#"
   "Characters that change scanner state in SQL code.
 Parentheses change depth and the rest can open a literal or comment.")
 
@@ -642,16 +664,64 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
 
 ;;;; SQL helpers (statement boundaries)
 
+(defun clutch-db-sql-plsql-unit-kind (sql start)
+  "Return `anonymous' or `stored' for an Oracle PL/SQL unit at START in SQL."
+  (let ((pos (clutch-db-sql--skip-blank sql start)))
+    (cl-flet ((word ()
+                (when-let* (((< pos (length sql)))
+                            ((<= ?A (upcase (aref sql pos)) ?Z))
+                            (end (clutch-db-sql--token-end sql pos)))
+                  (prog1 (upcase (substring sql pos end))
+                    (setq pos (clutch-db-sql--skip-blank sql end))))))
+      (if (and (< (1+ pos) (length sql))
+               (= (aref sql pos) ?<) (= (aref sql (1+ pos)) ?<))
+          'anonymous
+        (pcase (word)
+          ((or "BEGIN" "DECLARE") 'anonymous)
+          ("CREATE"
+           (let ((kind (word)))
+             (when (and (equal kind "OR") (equal (word) "REPLACE"))
+               (setq kind (word)))
+             (when (member kind '("EDITIONABLE" "NONEDITIONABLE"))
+               (setq kind (word)))
+             (when (member kind '("PROCEDURE" "FUNCTION" "PACKAGE" "TRIGGER" "TYPE"))
+               'stored))))))))
+
+(defun clutch-db-sql--oracle-statement-breaks (sql dialect start)
+  "Find SQL terminators and PL/SQL slash lines in SQL from START under DIALECT."
+  (let* ((from (or start 0))
+         (unit (clutch-db-sql-plsql-unit-kind sql from))
+         breaks)
+    (clutch-db-sql-scan-code
+     sql from nil
+     (lambda (pos ch depth)
+       (when (and (zerop depth)
+                  (if unit
+                      (and (= ch ?/)
+                           (let ((left pos))
+                             (while (and (> left 0) (memq (aref sql (1- left)) '(?\s ?\t)))
+                               (cl-decf left))
+                             (or (zerop left) (= (aref sql (1- left)) ?\n)))
+                           (let ((end (string-match "[^ \t\r]" sql (1+ pos))))
+                             (or (null end) (= (aref sql end) ?\n))))
+                    (= ch ?\;)))
+         (push pos breaks)
+         (setq unit (clutch-db-sql-plsql-unit-kind sql (1+ pos))))
+       nil)
+     dialect ";/")
+    (nreverse breaks)))
+
 (defun clutch-db-sql-statement-breaks (sql &optional dialect start)
-  "Return zero-based offsets of top-level semicolons in SQL.
+  "Return zero-based offsets of statement delimiters in SQL.
 Semicolons inside strings and comments do not count.  DIALECT is a
 `clutch-db-sql-dialect' plist; its rules decide where a literal ends, so a
 semicolon inside one is not a break.  A CQL batch's inner separators
-are skipped.  START, when non-nil, is an offset
-known to be top-level code outside any literal, such as the position just
-past a top-level semicolon; scanning begins there instead of at 0."
-  (if (plist-get dialect :cql)
-      (clutch-db-sql--cql-statement-breaks sql dialect start)
+are skipped; an Oracle PL/SQL unit ends at a slash on its own line.
+START, when non-nil, is the offset just past a statement delimiter."
+  (cond
+   ((plist-get dialect :plsql) (clutch-db-sql--oracle-statement-breaks sql dialect start))
+   ((plist-get dialect :cql) (clutch-db-sql--cql-statement-breaks sql dialect start))
+   (t
     (let (breaks)
       (clutch-db-sql-scan-code
        sql (or start 0) nil
@@ -660,7 +730,7 @@ past a top-level semicolon; scanning begins there instead of at 0."
            (push pos breaks))
          nil)
        dialect ";")
-      (nreverse breaks))))
+      (nreverse breaks)))))
 
 (defun clutch-db-sql--cql-statement-breaks (sql dialect start)
   "Return CQL statement breaks in SQL using DIALECT, scanning from START.
@@ -747,7 +817,9 @@ need their statement starts computed."
   (let ((effective-offset
          (clutch-db-sql-statement-effective-offset text offset))
         before before-that)
-    (while (and breaks (< (car breaks) effective-offset))
+    (while (and breaks (< (car breaks) effective-offset)
+                (not (and (= (aref text (car breaks)) ?/)
+                          (= (1+ (car breaks)) offset))))
       (setq before-that before
             before (car breaks)
             breaks (cdr breaks)))
@@ -1656,17 +1728,17 @@ full listing is too slow for a per-command lookup, should say so.")
   nil)
 
 (cl-defgeneric clutch-db-completion-sync-columns-p (conn)
-  "Return non-nil when completion may synchronously load column metadata for CONN.")
+  "Return non-nil when completion may load a table's full column list on CONN.")
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((_conn t))
-  "Most backends can synchronously load column metadata during completion."
+  "Allow full column lists by default."
   t)
 
 (cl-defgeneric clutch-db-completion-deferred-columns-p (conn)
   "Return non-nil when CONN defers uncached completion column metadata.")
 
 (cl-defmethod clutch-db-completion-deferred-columns-p ((_conn t))
-  "Backends use their ordinary synchronous or direct completion path by default."
+  "Allow interactive completion to wait for column names by default."
   nil)
 
 (cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback
@@ -2190,6 +2262,15 @@ Derived from `clutch-db-list-tables'."
 (cl-defgeneric clutch-db-list-columns (conn table)
   "Return a list of column name strings for TABLE on CONN.")
 
+(cl-defgeneric clutch-db-completion-prefix-fetcher (conn)
+  "Return a background prefix search function for CONN, or nil.
+The function takes CONN, TABLE (nil for table names), PREFIX, a callback
+receiving names, and an error callback receiving a message.")
+
+(cl-defmethod clutch-db-completion-prefix-fetcher ((_conn t))
+  "Use ordinary completion on backends without background prefix search."
+  nil)
+
 (cl-defgeneric clutch-db-complete-tables (conn prefix)
   "Return table name candidates for PREFIX on CONN, or nil when unsupported.")
 
@@ -2464,6 +2545,15 @@ unknown.")
 
 (cl-defmethod clutch-db-symbol-help ((_conn t) _symbol)
   "Fallback implementation for backends without live symbol help."
+  nil)
+
+(cl-defgeneric clutch-db-symbol-help-async (conn symbol callback)
+  "Start looking up SYMBOL on CONN without blocking.
+Call CALLBACK with the help plist and an error condition, either of which
+may be nil.  Return non-nil when dispatched.")
+
+(cl-defmethod clutch-db-symbol-help-async ((_conn t) _symbol _callback)
+  "Decline background help on backends without a server help facility."
   nil)
 
 (cl-defgeneric clutch-db-table-comment-async (conn table callback &optional errback)

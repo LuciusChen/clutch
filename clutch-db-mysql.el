@@ -111,7 +111,7 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
   (concat (clutch-db--error-message err)
           (if recovered
-              "; interrupted running query and restored MySQL connection"
+              "; restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
 
 (defun clutch-db-mysql--handle-query-timeout (conn err &optional stmt)
@@ -236,33 +236,52 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
                clutch-db-mysql--connection-params)
       conn)))
 
-(defun clutch-db-mysql--drain-interrupted-response (conn)
+(defun clutch-db-mysql--drain-interrupted-response (conn &optional propagate-rejection)
   "Drain the interrupted query response from CONN.
-Return non-nil when the wire protocol is synchronized again."
-  (condition-case nil
+Return non-nil when the wire protocol is synchronized again.
+With PROPAGATE-REJECTION, signal the server's error after consuming it."
+  (condition-case err
       (progn
         (mysql-drain-query-response conn clutch-db-mysql-cancel-timeout-seconds)
         t)
     ;; KILL QUERY returns an ERR packet after the response has been consumed.
-    (mysql-query-error t)
+    (mysql-query-error (if propagate-rejection (signal (car err) (cdr err)) t))
     (mysql-error nil)))
 
-(defun clutch-db-mysql--parse-help-text (text)
-  "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.
-Return nil when TEXT has no Syntax section."
-  (when (string-match "\\(?:\\`\\|\n\\)Syntax:[[:blank:]\r\n]*" text)
-    (when-let* ((paragraphs (split-string (substring text (match-end 0))
-                                           "\n[[:blank:]\r\n]*\n"
-                                           t "[[:blank:]\r\n]+"))
-                (sig (car paragraphs)))
-      (let* ((desc (cadr paragraphs))
-             (sig (string-join (split-string sig "\n" t "[[:blank:]]+")
-                               " / "))
-             (desc (car (split-string (or desc "") "\nURL:" t)))
-             (desc (string-join (split-string (or desc "") "\n" t "[[:blank:]]+")
-                                " ")))
-        (unless (string-empty-p sig)
-          (list :sig sig :desc desc))))))
+(defun clutch-db-mysql--transaction-command (conn command &rest args)
+  "Run transaction COMMAND on CONN with ARGS, recovering a timed-out reply."
+  (condition-case err
+      (apply command conn args)
+    (mysql-timeout
+     ;; COMMIT may already be durable.  Drain the reply without issuing
+     ;; KILL or repeating the command, and preserve the original failure.
+     (let* ((inhibit-quit t)
+            (drained (clutch-db-mysql--drain-interrupted-response conn)))
+       (unless drained (ignore-errors (mysql-disconnect conn)))
+       (signal 'clutch-db-error
+               (list (clutch-db-mysql--timeout-error-message err drained)))))
+    (mysql-error (signal 'clutch-db-error (clutch-db--error-data err)))))
+
+(defun clutch-db-mysql--help-sql (symbol)
+  "Return the MySQL HELP query for SYMBOL."
+  (format "HELP %s" (mysql-escape-literal (upcase (format "%s" symbol)))))
+
+(defun clutch-db-mysql--parse-help-rows (rows)
+  "Return the signature and description from single-topic MySQL HELP ROWS."
+  (when-let* ((text (nth 1 (car rows))) ((stringp text))
+              ((string-match "\\(?:\\`\\|\n\\)Syntax:[[:blank:]\r\n]*" text))
+              (paragraphs (split-string (substring text (match-end 0))
+                                        "\n[[:blank:]\r\n]*\n"
+                                        t "[[:blank:]\r\n]+"))
+              (sig (car paragraphs)))
+    (let* ((desc (cadr paragraphs))
+           (sig (string-join (split-string sig "\n" t "[[:blank:]]+")
+                             " / "))
+           (desc (car (split-string (or desc "") "\nURL:" t)))
+           (desc (string-join (split-string (or desc "") "\n" t "[[:blank:]]+")
+                              " ")))
+      (unless (string-empty-p sig)
+        (list :sig sig :desc desc)))))
 
 (defun clutch-db-mysql--unique-not-null-identities (conn table)
   "Return unique-not-null row identity candidates for TABLE on CONN."
@@ -659,17 +678,16 @@ gives the status from before it."
 
 (cl-defmethod clutch-db-commit ((conn mysql-conn))
   "Commit the current transaction on MySQL CONN."
-  (mysql-commit conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-commit))
 
 (cl-defmethod clutch-db-rollback ((conn mysql-conn))
   "Roll back the current transaction on MySQL CONN."
-  (mysql-rollback conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-rollback))
 
 (cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
   "Set autocommit mode on MySQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
-  (clutch-db--translate-library-error mysql-error
-    (mysql-set-autocommit conn auto-commit)))
+  (clutch-db-mysql--transaction-command conn #'mysql-set-autocommit auto-commit))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn mysql-conn) function)
@@ -729,14 +747,18 @@ Decline when the installed mysql.el cannot execute asynchronously."
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)
   "Return MySQL HELP metadata for SYMBOL on CONN, or nil when unknown."
   (clutch-db--translate-library-error mysql-error
-    (let* ((result (clutch-db-mysql--metadata-query
-                    conn (format "HELP %s"
-                                 (mysql-escape-literal
-                                  (upcase (format "%s" symbol))))))
-           (row (car (mysql-result-rows result)))
-           (desc (nth 1 row)))
-      (when (stringp desc)
-        (clutch-db-mysql--parse-help-text desc)))))
+    (clutch-db-mysql--parse-help-rows
+     (mysql-result-rows
+      (clutch-db-mysql--metadata-query conn (clutch-db-mysql--help-sql symbol))))))
+
+(cl-defmethod clutch-db-symbol-help-async ((conn mysql-conn) symbol callback)
+  "Read MySQL HELP for SYMBOL on CONN and deliver it to CALLBACK."
+  (when (fboundp 'mysql-query-async)
+    (clutch-db--translate-library-error mysql-error
+      (clutch-db-mysql--send-metadata
+       conn (clutch-db-mysql--help-sql symbol)
+       (lambda (rows err) (funcall callback (clutch-db-mysql--parse-help-rows rows) err))
+       t))))
 
 (cl-defmethod clutch-db-execute-params ((conn mysql-conn) sql params)
   "Execute parameterized SQL on MySQL CONN with PARAMS."
@@ -854,7 +876,19 @@ missed a USE or a DROP that changed the database."
 (cl-defmethod clutch-db-set-current-schema ((conn mysql-conn) schema)
   "Switch MySQL CONN to SCHEMA."
   (clutch-db--translate-library-error mysql-error
-    (mysql-select-database conn schema)))
+    (condition-case err
+        (mysql-select-database conn schema)
+      (mysql-timeout
+       ;; A late OK confirms USE; read back the name for mysql.el's cache.
+       (let* ((inhibit-quit t)
+              (database (and (clutch-db-mysql--drain-interrupted-response conn t)
+                             (condition-case nil (mysql-refresh-current-database conn)
+                               (mysql-error nil)))))
+         (or database
+             (progn
+               (ignore-errors (mysql-disconnect conn))
+               (signal 'clutch-db-error
+                       (list (clutch-db-mysql--timeout-error-message err nil))))))))))
 
 (cl-defmethod clutch-db-namespace-switch-p ((_conn mysql-conn) sql)
   "Return non-nil when the current database may differ after SQL."

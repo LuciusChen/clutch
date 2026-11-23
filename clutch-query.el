@@ -358,8 +358,13 @@ as the automatic reconnect does, rather than with PARAMS."
         (when is-new
           (let* ((coding-system-for-read 'utf-8)
                  (file (clutch--console-file storage-name))
-                 (legacy-file (clutch--console-file name))
-                 (read-file (if (file-readable-p file) file legacy-file)))
+                 (read-file
+                  (cond ((file-readable-p file) file)
+                        ((when-let* (((plist-get params :url))
+                                     (old (clutch--console-file
+                                           (clutch--console-identity-from-params params t))))
+                           (and (file-readable-p old) old)))
+                        (t (clutch--console-file name)))))
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
@@ -1030,32 +1035,28 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--risky-dml-trivially-true-expression-p (expr)
   "Return non-nil when EXPR is visibly true without row data."
   (cl-labels
-      ((code (expr)
-         (string-trim (clutch-db-sql-mask-literal-or-comment
-                       expr (clutch--buffer-sql-dialect))))
-       (strip-parens (expr)
-         (let ((expr (code expr)))
+      ((strip-parens (expr)
+         (let ((expr (string-trim expr)))
            (while (and (> (length expr) 1)
                        (= (aref expr 0) ?\()
                        (let ((close
                               (clutch-db-sql-matching-paren-position expr 0)))
                          (and close (= close (1- (length expr))))))
-             (setq expr (code (substring expr 1 (1- (length expr))))))
+             (setq expr (string-trim (substring expr 1 -1))))
            expr))
        (split-keyword (expr keyword)
-         (let ((case-fold-search t)
-               (pattern (format "\\b%s\\b" keyword))
+         (let ((matches (clutch-db-sql-code-match-positions
+                         expr 0 nil (concat "\\b" keyword "\\b")))
                (start 0)
                parts)
            (clutch-db-sql-scan-code
             expr 0 nil
             (lambda (pos _ch depth)
-              (when (and (zerop depth)
-                         (string-match pattern expr pos)
-                         (= (match-beginning 0) pos))
+              (when (zerop depth)
                 (push (string-trim (substring expr start pos)) parts)
-                (setq start (match-end 0)))
-              nil))
+                (setq start (gethash pos matches)))
+              nil)
+            nil matches)
            (nreverse (cons (string-trim (substring expr start)) parts))))
        (literal-true-p (expr)
          (let ((expr (strip-parens expr))
@@ -1088,11 +1089,13 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--high-risk-query-reason (sql)
   "Return a confirmation reason for high-risk SQL, or nil.
 An UPDATE or DELETE embedded in SQL is checked like the main statement."
-  (if (equal (clutch-db-sql-leading-keyword sql) "TRUNCATE")
-      "TRUNCATE removes all rows"
-    (cl-some #'clutch--risky-dml-reason
-             (cons (clutch-db-sql-normalize sql)
-                   (clutch-db-sql-embedded-statements sql)))))
+  (let ((code (clutch-db-sql-mask-literal-or-comment
+               sql (clutch--buffer-sql-dialect) t)))
+    (if (equal (clutch-db-sql-leading-keyword code) "TRUNCATE")
+        "TRUNCATE removes all rows"
+      (cl-some #'clutch--risky-dml-reason
+               (cons (clutch-db-sql-normalize code)
+                     (clutch-db-sql-embedded-statements code))))))
 
 (defun clutch--confirm-high-risk-query (sql)
   "Apply the configured high-risk confirmation to SQL.
@@ -1116,20 +1119,49 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
                        clutch-high-risk-query-confirmation))))
     t))
 
+(defun clutch--plsql-confirmation-statements (sql dialect)
+  "Return the statements to check before running an anonymous block in SQL.
+Use DIALECT to skip literals and comments.  Once static SQL starts,
+its CASE or MERGE clauses belong to that statement until the semicolon."
+  (let ((delimiters (clutch-db-sql-code-match-positions
+                     sql 0 nil (concat ";\\|" (regexp-opt '("BEGIN" "THEN" "ELSE" "LOOP") 'words))))
+        (start 0) in-sql statements)
+    (clutch-db-sql-scan-code
+     sql 0 nil
+     (lambda (pos ch depth)
+       (when (zerop depth)
+         (when (= ch ?\;)
+           (when (< start pos) (push (substring sql start pos) statements))
+           (setq in-sql nil))
+         (unless in-sql
+           (setq start (clutch-db-sql--skip-blank sql (gethash pos delimiters) dialect)
+                 in-sql (when-let* ((end (clutch-db-sql--token-end sql start)))
+                          (member (upcase (substring sql start end))
+                                  '("SELECT" "WITH" "INSERT" "UPDATE" "DELETE" "MERGE"))))))
+       nil)
+     dialect delimiters)
+    (when (< start (length sql)) (push (substring sql start) statements))
+    (nreverse statements)))
+
 (defun clutch--confirm-query-execution (sql)
   "Prompt for any confirmation required before executing SQL."
   (let* ((dialect (clutch--buffer-sql-dialect))
-         (sql (if (plist-get dialect :cql)
-                  (clutch-db-sql-strip-leading-comments sql dialect)
-                sql)))
-    (unless (clutch--confirm-high-risk-query sql)
-      (when (or (clutch-db-sql-destructive-p sql)
-                (and (plist-get dialect :cql)
-                     (equal "BEGIN" (clutch-db-sql-leading-keyword sql))))
-        (unless (yes-or-no-p
-                 (format "Execute destructive query?\n  %s\n\nProceed? "
-                         (truncate-string-to-width (string-trim sql) 80)))
-          (user-error "Query cancelled"))))))
+         (statements
+          (pcase (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-kind sql 0))
+            ('stored nil) ; Compiling the definition does not run its body.
+            ('anonymous (clutch--plsql-confirmation-statements sql dialect))
+            (_ (list (if (plist-get dialect :cql)
+                         (clutch-db-sql-strip-leading-comments sql dialect)
+                       sql))))))
+    (dolist (statement statements)
+      (unless (clutch--confirm-high-risk-query statement)
+        (when (or (clutch-db-sql-destructive-p statement)
+                  (and (plist-get dialect :cql)
+                       (equal "BEGIN" (clutch-db-sql-leading-keyword statement))))
+          (unless (yes-or-no-p
+                   (format "Execute destructive query?\n  %s\n\nProceed? "
+                           (truncate-string-to-width (string-trim statement) 80)))
+            (user-error "Query cancelled")))))))
 
 (defun clutch--note-schema-affecting-query (sql connection)
   "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
@@ -1574,10 +1606,11 @@ when `clutch-pulse-statement-at-point' is non-nil."
           (+ (point-min) (cdr bounds)))))
 
 (defun clutch--statement-delimited-buffer-p ()
-  "Return non-nil when the current buffer has a top-level semicolon."
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (consp (clutch-db-sql-statement-breaks
-            text (clutch--buffer-sql-dialect)))))
+  "Return non-nil when statement delimiters or a PL/SQL unit select the bounds."
+  (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+        (dialect (clutch--buffer-sql-dialect)))
+    (or (and (plist-get dialect :plsql) (clutch-db-sql-plsql-unit-kind text 0))
+        (consp (clutch-db-sql-statement-breaks text dialect)))))
 
 ;;;; Interactive commands
 
@@ -1597,9 +1630,9 @@ Semicolons inside strings, line comments, and block comments are skipped."
   "Return point-local SQL bounds for DWIM execute and preview workflows.
 Prefer semicolon-delimited statement bounds when the current buffer
 contains any top-level semicolon, but drop detached leading paragraphs made
-only of line comments.  CQL always uses statement bounds to keep batches
-intact.  Otherwise fall back to query-at-point bounds, which also split on
-blank lines."
+only of line comments.  CQL batches and Oracle PL/SQL units also use
+statement bounds.  Otherwise fall back to query-at-point bounds, which
+also split on blank lines."
   (if (or (plist-get (clutch--buffer-sql-dialect) :cql)
           (clutch--statement-delimited-buffer-p))
       (let* ((statement-bounds (clutch--statement-bounds-at-point))
@@ -2072,10 +2105,10 @@ When CONTINUATION is non-nil, return the continuation prompt."
 
 (defun clutch-repl--input-complete-p (input)
   "Return non-nil when INPUT ends with a top-level statement terminator.
-The trailing semicolon must sit outside string literals and comments under
+The terminator must sit outside string literals and comments under
 the connection's dialect, and outside parentheses, so a line ending inside
 an open literal keeps accumulating instead of executing a fragment."
-  (let ((end (string-match ";[ \t\r\n]*\\'" input)))
+  (let ((end (string-match "[;/][ \t\r\n]*\\'" input)))
     (and end
          (memq end (clutch-db-sql-statement-breaks
                     input (clutch--buffer-sql-dialect)))
@@ -2083,14 +2116,17 @@ an open literal keeps accumulating instead of executing a fragment."
 
 (defun clutch-repl--input-sender (_proc input)
   "Process INPUT from comint.
-Accumulates input until a top-level semicolon ends it, then executes."
+Accumulates input until a statement terminator ends it, then executes."
   (let ((combined (concat clutch-repl--pending-input
                           (unless (string-empty-p clutch-repl--pending-input) "\n")
                           input)))
     (if (clutch-repl--input-complete-p combined)
         (progn
           (setq clutch-repl--pending-input "")
-          (clutch-repl--execute-and-print (string-trim combined)))
+          (let ((sql (string-trim combined)))
+            ;; A slash line terminates Oracle input on the client.
+            (clutch-repl--execute-and-print
+             (if (string-suffix-p "/" sql) (string-trim-right (substring sql 0 -1)) sql))))
       (setq clutch-repl--pending-input combined)
       (clutch-repl--output (clutch-repl--prompt t)))))
 

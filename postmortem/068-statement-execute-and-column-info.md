@@ -81,3 +81,5 @@ Rejected because it forces users to leave the result-grid context for a small, p
 - The explicit semicolon-scoped command remains available for command-driven workflows, but no longer needs a dedicated `C-c ;` binding.
 - Result buffers expose column metadata directly at point.
 - Existing blank-line query-at-point behavior remains available as the fallback when no top-level semicolons are present.
+
+Oracle PL/SQL uses a slash line as the script delimiter. The scanner can pass nested blocks intact without matching each kind of END, and JDBC receives the final semicolon that belongs to the unit.
