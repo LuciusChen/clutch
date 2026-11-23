@@ -111,7 +111,7 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
   (concat (clutch-db--error-message err)
           (if recovered
-              "; interrupted running query and restored MySQL connection"
+              "; restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
 
 (defun clutch-db-mysql--handle-query-timeout (conn err &optional stmt)
@@ -246,6 +246,20 @@ Return non-nil when the wire protocol is synchronized again."
     ;; KILL QUERY returns an ERR packet after the response has been consumed.
     (mysql-query-error t)
     (mysql-error nil)))
+
+(defun clutch-db-mysql--transaction-command (conn command &rest args)
+  "Run transaction COMMAND on CONN with ARGS, recovering a timed-out reply."
+  (condition-case err
+      (apply command conn args)
+    (mysql-timeout
+     ;; COMMIT may already be durable.  Drain the reply without issuing
+     ;; KILL or repeating the command, and preserve the original failure.
+     (let* ((inhibit-quit t)
+            (drained (clutch-db-mysql--drain-interrupted-response conn)))
+       (unless drained (ignore-errors (mysql-disconnect conn)))
+       (signal 'clutch-db-error
+               (list (clutch-db-mysql--timeout-error-message err drained)))))
+    (mysql-error (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 (defun clutch-db-mysql--parse-help-text (text)
   "Parse a MySQL HELP description TEXT into a (:sig SIG :desc DESC) plist.
@@ -659,17 +673,16 @@ gives the status from before it."
 
 (cl-defmethod clutch-db-commit ((conn mysql-conn))
   "Commit the current transaction on MySQL CONN."
-  (mysql-commit conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-commit))
 
 (cl-defmethod clutch-db-rollback ((conn mysql-conn))
   "Roll back the current transaction on MySQL CONN."
-  (mysql-rollback conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-rollback))
 
 (cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
   "Set autocommit mode on MySQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
-  (clutch-db--translate-library-error mysql-error
-    (mysql-set-autocommit conn auto-commit)))
+  (clutch-db-mysql--transaction-command conn #'mysql-set-autocommit auto-commit))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn mysql-conn) function)
