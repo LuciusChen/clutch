@@ -3823,12 +3823,13 @@ and the mode change dropped the new connection from the console."
 (ert-deftest clutch-test-query-console-persistence-file-precedence ()
   "Query console should read identity files before legacy alias files."
   (dolist (case '(("legacy fallback" nil "SELECT legacy;")
+                  ("old URL key" old-url "SELECT old_url;")
                   ("identity wins" "SELECT stable;" "SELECT stable;")))
     (pcase-let ((`(,label ,identity-content ,expected) case))
       (ert-info ((format "case: %s" label))
         (let* ((dir (make-temp-file "clutch-console-" t))
                (clutch-console-directory (expand-file-name "consoles" dir))
-               (params (list :backend 'sqlite
+               (params (list :backend 'sqlite :url "jdbc:sample://alpha:old-pass@server/db"
                              :database (expand-file-name "prod.db" dir)))
                (storage-name (clutch--console-persistence-name "alpha" params))
                (clutch-connection-alist `(("alpha" . ,params)))
@@ -3839,8 +3840,12 @@ and the mode change dropped the new connection from the console."
                 (with-temp-file (clutch--console-file "alpha")
                   (insert "SELECT legacy;"))
                 (when identity-content
-                  (with-temp-file (clutch--console-file storage-name)
-                    (insert identity-content)))
+                  (if (eq identity-content 'old-url)
+                      (let ((old (clutch--console-identity-from-params params t)))
+                        (should-not (equal old storage-name))
+                        (with-temp-file (clutch--console-file old) (insert expected)))
+                    (with-temp-file (clutch--console-file storage-name)
+                      (insert identity-content))))
                 (clutch-test--without-credentials
                   (clutch-query-console "alpha"))
                 (setq opened (current-buffer)
