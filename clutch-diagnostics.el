@@ -204,6 +204,32 @@ Each section is a cons cell (TITLE . VALUE)."
     (dolist (range (nthcdr (max 0 clutch-debug-event-limit) ranges))
       (delete-region (max (point-min) (- (car range) 2)) (cdr range)))))
 
+(defconst clutch--url-secret-param-prefix
+  (concat "\\([?&;]"
+          (regexp-opt '("access_token" "pass" "password" "passwd"
+                        "private_key" "private-key" "pwd" "secret" "token"))
+          "=\\)")
+  "Regexp matching URL parameters holding connection secrets.")
+
+(defun clutch--redact-url (url &optional legacy)
+  "Mask URL credentials.  LEGACY reproduces old console file names."
+  (let ((case-fold-search t))
+    (replace-regexp-in-string
+     (concat clutch--url-secret-param-prefix
+             (if legacy "[^&;]*"
+               ;; SQL Server braces allow semicolons, spaces and doubled }.
+               (rx (group (or (seq "{" (* (or (not (in "}\n")) "}}")) "}")
+                              (* (not (in ";& \t\n\r"))))))))
+     "\\1REDACTED"
+     (if legacy url
+       (replace-regexp-in-string
+        "\\(://[^/@?#: \t\r\n]*:\\)[^/@?# \t\r\n]*@" "\\1REDACTED@" url t)) t)))
+
+(defun clutch--redact-diagnostic-urls (text)
+  "Mask connection credentials in URLs embedded in TEXT."
+  (replace-regexp-in-string (rx (or "jdbc:" "://") (* nonl))
+                            #'clutch--redact-url text t t))
+
 (defun clutch--append-debug-buffer-entry (heading body &optional trace-event)
   "Append HEADING and BODY to the dedicated debug buffer.
 When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
@@ -219,7 +245,7 @@ When TRACE-EVENT is non-nil, mark the entry and enforce the trace limit."
         (insert heading "\n")
         (insert (make-string (length heading) ?-) "\n")
         (when body
-          (insert body))
+          (insert (clutch--redact-diagnostic-urls body)))
         (unless (or (bobp) (eq (char-before) ?\n))
           (insert "\n"))
         (when trace-event
@@ -378,7 +404,7 @@ A nil BUFFER explicitly clears the connection-scoped record."
   "Return a compact single-line preview of SQL."
   (when sql
     (truncate-string-to-width
-     (replace-regexp-in-string "[\n\r\t ]+" " " (string-trim sql))
+     (replace-regexp-in-string "[\n\r\t ]+" " " (string-trim (clutch--redact-diagnostic-urls sql)))
      160 0 nil "...")))
 
 (defun clutch--normalize-debug-event (event)
@@ -411,6 +437,7 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
 
 (defun clutch--debug-workflow-message (message)
   "Return MESSAGE annotated with the single debug-buffer workflow."
+  (setq message (clutch--redact-diagnostic-urls message))
   (if (or (string-match-p (regexp-quote clutch-debug-buffer-name) message)
           (string-match-p
            "Run M-x clutch-jdbc-\\(ensure-agent\\|install-driver\\)" message))
@@ -427,8 +454,9 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
 SQL is the user-visible statement.  ERR is the original signaled condition.
 EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
 EXTRA-DIAG is merged into the diagnostic plist when non-nil."
-  (let* ((message (or (cadr err) (error-message-string err)))
-         (details (copy-tree (nth 2 err)))
+  (let* ((message (clutch-db--error-message err))
+         (details (and (memq 'clutch-db-error (get (car err) 'error-conditions))
+                       (copy-tree (nth 2 err))))
          (diag (copy-tree (plist-get details :diag)))
          (context (copy-tree (plist-get diag :context))))
     (when extra-diag
@@ -470,9 +498,8 @@ SQL is the generated statement and ERR is the original condition.
 Optional CONTEXT is merged into the stored problem and debug event.
 Optional DIAG is merged into the stored problem diagnostic plist.
 Return `(MESSAGE . SUMMARY)' for the failure."
-  (let* ((formatted (clutch-db--error-message err))
-         (message (if (stringp (cadr err)) (cadr err) formatted))
-         (summary (clutch--humanize-db-error formatted)))
+  (let* ((message (clutch--redact-diagnostic-urls (clutch-db--error-message err)))
+         (summary (clutch--humanize-db-error message)))
     (clutch--remember-buffer-query-error-details
      buffer connection sql err context diag)
     (when clutch-debug-mode

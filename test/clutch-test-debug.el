@@ -104,7 +104,7 @@ error 1045 is, and an unknown database, error 1049, had no hint."
                                          :message "reason-71")
                                         (:exception-class "java.net.ConnectException"
                                          :message "root-71")))
-                   :stderr-tail "Connect request 71 failed")))
+                   :stderr-tail "Connect request 71 failed: jdbc:example://app:url-secret@host/db?token=token-secret&ssl=true;password={a b;brace-secret}}tail}")))
     (with-temp-buffer
       (let ((clutch-debug-mode t))
         (clutch--clear-debug-capture)
@@ -115,7 +115,9 @@ error 1045 is, and an unknown database, error 1049, had no hint."
           (should (string-match-p "Connection failed" text))
           (should (string-match-p "08071" text))
           (should (string-match-p "ALTER SESSION SET CURRENT_SCHEMA" text))
-          (should (string-match-p "Connect request 71 failed" text)))))))
+          (should (string-match-p "Connect request 71 failed" text))
+          (should-not (string-match-p "url-secret\\|token-secret\\|brace-secret" text))
+          (should (string-search "&ssl=true" text)))))))
 
 (ert-deftest clutch-test-debug-buffer-appends-connection-problem-record ()
   "Connection-scoped problem records should also be appended to the debug buffer."
@@ -316,7 +318,12 @@ error 1045 is, and an unknown database, error 1049, had no hint."
   (cl-letf (((symbol-function 'clutch-db-backend-key) (lambda (_connection) 'pg)))
     (let ((details (clutch--make-buffer-query-error-details
                     'conn "SELECT 1" '(clutch-db-error "boom"))))
-      (should (eq (plist-get details :backend) 'pg)))))
+      (should (eq (plist-get details :backend) 'pg))))
+  (dolist (err '((file-error "Opening input file" "No such file" "/tmp/missing")
+                 (wrong-type-argument stringp 12)))
+    (let ((details (clutch--make-buffer-query-error-details nil "SELECT 1" err)))
+      (should (equal (plist-get (plist-get details :diag) :raw-message)
+                     (error-message-string err))))))
 
 (provide 'clutch-test-debug)
 

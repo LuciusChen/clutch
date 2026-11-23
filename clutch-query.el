@@ -358,8 +358,13 @@ as the automatic reconnect does, rather than with PARAMS."
         (when is-new
           (let* ((coding-system-for-read 'utf-8)
                  (file (clutch--console-file storage-name))
-                 (legacy-file (clutch--console-file name))
-                 (read-file (if (file-readable-p file) file legacy-file)))
+                 (read-file
+                  (cond ((file-readable-p file) file)
+                        ((when-let* (((plist-get params :url))
+                                     (old (clutch--console-file
+                                           (clutch--console-identity-from-params params t))))
+                           (and (file-readable-p old) old)))
+                        (t (clutch--console-file name)))))
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
