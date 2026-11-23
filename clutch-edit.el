@@ -1102,6 +1102,7 @@ column of each cidx."
   "Return the staged SQL statements that would run on submit."
   (unless (or clutch--pending-inserts clutch--pending-edits clutch--pending-deletes)
     (user-error "No staged SQL"))
+  (clutch-result--require-connection)
   (clutch-result--render-statements
    (append
     (when clutch--pending-inserts
