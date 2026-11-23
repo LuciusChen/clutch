@@ -1239,7 +1239,18 @@ tracks, and a disconnect no longer asked first."
       (clutch-db-commit conn)
       (clutch-db-rollback conn)
       (should committed)
-      (should rolled-back))))
+      (should rolled-back))
+    (dolist (drained '(t nil))
+      (let ((commits 0) disconnected)
+        (cl-letf (((symbol-function 'mysql-commit)
+                   (lambda (_conn) (cl-incf commits) (signal 'mysql-timeout '("timeout"))))
+                  ((symbol-function 'mysql-drain-query-response)
+                   (lambda (_conn _timeout) (unless drained (signal 'mysql-timeout '("timeout")))))
+                  ((symbol-function 'mysql-disconnect)
+                   (lambda (_conn) (setq disconnected t))))
+          (should-error (clutch-db-commit conn) :type 'clutch-db-error)
+          (should (= commits 1))
+          (should (eq disconnected (not drained))))))))
 
 (ert-deftest clutch-db-test-native-pg-toggle-enables-manual-mode ()
   "Native PostgreSQL should enter manual-commit mode after toggling autocommit off."
@@ -7124,6 +7135,21 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (query (symbol-function 'mysql-query)))
       (unwind-protect
           (progn
+            ;; Expire the USE read immediately; recovery reads its real OK or ERR.
+            (cl-letf* ((select (symbol-function 'mysql-select-database))
+                       ((symbol-function 'mysql-select-database)
+                        (lambda (c database)
+                          (cl-letf (((mysql-conn-read-idle-timeout c) 0))
+                            (let ((err (should-error (funcall select c database) :type 'mysql-timeout)))
+                              (signal (car err) (cdr err)))))))
+              (should (equal (clutch-db-set-current-schema conn "information_schema")
+                             "information_schema"))
+              (should (string-search "[1049]" (cadr (should-error
+                  (clutch-db-set-current-schema conn "clutch_missing_timeout_schema")
+                  :type 'clutch-db-error)))))
+            (should (equal (clutch-db-current-schema conn) "information_schema"))
+            (should (equal (caar (clutch-db-result-rows (clutch-db-query conn "SELECT DATABASE()")))
+                           "information_schema"))
             (setf (mysql-conn-read-idle-timeout conn) 0.2)
             (dolist (entry '(query metadata))
               (ert-info ((format "timeout entry: %s" entry))

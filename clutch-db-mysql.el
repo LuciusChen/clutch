@@ -111,7 +111,7 @@ Blob-family types with this charset are true BLOBs; others are TEXT.")
 RECOVERED is non-nil when the MySQL wire connection was resynchronized."
   (concat (clutch-db--error-message err)
           (if recovered
-              "; interrupted running query and restored MySQL connection"
+              "; restored MySQL connection"
             "; disconnected MySQL connection because timeout recovery failed")))
 
 (defun clutch-db-mysql--handle-query-timeout (conn err &optional stmt)
@@ -236,16 +236,31 @@ For MySQL, explicit `:tls nil' or `:ssl-mode disabled' forces plaintext."
                clutch-db-mysql--connection-params)
       conn)))
 
-(defun clutch-db-mysql--drain-interrupted-response (conn)
+(defun clutch-db-mysql--drain-interrupted-response (conn &optional propagate-rejection)
   "Drain the interrupted query response from CONN.
-Return non-nil when the wire protocol is synchronized again."
-  (condition-case nil
+Return non-nil when the wire protocol is synchronized again.
+With PROPAGATE-REJECTION, signal the server's error after consuming it."
+  (condition-case err
       (progn
         (mysql-drain-query-response conn clutch-db-mysql-cancel-timeout-seconds)
         t)
     ;; KILL QUERY returns an ERR packet after the response has been consumed.
-    (mysql-query-error t)
+    (mysql-query-error (if propagate-rejection (signal (car err) (cdr err)) t))
     (mysql-error nil)))
+
+(defun clutch-db-mysql--transaction-command (conn command &rest args)
+  "Run transaction COMMAND on CONN with ARGS, recovering a timed-out reply."
+  (condition-case err
+      (apply command conn args)
+    (mysql-timeout
+     ;; COMMIT may already be durable.  Drain the reply without issuing
+     ;; KILL or repeating the command, and preserve the original failure.
+     (let* ((inhibit-quit t)
+            (drained (clutch-db-mysql--drain-interrupted-response conn)))
+       (unless drained (ignore-errors (mysql-disconnect conn)))
+       (signal 'clutch-db-error
+               (list (clutch-db-mysql--timeout-error-message err drained)))))
+    (mysql-error (signal 'clutch-db-error (clutch-db--error-data err)))))
 
 (defun clutch-db-mysql--help-sql (symbol)
   "Return the MySQL HELP query for SYMBOL."
@@ -663,17 +678,16 @@ gives the status from before it."
 
 (cl-defmethod clutch-db-commit ((conn mysql-conn))
   "Commit the current transaction on MySQL CONN."
-  (mysql-commit conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-commit))
 
 (cl-defmethod clutch-db-rollback ((conn mysql-conn))
   "Roll back the current transaction on MySQL CONN."
-  (mysql-rollback conn))
+  (clutch-db-mysql--transaction-command conn #'mysql-rollback))
 
 (cl-defmethod clutch-db-set-auto-commit ((conn mysql-conn) auto-commit)
   "Set autocommit mode on MySQL CONN.
 AUTO-COMMIT non-nil enables autocommit; nil enables manual commit."
-  (clutch-db--translate-library-error mysql-error
-    (mysql-set-autocommit conn auto-commit)))
+  (clutch-db-mysql--transaction-command conn #'mysql-set-autocommit auto-commit))
 
 (cl-defmethod clutch-db-call-with-atomic-batch
   ((conn mysql-conn) function)
@@ -862,7 +876,19 @@ missed a USE or a DROP that changed the database."
 (cl-defmethod clutch-db-set-current-schema ((conn mysql-conn) schema)
   "Switch MySQL CONN to SCHEMA."
   (clutch-db--translate-library-error mysql-error
-    (mysql-select-database conn schema)))
+    (condition-case err
+        (mysql-select-database conn schema)
+      (mysql-timeout
+       ;; A late OK confirms USE; read back the name for mysql.el's cache.
+       (let* ((inhibit-quit t)
+              (database (and (clutch-db-mysql--drain-interrupted-response conn t)
+                             (condition-case nil (mysql-refresh-current-database conn)
+                               (mysql-error nil)))))
+         (or database
+             (progn
+               (ignore-errors (mysql-disconnect conn))
+               (signal 'clutch-db-error
+                       (list (clutch-db-mysql--timeout-error-message err nil))))))))))
 
 (cl-defmethod clutch-db-namespace-switch-p ((_conn mysql-conn) sql)
   "Return non-nil when the current database may differ after SQL."
