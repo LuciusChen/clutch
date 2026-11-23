@@ -20,6 +20,8 @@
 
 - High-risk SQL confirmation ignores apparent clauses inside dialect-specific string literals when checking updates and deletes.
 
+- Interrupting a query during its initial redraw releases the connection for the next command.
+
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
 
 - Debug reports preserve ordinary Emacs errors and mask credentials in connection URLs.

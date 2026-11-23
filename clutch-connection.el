@@ -685,14 +685,18 @@ MARKERS locate its statements in the buffer; ending the activity releases
 them.  ON-END, when non-nil, is a function the activity calls once as it
 ends, however it ends.  Return the activity, which
 `clutch--finish-query-activity' ends."
-  (clutch-db--reserve-connection connection)
-  (let ((start (float-time)))
-    (setq clutch--execution-start-time start)
-    (clutch--execution-refresh-start)
-    (clutch--update-mode-line)
-    (redisplay t)
-    (list :connection connection :buffer (current-buffer) :markers markers
-          :on-end on-end :start start :ended nil)))
+  (let* ((start (float-time))
+         (activity (list :connection connection :buffer (current-buffer) :markers markers
+                         :on-end on-end :start start :ended nil)))
+    (clutch-db--reserve-connection connection)
+    (clutch--dispatch-query-activity
+     activity
+     (lambda ()
+       (setq clutch--execution-start-time start)
+       (clutch--execution-refresh-start)
+       (clutch--update-mode-line)
+       (redisplay t)))
+    activity))
 
 (defun clutch--end-query-activity (activity)
   "End ACTIVITY once, releasing its connection, markers and execution display.
