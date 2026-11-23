@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
+
 - Typing during JDBC identifier completion no longer waits for column metadata or an Oracle prefix search.
 
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.

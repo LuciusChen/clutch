@@ -356,8 +356,7 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-pg-source-table-names-fold-as-postgresql-does ()
   "A PostgreSQL source table should be named as PostgreSQL stores it.
-An unquoted name folds to lower case and a quoted one keeps its case, and
-the relation is resolved with both quoted."
+An unquoted name folds to lower case and a quoted one keeps its case."
   (require 'clutch-db-pg)
   (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
     (pcase-dolist (`(,token ,name ,schema)
@@ -367,11 +366,14 @@ the relation is resolved with both quoted."
                      ("other.\"MiXed\"" "MiXed" "other")))
       (ert-info (token)
         (should (equal (clutch-db--source-table-name conn token) name))
-        (should (equal (clutch-db--source-table-schema conn token) schema))))
-    (should (equal (clutch-db-pg--relation "MiXed" "other")
-                   "'\"other\".\"MiXed\"'::regclass"))
-    (should (equal (clutch-db-pg--relation "people" nil)
-                   "'\"people\"'::regclass"))))
+        (should (equal (clutch-db--source-table-schema conn token) schema)))))
+  (dolist (schema '(nil "pg_temp" "Team's"))
+    (let ((sql (clutch-db-pg--relation "People" schema)))
+      (if (member schema '(nil "pg_temp"))
+          (should (equal sql (format "pg_catalog.to_regclass('%s\"People\"')"
+                                     (if schema "pg_temp." ""))))
+        (should (string-search "n.nspname = 'Team''s' AND c.relname = 'People'" sql))
+        (should (string-search "has_schema_privilege" sql))))))
 
 (ert-deftest clutch-db-test-pg-param-rewrite-skips-quoted-identifiers ()
   "PostgreSQL parameter rewriting should ignore quoted identifier text."
@@ -7399,6 +7401,10 @@ Skips if `clutch-db-test-pg-password' is nil."
     (clutch-db-set-auto-commit conn nil)
     (clutch-db-query
      conn "INSERT INTO clutch_failed_commit_contract VALUES (1)")
+    (should-not (clutch-db-column-details conn "clutch_missing_relation"))
+    (should (= (caar (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT count(*) FROM clutch_failed_commit_contract")))
+               1))
     (should-error (clutch-db-query conn "SELECT 1 / 0")
                   :type 'clutch-db-error)
     (should (eq (clutch-db-commit conn) 'rolled-back))
@@ -7535,7 +7541,20 @@ name TEXT, PRIMARY KEY (tenant_id, id))"
                        (regexp-quote "\"tenant_id\" smallint") ddl))
               (should (string-match-p
                        (regexp-quote "\"id\" integer DEFAULT nextval(") ddl))
-              (should-not (string-match-p "pgsql-null" ddl))))
+              (should-not (string-match-p "pgsql-null" ddl)))
+            (let* ((view (concat table "_v"))
+                   (drop-view (format "DROP VIEW IF EXISTS %s" view)))
+              (clutch-db-query conn (format "CREATE VIEW %s AS SELECT 1 AS id" view))
+              (unwind-protect
+                  (clutch-db-test--with-pg reader
+                    (clutch-db-query reader "BEGIN ISOLATION LEVEL REPEATABLE READ")
+                    (let ((entry (seq-find (lambda (e) (equal (plist-get e :name) view))
+                                           (clutch-db-list-table-entries reader))))
+                      (should entry)
+                      (clutch-db-query conn drop-view)
+                      (should-not (clutch-db-object-definition reader entry)))
+                    (clutch-db-test--assert-live-basic-query reader))
+                (clutch-db-query conn drop-view))))
         (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-pg-live-foreign-keys-pair-columns-across-schemas ()
