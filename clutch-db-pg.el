@@ -1349,7 +1349,7 @@ WHERE idx.relkind = 'i'
                 (clutch-db-pg--exec
                  conn
                  (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
-       pg_get_viewdef((quote_ident(schemaname) || '.' || quote_ident(viewname))::regclass, true)
+       pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(format('%%I.%%I', schemaname, viewname)), true)
 FROM pg_views
 WHERE schemaname = current_schema()
   AND viewname = %s"
