@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Oracle console and REPL execution keep PL/SQL blocks together, including their final semicolon.
+- Clutch pins JDBC agent 0.2.32. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
 
 - Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
 

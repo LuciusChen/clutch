@@ -358,7 +358,7 @@ only cover constructs that change where a literal or statement ends:
 next character inside a string literal.  `:hash-comments' enables MySQL's
 # line comments.  SQL Server and SQLite accept `:bracket-identifiers'.
 Oracle recognizes alternative-quoted literals and slash-terminated PL/SQL units.
-PRODUCT is an `sql-mode' product symbol as registered by `clutch-backend-sql-product'."
+PRODUCT is the `sql-mode' symbol registered by `clutch-backend-sql-product'."
   (pcase product
     ((or 'ms 'sqlite) '(:bracket-identifiers t))
     ('postgres '(:dollar-quotes t))
