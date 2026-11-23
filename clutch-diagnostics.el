@@ -206,9 +206,10 @@ Each section is a cons cell (TITLE . VALUE)."
 
 (defun clutch--redact-url (url &optional legacy)
   "Mask URL credentials.  LEGACY reproduces old console file names."
-  (let ((case-fold-search t))
+  (let ((case-fold-search t)
+        (gap (if legacy "" "[ \t]*")))
     (replace-regexp-in-string
-     (concat "\\([?&;]\\(?:"
+     (concat "\\([?&;]" gap "\\(?:"
              (if legacy
                  ;; Keep the old filenames reproducible with their exact key list.
                  (rx (or "access_token" "pass" "password" "passwd" "private_key"
@@ -217,11 +218,13 @@ Each section is a cons cell (TITLE . VALUE)."
                        (seq (* (in alnum "_.-"))
                             (or "password" "passwd" "pwd" "secret" "token"
                                 "cookie" "authorization" "credential" "credentials")))))
-             "\\)=\\)"
+             "\\)" gap "=" gap "\\)"
              (if legacy "[^&;]*"
-               ;; SQL Server braces allow semicolons, spaces and doubled }.
-               (rx (group (or (seq "{" (* (or (not (in "}\n")) "}}")) "}")
-                              (* (not (in ";& \t\n\r"))))))))
+               (concat "\\(?:" (rx "{" (* (or (not (in "}\n")) "}}")) "}") "\\|"
+                       ;; SQL Server ends unbraced properties at a semicolon.
+                       (if (string-match-p "jdbc:sqlserver://" url)
+                           "[^;\r\n]*" "[^;& \t\r\n]*")
+                       "\\)")))
      "\\1REDACTED"
      (if legacy url
        (replace-regexp-in-string

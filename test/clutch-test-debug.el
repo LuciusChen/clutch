@@ -321,8 +321,10 @@ error 1045 is, and an unknown database, error 1049, had no hint."
     (let ((details (clutch--make-buffer-query-error-details
                     'conn "SELECT 1" '(clutch-db-error "boom"))))
       (should (eq (plist-get details :backend) 'pg))))
-  (dolist (pair '(("jdbc:sqlserver://host:1433;user=alice@corp.com;password={x;y}"
-                   "jdbc:sqlserver://host:1433;user=alice@corp.com;password=REDACTED")
+  (dolist (pair '(("jdbc:sqlserver://host:1433;user=alice@corp.com; password = {x;y}"
+                   "jdbc:sqlserver://host:1433;user=alice@corp.com; password = REDACTED")
+                  ("jdbc:sqlserver://host;password=x & y;encrypt=true"
+                   "jdbc:sqlserver://host;password=REDACTED;encrypt=true")
                   ("jdbc:oracle:thin:scott/tig#er@//host:1521/svc"
                    "jdbc:oracle:thin:scott/REDACTED@//host:1521/svc")))
     (should (equal (clutch--redact-diagnostic-urls (car pair)) (cadr pair))))
