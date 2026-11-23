@@ -1023,18 +1023,25 @@ when its continuation fails."
 (ert-deftest clutch-test-query-activity-calls-its-end-function-once ()
   "A query activity calls the function it was given once, however often it ends."
   (let ((clutch-db--foreground-connections (make-hash-table :test 'eq))
-        (calls 0))
+        (calls 0)
+        interrupt)
     (with-temp-buffer
       (cl-letf (((symbol-function 'clutch--update-mode-line) #'ignore)
                 ((symbol-function 'clutch--execution-refresh-start) #'ignore)
-                ((symbol-function 'redisplay) #'ignore))
+                ((symbol-function 'redisplay)
+                 (lambda (&rest _) (when interrupt (signal 'quit nil)))))
         (let ((activity (clutch--begin-query-activity
                          'conn nil (lambda () (cl-incf calls)))))
           (should (clutch-db--foreground-busy-p 'conn))
           (clutch--end-query-activity activity)
           (clutch--end-query-activity activity)
           (should (= calls 1))
-          (should-not (clutch-db--foreground-busy-p 'conn)))))))
+          (should-not (clutch-db--foreground-busy-p 'conn)))
+        (setq interrupt t)
+        (should (eq 'quit (condition-case nil (clutch--begin-query-activity 'conn)
+                            (quit 'quit))))
+        (should-not (clutch-db--foreground-busy-p 'conn))
+        (should-not clutch--execution-start-time)))))
 
 (defvar clutch-test--export-buffers nil
   "Buffers that `clutch-test--start-export' made in the running test.")
