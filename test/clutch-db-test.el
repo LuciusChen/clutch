@@ -10607,8 +10607,8 @@ that file, or in a new, empty in-memory database, without a word."
       (let ((conn (make-clutch-jdbc-conn :driver driver)))
         (should (equal (clutch-db-connection-sql-dialect conn)
                        '(:backslash-escapes t :dollar-quotes t))))))
-  (should-not (clutch-db-connection-sql-dialect
-               (make-clutch-jdbc-conn :driver 'oracle))))
+  (should (equal (clutch-db-connection-sql-dialect (make-clutch-jdbc-conn :driver 'oracle))
+                 (clutch-db-sql-dialect 'oracle))))
 
 (ert-deftest clutch-db-test-sqlite-select-routing-tolerates-comments-and-syntax ()
   "SQLite row-yielding detection should tolerate comments and SQL syntax."

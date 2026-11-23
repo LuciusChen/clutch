@@ -1669,6 +1669,25 @@ the filter wraps the base query, not the last query run."
                (clutch-result--preview-sql)
                (should (equal captured filtered))))))))))
 
+(ert-deftest clutch-test-oracle-console-keeps-plsql-units ()
+  (with-temp-buffer
+    (clutch-mode)
+    (setq-local clutch-connection (make-clutch-jdbc-conn :driver 'oracle))
+    (let ((clutch-high-risk-query-confirmation 'typed))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "no")))
+        (should-error (clutch--confirm-query-execution "BEGIN UPDATE demo SET val=1 WHERE id=1; DELETE FROM logs; END;")
+                      :type 'user-error)))
+    (dolist (block '("DECLARE s VARCHAR2(80) := q'[it's;\n/\nstill text]';\n\nBEGIN NULL; END;"
+                     "-- install\nCREATE OR /* note */ REPLACE PROCEDURE p AS BEGIN NULL; END;"))
+      (erase-buffer)
+      (insert block)
+      (search-backward "NULL")
+      (pcase-let ((`(,beg . ,end) (clutch--dwim-bounds-at-point)))
+        (should (equal (buffer-substring-no-properties beg end) block)))
+      (should (equal (mapcar #'car (clutch--split-statement-specs
+                                    (concat "SELECT 1 FROM dual;\n" block "\n / \nSELECT 2 FROM dual;")))
+                     (list "SELECT 1 FROM dual" block "SELECT 2 FROM dual"))))))
+
 (ert-deftest clutch-test-cassandra-dwim-keeps-a-whole-batch ()
   "Point inside a batch must select the batch, even without a final semicolon."
   (let ((batch "BEGIN BATCH\nINSERT INTO t (id) VALUES (1);\n\nINSERT INTO t (id) VALUES (2)\nAPPLY BATCH"))
@@ -1762,7 +1781,8 @@ statement."
   "Dialect lookup should only claim rules a product actually has."
   (should (equal (clutch-db-sql-dialect 'postgres) '(:dollar-quotes t)))
   (should (equal (clutch-db-sql-dialect 'mysql) '(:backslash-escapes t)))
-  (dolist (product '(sqlite oracle ms db2 nil))
+  (should (equal (clutch-db-sql-dialect 'oracle) '(:plsql t :oracle-quotes t)))
+  (dolist (product '(sqlite ms db2 nil))
     (should-not (clutch-db-sql-dialect product))))
 
 (ert-deftest clutch-test-statement-breaks-ignore-postgresql-dollar-quotes ()

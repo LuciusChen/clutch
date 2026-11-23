@@ -113,7 +113,11 @@ statement."
                    (1- (abs difference))))
          (remaining (cdr previous))
          kept)
-    (while (and remaining (< (car remaining) shared))
+    (while (and remaining (< (car remaining) shared)
+                ;; Editing the rest of a slash line can turn it into division.
+                (or (not (plist-get dialect :plsql))
+                    (/= (aref text (car remaining)) ?/)
+                    (cl-position ?\n text :start (car remaining) :end shared)))
       (push (pop remaining) kept))
     (let ((resume (and kept (1+ (car kept)))))
       (nconc (nreverse kept)
