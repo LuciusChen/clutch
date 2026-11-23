@@ -318,33 +318,18 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
    (t
     (abbreviate-file-name database))))
 
-(defconst clutch--console-url-secret-param-regexp
-  (concat "\\([?&;]"
-          (regexp-opt '("access_token" "pass" "password" "passwd"
-                        "private_key" "private-key" "pwd" "secret" "token"))
-          "=\\)[^&;]*")
-  "Regexp matching URL parameters that must not affect console identity.")
-
 (defconst clutch--console-identity-param-keys
   '(:user :host :port :database :schema :sid :ssh-host
     :tramp-default-directory)
   "Connection params that distinguish query console identity.")
 
-(defun clutch--console-redacted-url (url)
-  "Return URL with obvious password parameters redacted."
-  (when url
-    (let ((case-fold-search t))
-      (replace-regexp-in-string
-       clutch--console-url-secret-param-regexp
-       "\\1REDACTED"
-       url))))
-
-(defun clutch--console-identity-pairs (params)
-  "Return canonical non-secret identity pairs for connection PARAMS."
+(defun clutch--console-identity-pairs (params &optional legacy)
+  "Return identity pairs for connection PARAMS.  With LEGACY, use the old URL key."
   (when params
     (let ((backend (or (plist-get params :backend)
                        (plist-get params :driver)))
-          (url (clutch--console-redacted-url (plist-get params :url))))
+          (url (when-let* ((url (plist-get params :url)))
+                 (clutch--redact-url url legacy))))
       (append
        (and backend (list (cons :backend backend)))
        (cl-loop for key in clutch--console-identity-param-keys
@@ -352,9 +337,9 @@ When COMPACT is non-nil, prefer the file basename for header-line use."
                 collect (cons key (plist-get params key)))
        (and url (list (cons :url url)))))))
 
-(defun clutch--console-identity-from-params (params)
-  "Return a stable query-console persistence identity from PARAMS."
-  (when-let* ((pairs (clutch--console-identity-pairs params)))
+(defun clutch--console-identity-from-params (params &optional legacy)
+  "Return the persistence identity for PARAMS, using the old URL key if LEGACY."
+  (when-let* ((pairs (clutch--console-identity-pairs params legacy)))
     (concat "console-"
             (secure-hash 'sha256 (prin1-to-string pairs)))))
 
@@ -2495,23 +2480,11 @@ port and TRANSPORT contains the live process metadata."
   "Return structured error details for a failed connection attempt.
 PARAMS describe the attempted connection and ERR is the original
 signaled condition."
-  (let* ((message (or (cadr err) (error-message-string err)))
-         (backend (clutch--backend-key-from-params params))
-         (details (copy-tree (nth 2 err)))
-         (diag (copy-tree (plist-get details :diag)))
-         (context (copy-tree (plist-get diag :context)))
+  (let* ((backend (clutch--backend-key-from-params params))
+         (details (clutch--db-error-details err backend))
+         (diag (plist-get details :diag))
+         (context (plist-get diag :context))
          (default-context (clutch--debug-connection-context backend params)))
-    (unless details
-      (setq details (list :summary (clutch--humanize-db-error message))))
-    (unless (plist-member details :backend)
-      (setq details (plist-put details :backend backend)))
-    (unless (plist-get details :summary)
-      (setq details (plist-put details :summary
-                               (clutch--humanize-db-error message))))
-    (unless diag
-      (setq diag (list :raw-message message)))
-    (unless (plist-get diag :raw-message)
-      (setq diag (plist-put diag :raw-message message)))
     (cl-loop for (key val) on default-context by #'cddr
              unless (plist-member context key)
              do (setq context (plist-put context key val)))

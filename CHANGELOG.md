@@ -16,6 +16,8 @@
 
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
 
+- Debug reports preserve ordinary Emacs errors and mask credentials in connection URLs.
+
 - JDBC schema refresh fetches all table-list pages in the background. Opening an Oracle console no longer blocks cursor movement while the remaining pages load.
 
 - Late output and exit notifications from a replaced JDBC agent no longer interrupt its replacement’s requests. Pending metadata requests finish when the agent exits, and a failed startup handshake releases its process.
