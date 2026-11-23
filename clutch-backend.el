@@ -1656,17 +1656,17 @@ full listing is too slow for a per-command lookup, should say so.")
   nil)
 
 (cl-defgeneric clutch-db-completion-sync-columns-p (conn)
-  "Return non-nil when completion may synchronously load column metadata for CONN.")
+  "Return non-nil when completion may load a table's full column list on CONN.")
 
 (cl-defmethod clutch-db-completion-sync-columns-p ((_conn t))
-  "Most backends can synchronously load column metadata during completion."
+  "Allow full column lists by default."
   t)
 
 (cl-defgeneric clutch-db-completion-deferred-columns-p (conn)
   "Return non-nil when CONN defers uncached completion column metadata.")
 
 (cl-defmethod clutch-db-completion-deferred-columns-p ((_conn t))
-  "Backends use their ordinary synchronous or direct completion path by default."
+  "Allow interactive completion to wait for column names by default."
   nil)
 
 (cl-defgeneric clutch-db-refresh-schema-async (conn callback &optional errback
