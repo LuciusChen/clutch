@@ -242,19 +242,27 @@ SQLite metadata needs no network wait, so retain synchronous completion."
     (funcall callback (mapcar (lambda (row) (nth 1 row)) rows)))
   t)
 
-(defun clutch-db-sqlite--table-ddl (conn table schema)
-  "Return the definition of TABLE in SCHEMA on CONN."
+(defun clutch-db-sqlite--table-record (conn table schema)
+  "Return (NAME SQL) for TABLE in SCHEMA on CONN, or nil."
   (clutch-db--translate-library-error sqlite-error
-    (caar (sqlite-select
-           (clutch-db-sqlite-conn-handle conn)
-           (format "SELECT sql FROM %ssqlite_master WHERE type='table' AND name=?"
-                   (clutch-db-sqlite--schema-prefix schema))
-           (vector table)))))
+    (car (sqlite-select
+          (clutch-db-sqlite-conn-handle conn)
+          (format "SELECT name, sql FROM %ssqlite_master WHERE type='table' AND name = ? COLLATE NOCASE"
+                  (clutch-db-sqlite--schema-prefix schema))
+          (vector table)))))
+
+(cl-defmethod clutch-db-find-table-entry ((conn clutch-db-sqlite-conn) token)
+  "Look up the possibly qualified table TOKEN on CONN."
+  (let ((schema (clutch-db-sql-table-schema token))
+        (name (clutch-db-sql-table-name token)))
+    (when-let* ((row (clutch-db-sqlite--table-record conn name schema)))
+      (list :name (car row) :schema schema :type "TABLE"))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."
   (when (equal (upcase (or (plist-get entry :type) "")) "TABLE")
-    (clutch-db-sqlite--table-ddl conn (plist-get entry :name) (plist-get entry :schema))))
+    (cadr (clutch-db-sqlite--table-record
+           conn (plist-get entry :name) (plist-get entry :schema)))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table
                                        &optional _schema)
@@ -305,7 +313,7 @@ SQLite metadata needs no network wait, so retain synchronous completion."
 
 (defun clutch-db-sqlite--rowid-identity (conn table schema)
   "Return a rowid row locator candidate for TABLE in SCHEMA on CONN, or nil."
-  (let ((ddl (clutch-db-sqlite--table-ddl conn table schema)))
+  (let ((ddl (cadr (clutch-db-sqlite--table-record conn table schema))))
     (when (and ddl (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b" (upcase ddl))))
       (list :kind 'row-locator :name "rowid"
             :select-expressions '("rowid") :where-sql "rowid = ?"))))

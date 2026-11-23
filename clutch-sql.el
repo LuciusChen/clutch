@@ -274,18 +274,20 @@ inside string literals, comments, or nested parentheses are ignored."
            (t (setq end boundary boundaries nil)))))
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
-(defun clutch--sql-from-source-positions (sql)
+(defun clutch--sql-from-source-positions (sql &optional write-targets)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
-Commas in projections, expressions, literals and comments are not sources."
-  (let* ((matches (clutch-db-sql-code-match-positions
+With WRITE-TARGETS, also include UPDATE and INTO targets."
+  (let* ((sources-after (if write-targets '("FROM" "JOIN" "UPDATE" "INTO") '("FROM" "JOIN")))
+         (matches (clutch-db-sql-code-match-positions
                    sql 0 nil
                    (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
+                           (when write-targets "update\\|into\\|")
                            (clutch--sql-set-operators-regexp)
                            "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
          sources first-source)
     (maphash (lambda (pos end)
-               (when (member (upcase (substring sql pos end)) '("FROM" "JOIN"))
+               (when (member (upcase (substring sql pos end)) sources-after)
                  (setq first-source (min (or first-source end) end))))
              matches)
     ;; Projection commas cannot introduce tables.  Avoid allocating and sorting
@@ -306,7 +308,7 @@ Commas in projections, expressions, literals and comments are not sources."
            (push (cons (1+ pos) depth) sources)))
         (t
          (let ((token (upcase (substring sql pos (gethash pos matches)))))
-           (if (member token '("FROM" "JOIN"))
+           (if (member token sources-after)
                (progn (puthash depth t clauses)
                       (push (cons (gethash pos matches) depth) sources))
              (remhash depth clauses)))))
@@ -829,30 +831,23 @@ not treat schema qualifiers in `schema.table' as aliases."
              (clutch--find-alias-definition-position sym-alias))
         sym-alias)))))
 
-(defun clutch--xref-source-table-at-point ()
-  "Return the normalized source table at point, or nil."
-  (when-let* ((hit (clutch--xref-symbol-at-point)))
-    (pcase-let* ((`(,stmt-beg . ,stmt-end) (clutch--statement-bounds))
-                 (text (buffer-substring-no-properties stmt-beg stmt-end))
-                 (masked (clutch-db-sql-mask-literal-or-comment
-                          text (clutch-db-connection-sql-dialect clutch-connection)))
-                 (target (- (car hit) stmt-beg))
-                 (case-fold-search t)
-                 (pos 0))
-      (catch 'found
-        (while (string-match
-                (rx word-start
-                    (or "from" "join" "update" "into")
-                    (+ (in " \t\n\r"))
-                    (group (+ (in alnum "_$#.`\""))))
-                masked pos)
-          (let ((table-beg (match-beginning 1))
-                (table-end (match-end 1)))
-            (when (and (<= table-beg target) (< target table-end))
-              (throw 'found
-                     (clutch--normalize-statement-table-token
-                      (match-string 1 text))))
-            (setq pos (max table-end (1+ pos)))))))))
+(defun clutch--sql-source-table-at-point ()
+  "Return the source table token at point, including its qualifiers."
+  (pcase-let* ((`(,beg . ,end) (clutch--statement-bounds))
+               (sql (buffer-substring-no-properties beg end))
+               (offset (- (point) beg))
+               (source (cl-find-if (lambda (s) (<= (car s) offset))
+                                   (clutch--sql-from-source-positions sql t) :from-end t)))
+    (when source
+      (let* ((start (clutch-db-sql--skip-blank sql (car source)))
+             (pos start) finish parts)
+        (while (and pos (setq finish (clutch-db-sql--token-end sql pos)))
+          (push (substring sql pos finish) parts)
+          (let ((dot (clutch-db-sql--skip-blank sql finish)))
+            (setq pos (when (and (< dot (length sql)) (= (aref sql dot) ?.))
+                        (clutch-db-sql--skip-blank sql (1+ dot))))))
+        (when (and finish (<= start offset finish))
+          (string-join (nreverse parts) "."))))))
 
 (cl-defmethod xref-backend-identifier-at-point ((_backend (eql 'clutch)))
   "Return the identifier at point, preferring normalized alias names."
@@ -865,7 +860,8 @@ not treat schema qualifiers in `schema.table' as aliases."
   (if-let* ((pos (clutch--find-alias-definition-position identifier)))
       (list (xref-make (format "%s (alias)" identifier)
                        (xref-make-buffer-location (current-buffer) pos)))
-    (when-let* ((table (clutch--xref-source-table-at-point))
+    (when-let* ((token (clutch--sql-source-table-at-point))
+                (table (clutch-db-sql-table-name token))
                 ((string-equal (downcase identifier) (downcase table))))
       (user-error
        "%s is already a source table in this statement; xref jumps SQL aliases only; use C-c C-d or C-c C-j for table lookup"

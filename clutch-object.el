@@ -13,6 +13,7 @@
 (require 'clutch-connection)
 (require 'clutch-diagnostics)
 (require 'clutch-schema)
+(require 'clutch-sql)
 (require 'clutch-ui)
 (require 'seq)
 (require 'sql)
@@ -656,13 +657,22 @@ object never lists the schema there."
                      (downcase (or (plist-get entry :name) "")))))
      entries)))
 
-(defun clutch--object-matches-at-point (&optional table-like-only allowed-types)
+(defun clutch--object-matches-at-point (&optional table-like-only allowed-types required)
   "Return matching object entries for the symbol at point.
-TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set."
+TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set.  When REQUIRED,
+report a missing qualified table instead of prompting for a bare name."
   (when-let* ((conn clutch-connection)
-              ((clutch-db-live-p conn))
-              (sym (thing-at-point 'symbol t)))
-    (clutch--object-matches-by-name conn sym table-like-only allowed-types)))
+              ((clutch-db-live-p conn)))
+    (if-let* (((derived-mode-p 'clutch-mode))
+              ((eq (clutch-db-backend-key conn) 'sqlite))
+              ((or (null allowed-types) (member "TABLE" allowed-types)))
+              (token (clutch--sql-source-table-at-point))
+              ((clutch-db-sql-table-schema token)))
+        (if-let* ((entry (clutch-db-find-table-entry conn token)))
+            (list entry)
+          (when required (user-error "No such table: %s" token)))
+      (when-let* ((sym (thing-at-point 'symbol t)))
+        (clutch--object-matches-by-name conn sym table-like-only allowed-types)))))
 
 (defun clutch--remember-current-object (entry)
   "Store ENTRY as the current object for the active buffer."
@@ -769,7 +779,7 @@ TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set."
       (current-object
        current-object)
       ((clutch--preferred-object-match
-        (setq matches (clutch--object-matches-at-point table-like-only allowed-types))
+        (setq matches (clutch--object-matches-at-point table-like-only allowed-types t))
         table-like-only))
       ((> (length matches) 1)
        (clutch--object-entry-reader clutch-connection

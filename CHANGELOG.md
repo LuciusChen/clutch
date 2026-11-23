@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- SQLite table definitions use the selected schema when attached databases have tables with the same name.
+- Looking up a qualified SQLite table at point opens the definition from the named database, even when the main database has a table with the same name.
 
 - Clutch pins JDBC agent 0.2.32. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
 
