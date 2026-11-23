@@ -432,6 +432,18 @@ and leaves the view as it was."
                     conn '(:backend pg :database "shop" :schema "public"))
                    (clutch-er--relations-file
                     conn '(:backend pg :database "shop" :schema "other"))))
+    (let* ((clutch-er-relations-directory (make-temp-file "clutch-er-" t))
+           (params '(:backend jdbc :url "jdbc:postgresql://user:secret@db/app"))
+           (old (expand-file-name (concat (clutch--console-identity-from-params params t) ".json")
+                                  clutch-er-relations-directory))
+           (new (clutch-er--relations-file conn params)))
+      (unwind-protect
+          (progn
+            (write-region "[]" nil old nil 'silent)
+            (should (equal old (clutch-er--relations-file conn params t)))
+            (write-region "[]" nil new nil 'silent)
+            (should (equal new (clutch-er--relations-file conn params t))))
+        (delete-directory clutch-er-relations-directory t)))
     (let* ((params '(:backend jdbc :url "jdbc:postgresql://db/app?password=REVIEW_SECRET"))
            (file (clutch-er--relations-file conn params)))
       (should-not (string-match-p "REVIEW_SECRET" file))

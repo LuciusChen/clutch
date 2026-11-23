@@ -223,7 +223,18 @@ Each section is a cons cell (TITLE . VALUE)."
      "\\1REDACTED"
      (if legacy url
        (replace-regexp-in-string
-        "\\(://[^/@?#: \t\r\n]*:\\)[^/@?# \t\r\n]*@" "\\1REDACTED@" url t)) t)))
+        (rx (or "jdbc:sqlserver://"
+                (seq (group "jdbc:oracle:thin:" (+ (not (in "/@ \t\r\n"))) "/")
+                     (or (seq "\"" (* (not (in "\"\n"))) "\"")
+                         (+ (not (in "@ \t\r\n")))) "@")
+                (seq (group "://" (* (not (in "/@?#: \t\r\n"))) ":")
+                     (* (not (in "/@?# \t\r\n"))) "@")))
+        (lambda (match)
+          ;; SQL Server's authority ends before its semicolon properties.
+          (if-let* ((prefix (or (match-string 1 match) (match-string 2 match))))
+              (concat prefix "REDACTED@")
+            match))
+        url t t)) t)))
 
 (defun clutch--redact-diagnostic-urls (text)
   "Mask connection credentials in URLs embedded in TEXT."
@@ -350,6 +361,14 @@ problem was already recorded."
          (plist-get entry :connection)
          (plist-get entry :problem))))))
 
+(defun clutch--redact-problem-data (value)
+  "Copy diagnostic VALUE with credentials masked in its strings."
+  (cond ((stringp value) (clutch--redact-diagnostic-urls value))
+        ((consp value) (cons (clutch--redact-problem-data (car value))
+                             (clutch--redact-problem-data (cdr value))))
+        ((vectorp value) (cl-map 'vector #'clutch--redact-problem-data value))
+        (t value)))
+
 (defun clutch--remember-problem-record (&rest args)
   "Store the current problem record described by ARGS.
 Recognized keys are :buffer, :connection, and :problem.  Problem records are
@@ -357,7 +376,7 @@ stored buffer-locally and, when CONNECTION is non-nil, with their source
 buffer in the shared connection-scoped registry."
   (let* ((buffer (or (plist-get args :buffer) (current-buffer)))
          (connection (plist-get args :connection))
-         (problem (copy-tree (plist-get args :problem))))
+         (problem (clutch--redact-problem-data (plist-get args :problem))))
     (when (and buffer (buffer-live-p buffer))
       (with-current-buffer buffer
         (setq-local clutch--buffer-error-details problem)))
@@ -448,30 +467,29 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
               message clutch-debug-buffer-name))))
 
 
+(defun clutch--db-error-details (err backend)
+  "Return structured details for ERR on BACKEND, filling missing fields."
+  (let* ((message (clutch-db--error-message err))
+         (details (and (memq 'clutch-db-error (get (car err) 'error-conditions))
+                       (copy-tree (nth 2 err))))
+         (diag (plist-get details :diag)))
+    (when (and backend (not (plist-member details :backend)))
+      (setq details (plist-put details :backend backend)))
+    (unless (plist-get details :summary)
+      (setq details (plist-put details :summary (clutch--humanize-db-error message))))
+    (unless (plist-get diag :raw-message)
+      (setq diag (plist-put diag :raw-message message)))
+    (plist-put details :diag diag)))
+
 (defun clutch--make-buffer-query-error-details
     (connection sql err &optional extra-context extra-diag)
   "Return structured error details for a failed SQL execution on CONNECTION.
 SQL is the user-visible statement.  ERR is the original signaled condition.
 EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
 EXTRA-DIAG is merged into the diagnostic plist when non-nil."
-  (let* ((message (clutch-db--error-message err))
-         (details (and (memq 'clutch-db-error (get (car err) 'error-conditions))
-                       (copy-tree (nth 2 err))))
-         (diag (copy-tree (plist-get details :diag)))
-         (context (copy-tree (plist-get diag :context))))
-    (when extra-diag
-      (setq diag (append extra-diag diag)))
-    (when extra-context
-      (setq context (append extra-context context)))
-    (when-let* ((backend (and connection
-                              (clutch-db-backend-key connection))))
-      (unless (plist-member details :backend)
-        (setq details (plist-put details :backend backend))))
-    (unless (plist-get details :summary)
-      (setq details (plist-put details :summary
-                               (clutch--humanize-db-error message))))
-    (unless (plist-get diag :raw-message)
-      (setq diag (plist-put diag :raw-message message)))
+  (let* ((details (clutch--db-error-details err (and connection (clutch-db-backend-key connection))))
+         (diag (append extra-diag (plist-get details :diag)))
+         (context (append extra-context (plist-get (plist-get details :diag) :context))))
     (unless (or (plist-get context :generated-sql)
                 (plist-get context :sql))
       (setq context (plist-put context :sql sql)))

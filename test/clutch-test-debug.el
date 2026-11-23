@@ -111,6 +111,7 @@ error 1045 is, and an unknown database, error 1049, had no hint."
         (clutch--remember-problem-record
          :buffer (current-buffer)
          :problem details)
+        (should-not (string-search "url-secret" (plist-get clutch--buffer-error-details :stderr-tail)))
         (let ((text (clutch-test--debug-buffer-string)))
           (should (string-match-p "Connection failed" text))
           (should (string-match-p "08071" text))
@@ -319,9 +320,15 @@ error 1045 is, and an unknown database, error 1049, had no hint."
     (let ((details (clutch--make-buffer-query-error-details
                     'conn "SELECT 1" '(clutch-db-error "boom"))))
       (should (eq (plist-get details :backend) 'pg))))
+  (dolist (pair '(("jdbc:sqlserver://host:1433;user=alice@corp.com;password={x;y}"
+                   "jdbc:sqlserver://host:1433;user=alice@corp.com;password=REDACTED")
+                  ("jdbc:oracle:thin:scott/tig#er@//host:1521/svc"
+                   "jdbc:oracle:thin:scott/REDACTED@//host:1521/svc")))
+    (should (equal (clutch--redact-diagnostic-urls (car pair)) (cadr pair))))
   (dolist (err '((file-error "Opening input file" "No such file" "/tmp/missing")
                  (wrong-type-argument stringp 12)))
-    (let ((details (clutch--make-buffer-query-error-details nil "SELECT 1" err)))
+    (dolist (details (list (clutch--make-buffer-query-error-details nil "SELECT 1" err)
+                           (clutch--make-connection-error-details '(:backend pg) err)))
       (should (equal (plist-get (plist-get details :diag) :raw-message)
                      (error-message-string err))))))
 

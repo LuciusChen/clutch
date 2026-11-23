@@ -2480,23 +2480,11 @@ port and TRANSPORT contains the live process metadata."
   "Return structured error details for a failed connection attempt.
 PARAMS describe the attempted connection and ERR is the original
 signaled condition."
-  (let* ((message (or (cadr err) (error-message-string err)))
-         (backend (clutch--backend-key-from-params params))
-         (details (copy-tree (nth 2 err)))
-         (diag (copy-tree (plist-get details :diag)))
-         (context (copy-tree (plist-get diag :context)))
+  (let* ((backend (clutch--backend-key-from-params params))
+         (details (clutch--db-error-details err backend))
+         (diag (plist-get details :diag))
+         (context (plist-get diag :context))
          (default-context (clutch--debug-connection-context backend params)))
-    (unless details
-      (setq details (list :summary (clutch--humanize-db-error message))))
-    (unless (plist-member details :backend)
-      (setq details (plist-put details :backend backend)))
-    (unless (plist-get details :summary)
-      (setq details (plist-put details :summary
-                               (clutch--humanize-db-error message))))
-    (unless diag
-      (setq diag (list :raw-message message)))
-    (unless (plist-get diag :raw-message)
-      (setq diag (plist-put diag :raw-message message)))
     (cl-loop for (key val) on default-context by #'cddr
              unless (plist-member context key)
              do (setq context (plist-put context key val)))
