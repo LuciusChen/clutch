@@ -1884,6 +1884,8 @@ A server-side filter, which wraps the query, keeps that table."
         "CREATE TABLE aux.people (pk INTEGER PRIMARY KEY, id TEXT, name TEXT, nick TEXT)"
         "INSERT INTO aux.people VALUES (1, 'same', 'Ann', 'a'), (2, 'same', 'Bob', 'b')")
       "SELECT * FROM aux.people ORDER BY pk"
+    (should (string-match-p "nick TEXT" (clutch-db-object-definition
+                                         conn '(:name "people" :type "TABLE" :schema "aux"))))
     (should (equal (plist-get clutch--row-identity :columns) '("pk")))
     (clutch-test--with-minibuffer-answers '("id" "= 'same'")
       (clutch-result-apply-filter))
