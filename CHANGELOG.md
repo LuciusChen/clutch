@@ -44,7 +44,7 @@
 
 - Cassandra JDBC profiles run CQL, browse tables and columns, and show bounded read-only result previews with a truncation notice. The connection chooser shows a Cassandra icon when `nerd-icons` is available.
 
-- The ER view shows a clickable relationship overview above the table's fields and keeps the layout stable while you switch tables. See the [ER guide](docs/interactive-client.org#er-view-clutch-er-mode-key-bindings) for navigation.
+- The ER view shows a clickable relationship overview above the table's fields and keeps the layout stable while you switch tables. See the [ER guide](docs/interactive-client.md#er-view-clutch-er-mode-key-bindings) for navigation.
 
 - Native MongoDB collection discovery, sampled field metadata and index warmup use asynchronous `mongodb.el` requests when available. Foreground work takes priority between background metadata requests.
 

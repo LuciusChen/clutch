@@ -17,7 +17,7 @@ The product is for developers, data engineers, analysts, and researchers who pre
 
 ## Supported surfaces
 
-The authoritative support-level definitions and current backend matrix live in [`docs/backend-support.org`](docs/backend-support.org). Installation instructions live in [`README.md`](README.md), and user configuration in [`docs/user-guide.md`](docs/user-guide.md).
+The authoritative support-level definitions and current backend matrix live in [`docs/backend-support.md`](docs/backend-support.md). Installation instructions live in [`README.md`](README.md), and user configuration in [`docs/user-guide.md`](docs/user-guide.md).
 
 ## Required user workflows
 
