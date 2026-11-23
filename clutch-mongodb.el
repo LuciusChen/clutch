@@ -252,8 +252,9 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
       ;; One UTF-16 escape, or two for a surrogate pair.
       (insert (substring text start (min (length text) (+ start 12))))
       (goto-char (point-min))
-      (let ((char (condition-case nil (json-read-escaped-char)
-                    (json-error nil))))
+      (let* ((case-fold-search nil)
+             (char (condition-case nil (json-read-escaped-char)
+                     (json-error nil))))
         (unless (and char (not (<= #xd800 char #xdfff)))
           (signal 'clutch-db-error '("Invalid Unicode escape in MongoDB string")))
         (setf (clutch-mongodb--mql-reader-pos reader) (+ start (1- (point))))
@@ -441,9 +442,7 @@ The default connection delegates to public mongodb.el APIs.  When PARAMS select
     (?\[ (clutch-mongodb--mql-parse-array reader))
     (?/ (signal 'clutch-db-error
                 (list "MongoDB regex literals are not supported; use {$regex: \"pattern\"}")))
-    ((or ?- (guard (and (clutch-mongodb--mql-peek reader)
-                        (<= ?0 (clutch-mongodb--mql-peek reader))
-                        (<= (clutch-mongodb--mql-peek reader) ?9))))
+    ((or ?+ ?- ?. (cl-type (integer ?0 ?9)))
      (clutch-mongodb--mql-parse-number reader))
     (_ (clutch-mongodb--mql-parse-identifier-value reader))))
 
