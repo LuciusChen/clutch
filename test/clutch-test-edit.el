@@ -1347,7 +1347,13 @@ a word that ends a whole rollback, such as CHAIN."
           (should (equal (with-temp-buffer
                            (insert-file-contents path)
                            (buffer-string))
-                         clutch-test--each-kind-sql)))
+                         clutch-test--each-kind-sql))
+          (setq-local clutch--pending-inserts nil clutch--pending-edits nil)
+          (clutch-disconnect)
+          (should (string-match-p "Connection closed"
+                                  (error-message-string
+                                   (should-error (clutch-result-copy-pending-sql)
+                                                 :type 'user-error)))))
       (delete-file path))))
 
 ;;;; Edit — validation
