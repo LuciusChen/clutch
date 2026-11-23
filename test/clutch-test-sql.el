@@ -2205,7 +2205,6 @@ Structure is not interpreted here; callers confirm depth and literals through
                            (funcall done (pcase table
                                            ("APP_CONFIG" '("CONFIG_ID" "CONFIG_NAME"))
                                            ("APP_LOG" '("PAYLOAD")))))
-                       (should-not (eq table-rpc-result 'forbidden))
                        (push prefix table-rpc-prefixes)
                        (funcall done table-rpc-result))
                      t)))
@@ -2213,7 +2212,7 @@ Structure is not interpreted here; callers confirm depth and literals through
                  (lambda (&rest _args)
                    (ert-fail "sync-disabled completion must not ensure columns"))))
               (dolist (case
-                       '((ready-hit "select * from us" "USERS" ready forbidden
+                       '((ready-hit "select * from us" "USERS" ready nil
                                     ("USERS") nil)
                          (ready-miss "select * from or" "AUDIT_LOG" ready
                                      ("ORDERS") ("ORDERS") "or")
@@ -2245,8 +2244,7 @@ Structure is not interpreted here; callers confirm depth and literals through
               (puthash "APP_CONFIG" nil schema)
               (puthash "APP_LOG" nil schema)
               (puthash conn '(:state ready) clutch--schema-status-cache)
-              (setq table-rpc-result 'forbidden
-                    column-rpc-calls nil)
+              (setq table-rpc-prefixes nil column-rpc-calls nil)
               (with-temp-buffer
                 (clutch-mode)
                 (setq-local clutch-connection conn)
@@ -2260,6 +2258,7 @@ Structure is not interpreted here; callers confirm depth and literals through
                     (should (member candidate candidates)))
                   (dolist (candidate '("PAYLOAD" "APP_CONFIG" "APP_LOG"))
                     (should-not (member candidate candidates)))
+                  (should-not table-rpc-prefixes)
                   (should (equal column-rpc-calls
                                  '(("APP_CONFIG" . "con"))))))))))
 
