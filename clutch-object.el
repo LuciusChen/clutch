@@ -675,15 +675,12 @@ object never lists the schema there."
   "Find objects matching NAME, respecting TABLE-LIKE-ONLY and ALLOWED-TYPES.
 When REQUIRED, report a missing qualified SQLite table."
   (when-let* (name (conn clutch-connection) ((clutch-db-live-p conn)))
-    (let ((sqlite (and (derived-mode-p 'clutch-mode)
-                       (eq (clutch-db-backend-key conn) 'sqlite))))
-      (if (and sqlite (clutch-db-sql-table-schema name))
-          (when (or (null allowed-types) (member "TABLE" allowed-types))
-            (if-let* ((entry (clutch-db-find-table-entry conn name)))
-                (list entry)
-              (when required (user-error "No such table: %s" name))))
-        (clutch--object-matches-by-name
-         conn (if sqlite (clutch-db-sql-table-name name) name) table-like-only allowed-types)))))
+    (if (eq (clutch-db-backend-key conn) 'sqlite)
+        (if-let* ((entry (clutch-db-find-table-entry conn name)))
+            (when (clutch--object-type-allowed-p entry allowed-types) (list entry))
+          (when (and required (clutch-db-sql-table-schema name))
+            (user-error "No such table: %s" name)))
+      (clutch--object-matches-by-name conn name table-like-only allowed-types))))
 
 (defun clutch--remember-current-object (entry)
   "Store ENTRY as the current object for the active buffer."

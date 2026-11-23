@@ -248,26 +248,31 @@ SQLite metadata needs no network wait, so retain synchronous completion."
   t)
 
 (defun clutch-db-sqlite--table-record (conn table schema)
-  "Return (NAME SQL) for TABLE in SCHEMA on CONN, or nil."
+  "Return (NAME SQL TYPE) for a table or view named TABLE in SCHEMA on CONN."
   (clutch-db--translate-library-error sqlite-error
     (car (sqlite-select
           (clutch-db-sqlite-conn-handle conn)
-          (format "SELECT name, sql FROM %ssqlite_master WHERE type='table' AND name = ? COLLATE NOCASE"
+          (format "SELECT name, sql, type FROM %ssqlite_master WHERE type IN ('table','view') AND name = ? COLLATE NOCASE"
                   (clutch-db-sqlite--schema-prefix schema))
           (vector table)))))
 
 (cl-defmethod clutch-db-find-table-entry ((conn clutch-db-sqlite-conn) token)
   "Look up the possibly qualified table TOKEN on CONN."
-  (let ((schema (clutch-db-sql-table-schema token))
-        (name (clutch-db-sql-table-name token)))
-    (when-let* ((row (clutch-db-sqlite--table-record conn name schema)))
-      (list :name (car row) :schema (if (and schema (string-equal-ignore-case schema "main"))
-                                        "main" schema)
-            :type "TABLE"))))
+  (let* ((schema (clutch-db-sql-table-schema token))
+         (name (clutch-db-sql-table-name token))
+         (schemas
+          (if schema
+              (list (if (string-equal-ignore-case schema "main") "main" schema))
+            ;; Bare names resolve in temp, main, then attachment order.
+            (let ((dbs (clutch-db-result-rows (clutch-db-query conn "PRAGMA database_list"))))
+              (cons "temp" (remove "temp" (mapcar #'cadr dbs)))))))
+    (cl-loop for db in schemas
+             for row = (clutch-db-sqlite--table-record conn name db)
+             when row return (list :name (car row) :schema db :type (upcase (nth 2 row))))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."
-  (when (equal (upcase (or (plist-get entry :type) "")) "TABLE")
+  (when (member (upcase (or (plist-get entry :type) "")) '("TABLE" "VIEW"))
     (cadr (clutch-db-sqlite--table-record
            conn (plist-get entry :name) (plist-get entry :schema)))))
 
@@ -320,10 +325,11 @@ SQLite metadata needs no network wait, so retain synchronous completion."
 
 (defun clutch-db-sqlite--rowid-identity (conn table schema)
   "Return a rowid row locator candidate for TABLE in SCHEMA on CONN, or nil."
-  (let ((ddl (cadr (clutch-db-sqlite--table-record conn table schema))))
-    (when (and ddl (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b" (upcase ddl))))
-      (list :kind 'row-locator :name "rowid"
-            :select-expressions '("rowid") :where-sql "rowid = ?"))))
+  (pcase (clutch-db-sqlite--table-record conn table schema)
+    (`(,_ ,ddl "table")
+     (unless (string-match-p "\\bWITHOUT\\s-+ROWID\\b" (upcase ddl))
+       (list :kind 'row-locator :name "rowid"
+             :select-expressions '("rowid") :where-sql "rowid = ?")))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table
                                                  &optional schema _catalog)
