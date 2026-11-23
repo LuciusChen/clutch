@@ -2642,6 +2642,10 @@ then failed with \"Connection busy\"."
                   :needle "customer_accounts"
                   :find "customer_accounts"
                   :error "source table")
+            (list :label "temporary table" :sql "SELECT * FROM #orders"
+                  :needle "#orders" :error "source table")
+            (list :label "leading digit" :sql "SELECT * FROM 3orders"
+                  :needle "3orders" :error "source table")
             (list :label "comment"
                   :sql "SELECT * FROM users u -- use u.id here\nWHERE u.id = 1"
                   :needle "u.id here"

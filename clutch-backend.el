@@ -1043,14 +1043,14 @@ Whitespace and comments recognized by DIALECT are blanks."
       (setq pos next))
     pos))
 
-(defun clutch-db-sql--token-end (sql pos)
+(defun clutch-db-sql--token-end (sql pos &optional bare-pattern)
   "Return the end of the name or keyword at POS in SQL, or nil.
-A quoted identifier counts as one name."
+A quoted identifier counts as one name.  BARE-PATTERN matches unquoted names."
   (cond
    ((>= pos (length sql)) nil)
    ((memq (aref sql pos) '(?\" ?` ?\[))
     (clutch-db-sql-skip-literal-or-comment sql pos t))
-   ((eq (string-match "[[:alpha:]_][[:alnum:]_$#@]*" sql pos) pos)
+   ((eq (string-match (or bare-pattern "[[:alpha:]_][[:alnum:]_$#@]*") sql pos) pos)
     (match-end 0))))
 
 (defun clutch-db-sql-cte-definitions (sql)

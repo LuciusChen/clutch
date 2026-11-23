@@ -528,13 +528,17 @@ The exact-name match only needs entries under the name's prefix."
           (clutch-db-query second "CREATE TABLE orders (test_only TEXT)")
           (clutch-db-query first "ATTACH ':memory:' AS aux")
           (clutch-db-query first "CREATE TABLE aux.orders (attached_only TEXT)")
-          (with-temp-buffer
-            (clutch-mode)
-            (setq-local clutch-connection first)
-            (insert "SELECT * FROM aux.orders")
-            (backward-char)
-            (push (call-interactively #'clutch-object-show-ddl-or-source) buffers)
-            (should (string-search "attached_only" (buffer-string))))
+          (dolist (sql '("SELECT * FROM aux.orders"
+                         "SELECT * FROM (aux.orders)"
+                         "UPDATE OR IGNORE aux.orders SET attached_only = 'ok'"))
+            (ert-info (sql)
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection first)
+                (insert sql)
+                (search-backward "orders")
+                (push (call-interactively #'clutch-object-show-ddl-or-source) buffers)
+                (should (string-search "attached_only" (buffer-string))))))
           (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
             (ert-info ((symbol-name command))
               (let ((views

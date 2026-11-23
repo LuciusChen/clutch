@@ -274,14 +274,14 @@ inside string literals, comments, or nested parentheses are ignored."
            (t (setq end boundary boundaries nil)))))
       (cons (+ scope-beg beg) (+ scope-beg end)))))
 
-(defun clutch--sql-from-source-positions (sql &optional write-targets)
+(defun clutch--sql-from-source-positions (sql &optional table-lookup)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
-With WRITE-TARGETS, also include UPDATE and INTO targets."
-  (let* ((sources-after (if write-targets '("FROM" "JOIN" "UPDATE" "INTO") '("FROM" "JOIN")))
+For TABLE-LOOKUP, also visit grouped tables and UPDATE/INTO targets."
+  (let* ((sources-after (if table-lookup '("FROM" "JOIN" "UPDATE" "INTO") '("FROM" "JOIN")))
          (matches (clutch-db-sql-code-match-positions
                    sql 0 nil
                    (concat "\\b\\(?:select\\|from\\|join\\|where\\|group\\|order\\|having\\|"
-                           (when write-targets "update\\|into\\|")
+                           (when table-lookup "update\\|into\\|")
                            (clutch--sql-set-operators-regexp)
                            "\\|limit\\|offset\\|fetch\\|returning\\|set\\|values\\)\\b\\|[()]")))
          (clauses (make-hash-table :test 'eql))
@@ -297,23 +297,35 @@ With WRITE-TARGETS, also include UPDATE and INTO targets."
         (while (string-match "," sql pos)
           (puthash (match-beginning 0) (match-end 0) matches)
           (setq pos (match-end 0)))))
-    (clutch-db-sql-scan-code
-     sql 0 nil
-     (lambda (pos ch depth)
-       (cond
-        ((= ch ?\() (remhash (1+ depth) clauses))
-        ((= ch ?\)) nil)
-        ((= ch ?,)
-         (when (gethash depth clauses)
-           (push (cons (1+ pos) depth) sources)))
-        (t
-         (let ((token (upcase (substring sql pos (gethash pos matches)))))
-           (if (member token sources-after)
-               (progn (puthash depth t clauses)
-                      (push (cons (gethash pos matches) depth) sources))
-             (remhash depth clauses)))))
-       nil)
-     (clutch-db-connection-sql-dialect clutch-connection) matches)
+    (cl-flet ((source (end depth &optional update)
+                (let ((start (if table-lookup (clutch-db-sql--skip-blank sql end) end)))
+                  ;; SQLite permits UPDATE OR <conflict-action> table.
+                  (when-let* (update
+                              (word (clutch-db-sql--token-end sql start))
+                              ((equal (upcase (substring sql start word)) "OR"))
+                              (action (clutch-db-sql--token-end
+                                       sql (clutch-db-sql--skip-blank sql word))))
+                    (setq start (clutch-db-sql--skip-blank sql action)))
+                  (puthash depth t clauses)
+                  (push (cons start depth) sources))))
+      (clutch-db-sql-scan-code
+       sql 0 nil
+       (lambda (pos ch depth)
+         (cond
+          ((= ch ?\()
+           (if (and table-lookup (eql pos (caar sources)))
+               (source (1+ pos) (1+ depth)) ; FROM (table, ...)
+             (remhash (1+ depth) clauses)))
+          ((= ch ?\)) nil)
+          ((= ch ?,) (when (gethash depth clauses) (source (1+ pos) depth)))
+          (t
+           (let* ((end (gethash pos matches))
+                  (token (upcase (substring sql pos end))))
+             (if (member token sources-after)
+                 (source end depth (equal token "UPDATE"))
+               (remhash depth clauses)))))
+         nil)
+       (clutch-db-connection-sql-dialect clutch-connection) matches))
     (nreverse sources)))
 
 (defun clutch--completion-query-regions (sql)
@@ -839,9 +851,10 @@ not treat schema qualifiers in `schema.table' as aliases."
                (source (cl-find-if (lambda (s) (<= (car s) offset))
                                    (clutch--sql-from-source-positions sql t) :from-end t)))
     (when source
-      (let* ((start (clutch-db-sql--skip-blank sql (car source)))
+      (let* ((start (car source))
              (pos start) finish parts)
-        (while (and pos (setq finish (clutch-db-sql--token-end sql pos)))
+        (while (and pos (setq finish (clutch-db-sql--token-end
+                                      sql pos "[[:alnum:]_$#@]+")))
           (push (substring sql pos finish) parts)
           (let ((dot (clutch-db-sql--skip-blank sql finish)))
             (setq pos (when (and (< dot (length sql)) (= (aref sql dot) ?.))
