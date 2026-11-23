@@ -919,13 +919,16 @@ COPY."
 (defun clutch-db-pg--relation (table schema)
   "Return SQL that resolves TABLE in SCHEMA to its oid.
 TABLE and SCHEMA are names as PostgreSQL stores them.  Without SCHEMA, the
-search path resolves TABLE, as it did for the query."
-  (format "%s::regclass"
-          (pgsql-escape-literal
-           (if schema
-               (concat (pgsql-escape-identifier schema) "."
-                       (pgsql-escape-identifier table))
-             (pgsql-escape-identifier table)))))
+search path resolves TABLE, as it did for the query.  Missing or
+inaccessible relations return SQL NULL without aborting a transaction."
+  (if (and schema (not (equal schema "pg_temp")))
+      (format "(SELECT c.oid FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND pg_catalog.has_schema_privilege(n.oid, 'USAGE'))"
+              (pgsql-escape-literal schema) (pgsql-escape-literal table))
+    (format "pg_catalog.to_regclass(%s)"
+            (pgsql-escape-literal (concat (and schema "pg_temp.")
+                                          (pgsql-escape-identifier table))))))
 
 (cl-defmethod clutch-db-value-to-typed-literal
     ((conn clutch-db-pg--connection) value type fallback-format-fn)

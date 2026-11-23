@@ -356,8 +356,7 @@ authinfo, and PARAMS are explicit connection parameters."
 
 (ert-deftest clutch-db-test-pg-source-table-names-fold-as-postgresql-does ()
   "A PostgreSQL source table should be named as PostgreSQL stores it.
-An unquoted name folds to lower case and a quoted one keeps its case, and
-the relation is resolved with both quoted."
+An unquoted name folds to lower case and a quoted one keeps its case."
   (require 'clutch-db-pg)
   (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
     (pcase-dolist (`(,token ,name ,schema)
@@ -367,11 +366,7 @@ the relation is resolved with both quoted."
                      ("other.\"MiXed\"" "MiXed" "other")))
       (ert-info (token)
         (should (equal (clutch-db--source-table-name conn token) name))
-        (should (equal (clutch-db--source-table-schema conn token) schema))))
-    (should (equal (clutch-db-pg--relation "MiXed" "other")
-                   "'\"other\".\"MiXed\"'::regclass"))
-    (should (equal (clutch-db-pg--relation "people" nil)
-                   "'\"people\"'::regclass"))))
+        (should (equal (clutch-db--source-table-schema conn token) schema))))))
 
 (ert-deftest clutch-db-test-pg-param-rewrite-skips-quoted-identifiers ()
   "PostgreSQL parameter rewriting should ignore quoted identifier text."
@@ -7390,6 +7385,10 @@ Skips if `clutch-db-test-pg-password' is nil."
     (clutch-db-set-auto-commit conn nil)
     (clutch-db-query
      conn "INSERT INTO clutch_failed_commit_contract VALUES (1)")
+    (should-not (clutch-db-column-details conn "clutch_missing_relation"))
+    (should (= (caar (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT count(*) FROM clutch_failed_commit_contract")))
+               1))
     (should-error (clutch-db-query conn "SELECT 1 / 0")
                   :type 'clutch-db-error)
     (should (eq (clutch-db-commit conn) 'rolled-back))

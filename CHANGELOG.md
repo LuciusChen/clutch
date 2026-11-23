@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
+
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
