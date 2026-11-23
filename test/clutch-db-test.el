@@ -4104,7 +4104,8 @@ connection's own schema.  A driver without schemas reports an empty one."
 
 (ert-deftest clutch-db-test-jdbc-rpc-async-times-out-and-cleans-up ()
   "Async JDBC RPC should call ERRBACK and clear state on timeout."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-async-timeout-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (clutch-jdbc-rpc-timeout-seconds 1)
         timeout-message
@@ -9248,7 +9249,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
                       (lambda (&rest _)
                         (when ,pending
                           (clutch-jdbc--agent-filter
-                           'fake-proc
+                           clutch-jdbc--agent-process
                            (mapconcat (lambda (line) (concat line "\n"))
                                       (prog1 ,pending (setq ,pending nil))
                                       ""))
@@ -9838,6 +9839,8 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (cl-letf (((symbol-function 'process-live-p) #'ignore)
                   ((symbol-function 'clutch-jdbc--agent-exit-error-message)
                    (lambda () "clutch-jdbc-agent exited")))
+          (clutch-jdbc--agent-sentinel 'retired "finished\n")
+          (should (gethash 42 clutch-jdbc--async-callbacks))
           (clutch-jdbc--agent-sentinel 'fake-proc "exited abnormally\n")
           (run-timers)
           (should (gethash 99 clutch-jdbc--async-callbacks))
@@ -9998,6 +10001,9 @@ told that no reply will arrive."
     (unwind-protect
         (cl-letf (((symbol-function 'process-buffer) (lambda (_proc) buf))
                   ((symbol-function 'delete-process) #'ignore))
+          (clutch-jdbc--agent-filter 'retired "{\"id\":1,\"ok\":true}\nnot-json\n")
+          (should-not (car reply))
+          (should (eq clutch-jdbc--agent-process 'fake-proc))
           (clutch-jdbc--agent-filter 'fake-proc
                                      "{\"id\":1,\"ok\":true}\nnot-json\n")
           (accept-process-output nil 0.01)
@@ -10016,7 +10022,8 @@ told that no reply will arrive."
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-scans-fragments-incrementally ()
   "JDBC response fragments should not rescan bytes seen by earlier filter calls."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (fragments '("{\"id\":" "17,\"ok\":" "true}" "\n"))
         (replies (mapcar (lambda (id) (list id nil)) '(17 18 19)))
@@ -10055,7 +10062,8 @@ told that no reply will arrive."
 
 (ert-deftest clutch-db-test-jdbc-agent-filter-drops-unregistered-replies ()
   "A reply that no request waits for should be dropped and others delivered."
-  (let ((buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
+  (let ((clutch-jdbc--agent-process 'fake-proc)
+        (buf (generate-new-buffer " *clutch-jdbc-filter-test*"))
         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
         (reply (list nil)))
     (puthash 42 (list :reply reply) clutch-jdbc--async-callbacks)

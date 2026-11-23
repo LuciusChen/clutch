@@ -18,6 +18,8 @@
 
 - JDBC schema refresh fetches all table-list pages in the background. Opening an Oracle console no longer blocks cursor movement while the remaining pages load.
 
+- Late output and exit notifications from a replaced JDBC agent no longer interrupt its replacement’s requests.
+
 - Oracle Thin uses in-band cancellation so `C-g` works across network routes that drop TCP urgent data. Confirmed cancellations now show `Query cancelled` without recording a problem.
 
 - Clutch pins JDBC agent 0.2.31 so `C-g` can cancel a submitted statement before it starts. Clutch skips automatic retry when cancellation and an idle connection failure coincide.
