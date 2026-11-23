@@ -22,6 +22,8 @@
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
+- Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
+
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 
 - High-risk SQL confirmation ignores apparent clauses inside dialect-specific string literals when checking updates and deletes.

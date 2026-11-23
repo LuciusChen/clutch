@@ -47,27 +47,29 @@ the edit buffer behind it is killed with it."
        (kill-buffer ,var))))
 
 (ert-deftest clutch-test-edit-pending-insert-reopens-prefilled-insert-buffer ()
-  "Editing a ghost insert row should reopen the staged insert with its values."
-  (clutch-test--with-pop-to-buffer-capture insert-buf
-    (clutch-test--with-result-state-buffer result-buf
-        (:connection (make-clutch-test-conn :table "shipping_incidents"
-                                            :columns '((:name "id" :nullable t)
-                                                       (:name "severity" :nullable t)
-                                                       (:name "owner" :nullable t)))
-         :connection-params '(:backend mysql)
-         :source-table "shipping_incidents"
-         :columns '("id" "severity" "owner")
-         :rows '((1 "low" "alice"))
-         :pending-inserts '((("severity" . "high") ("owner" . "bob")))
-         :render t)
-      (with-current-buffer result-buf
-        (clutch--goto-cell 1 1)
-        (clutch-result-edit-cell))
-      (with-current-buffer insert-buf
-        (should (equal clutch-result-insert--pending-index 0))
-        (should (equal clutch-result-insert--table "shipping_incidents"))
-        (should (string-match-p "^severity[ ]*: high$" (buffer-string)))
-        (should (string-match-p "^owner[ ]*: bob$" (buffer-string)))))))
+  "A reopened insert form still edits its own row after another is discarded."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE jobs (id INTEGER PRIMARY KEY, owner TEXT)"
+        "INSERT INTO jobs VALUES (1, 'seed')")
+      "SELECT * FROM jobs"
+    (dolist (owner '("A" "B" "C"))
+      (with-current-buffer result (clutch-result-insert-row))
+      (with-current-buffer (window-buffer (selected-window))
+        (clutch-test--set-insert-field-value "owner" owner)
+        (clutch-result-insert-stage)))
+    (clutch--goto-cell 2 1)
+    (clutch-result-edit-cell)
+    (let ((form (current-buffer)))
+      (should (equal (cdr (assoc "owner" (clutch-result-insert--parse-fields))) "B"))
+      (clutch-test--set-insert-field-value "owner" "B-edited")
+      (pop-to-buffer result)
+      (clutch--goto-cell 1 1)
+      (clutch-result-discard-pending-at-point)
+      (pop-to-buffer form)
+      (clutch-result-insert-stage)
+      (with-current-buffer result
+        (should (equal clutch--pending-inserts
+                       '((("owner" . "B-edited")) (("owner" . "C")))))))))
 
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
@@ -778,9 +780,9 @@ replace the staged rows."
 Staging a re-edited insert should replace the pending entry in place,
 and staging a new insert should append one ghost row without full
 redraw."
-  (pcase-dolist (`(,label ,staged ,index ,typed)
+  (pcase-dolist (`(,label ,staged ,reedit ,typed)
                  '(("new insert" nil nil "carol")
-                   ("re-edited insert" ((("name" . "carol"))) 0 "dave")))
+                   ("re-edited insert" ((("name" . "carol"))) t "dave")))
     (ert-info (label)
       (clutch-test--with-pop-to-buffer-capture insert-buf
         (clutch-test--with-result-state-buffer result-buf
@@ -797,7 +799,7 @@ redraw."
                                    (clutch-test--select-cells '(0 0) '(1 0))
                                    (mark))))
             (clutch-result-insert--open-buffer
-             "users" result-buf (car staged) index)
+             "users" result-buf (car staged) reedit)
             (with-current-buffer insert-buf
               (clutch-test--set-insert-field-value "name" typed)
               (cl-letf (((symbol-function 'quit-window) #'ignore))
