@@ -192,19 +192,24 @@ A missing schema or catalog means CURRENT or CATALOG of the connection."
 ;; connection's current schema.  Relations are read as parsed, alists and
 ;; vectors, and written back in the same shape.
 
-(defun clutch-er--relations-file (conn params)
+(defun clutch-er--relations-file (conn params &optional read)
   "Return the relations file of CONN, opened with PARAMS.
 Its default name uses the console's non-secret connection identity,
-which includes the SSH or TRAMP origin, excluding the current schema."
+which excludes the current schema.  For READ, try the old URL identity
+when the current file does not exist."
   (or (plist-get params :relations-file)
       (let ((identity-params (copy-sequence params)))
         ;; Unqualified relation ends follow a schema switch within this file.
         (cl-remf identity-params :schema)
-        (expand-file-name
-         (concat (or (clutch--console-identity-from-params identity-params)
-                     (secure-hash 'sha256 (clutch--connection-key conn)))
-                 ".json")
-         clutch-er-relations-directory))))
+        (let* ((key (or (clutch--console-identity-from-params identity-params)
+                        (secure-hash 'sha256 (clutch--connection-key conn))))
+               (file (expand-file-name (concat key ".json") clutch-er-relations-directory)))
+          (or (when (and read (plist-get params :url) (not (file-exists-p file)))
+                (let ((old (expand-file-name
+                            (concat (clutch--console-identity-from-params identity-params t) ".json")
+                            clutch-er-relations-directory)))
+                  (and (file-readable-p old) old)))
+              file)))))
 
 (defun clutch-er--valid-end-p (end)
   "Return non-nil when END is a stored table: a table and maybe namespaces."
@@ -376,7 +381,7 @@ loaded now when missing."
                                    (plist-get entry :catalog)))
           nil))
         (stored (clutch-er--read-relations
-                 (clutch-er--relations-file conn params))))
+                 (clutch-er--relations-file conn params t))))
     (if (null stored)
         database
       ;; Only stored relations need the namespace to resolve unqualified ends.
@@ -397,7 +402,7 @@ PARAMS select the stored manual relations."
      (list :columns columns :database (clutch-er--relations outgoing incoming)
            :schema (or (plist-get entry :schema) current) :current current
            :current-catalog (alist-get 'catalog (clutch-db-metadata-scope conn)))
-     (clutch-er--read-relations (clutch-er--relations-file conn params)) entry)))
+     (clutch-er--read-relations (clutch-er--relations-file conn params t)) entry)))
 
 (defun clutch-er--load (conn params entry)
   "Return the ER model of the table of ENTRY on CONN, opened with PARAMS.
@@ -1333,7 +1338,8 @@ change made elsewhere since the view loaded is kept, and returns those to
 store.  The ER view of the connection shows them."
   (let* ((conn clutch-connection)
          (file (clutch-er--relations-file conn clutch--connection-params))
-         (relations (funcall function (clutch-er--read-relations file))))
+         (relations (funcall function (clutch-er--read-relations
+                                       (clutch-er--relations-file conn clutch--connection-params t)))))
     (clutch-er--write-relations file relations)
     (when-let* ((buffer (get-buffer (clutch-er--buffer-name conn))))
       (with-current-buffer buffer

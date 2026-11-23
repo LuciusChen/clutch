@@ -159,18 +159,19 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
     (puthash message-text t clutch--completion-metadata-warning-cache)
     (message "Completion metadata unavailable: %s" message-text)))
 
+(defun clutch--report-completion-error (conn err)
+  "Report recoverable completion error ERR on CONN."
+  (clutch--remember-recoverable-metadata-warning conn "completion" err)
+  (if (clutch--oracle-i18n-missing-p err)
+      (clutch--warn-oracle-i18n-once)
+    (clutch--warn-completion-metadata-error-once (clutch-db--error-message err)))
+  nil)
+
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
   (condition-case err
       (funcall thunk)
-    (clutch-db-error
-     (clutch--remember-recoverable-metadata-warning
-      clutch-connection "completion" err)
-     (if (clutch--oracle-i18n-missing-p err)
-         (clutch--warn-oracle-i18n-once)
-       (clutch--warn-completion-metadata-error-once
-        (clutch-db--error-message err)))
-     nil)))
+    (clutch-db-error (clutch--report-completion-error clutch-connection err))))
 
 (defun clutch--table-metadata (conn key)
   "Return the metadata plist for KEY on CONN, or nil."
@@ -643,8 +644,9 @@ message after its failed state is recorded."
                    (clutch--table-key-label table))))
         started))))
 
-(defun clutch--ensure-columns-async (conn schema table)
-  "Queue an async column-name fetch for TABLE in SCHEMA on CONN when needed."
+(defun clutch--ensure-columns-async (conn schema table &optional async-only)
+  "Queue a column-name fetch for TABLE in SCHEMA on CONN when needed.
+With ASYNC-ONLY, skip backends that decline background loading."
   (let ((columns (if schema (gethash table schema 'missing) 'missing))
         (state (plist-get
                 (clutch--metadata-status conn table :columns-status)
@@ -663,8 +665,10 @@ message after its failed state is recorded."
                   (clutch--set-metadata-status
                    conn table :columns-status 'ready))))))
         (unless started
-          (clutch--ensure-columns conn schema table)
-          (clutch--notify-metadata-state-changed conn)))
+          (clutch--clear-metadata-status conn table :columns-status)
+          (unless async-only
+            (clutch--ensure-columns conn schema table)
+            (clutch--notify-metadata-state-changed conn))))
       t)))
 
 (defun clutch--ensure-column-details (conn table &optional strict)
@@ -896,27 +900,28 @@ A failure signals `clutch-db-error' and leaves the cache as it was."
               (propertize (concat "  — " desc) 'face 'shadow)))))
 
 (defun clutch--ensure-help-doc (conn sym)
-  "Return a backend-provided eldoc string for SYM from CONN, with caching.
-Queries the server on first access; subsequent calls read from cache.
-Returns nil when SYM is not a known built-in on this server."
+  "Return cached help for SYM on CONN, or `pending' while fetching it."
   (let* ((cache (or (gethash conn clutch--help-doc-cache)
-                    (let ((h (make-hash-table :test 'equal)))
-                      (puthash conn h clutch--help-doc-cache)
-                      h)))
-         (uname (upcase sym))
-         (entry (gethash uname cache 'missing)))
-    (cond
-     ((eq entry 'missing)
-      (condition-case err
-          (let ((doc (clutch-db-symbol-help conn sym)))
-            (puthash uname (or doc 'not-found) cache)
-            (when doc (clutch--format-help-doc doc)))
-        (clutch-db-error
-         (clutch--remember-recoverable-metadata-warning
-          conn "symbol help" err `(:symbol ,sym))
-         nil)))
-     ((eq entry 'not-found) nil)
-     (t (clutch--format-help-doc entry)))))
+                    (puthash conn (make-hash-table :test 'equal)
+                             clutch--help-doc-cache)))
+         (key (upcase sym)))
+    (unless (gethash key cache)
+      (puthash key 'pending cache)
+      (cl-labels ((finish (doc err)
+                    (when (eq cache (gethash conn clutch--help-doc-cache))
+                      (puthash key (or doc 'not-found) cache)
+                      (when err
+                        (clutch--remember-recoverable-metadata-warning
+                         conn "symbol help" err `(:symbol ,sym)))
+                      (clutch--notify-metadata-state-changed conn)
+                      (when err (remhash key cache)))))
+        (condition-case err
+            (unless (clutch-db-symbol-help-async conn sym #'finish)
+              (remhash key cache))
+          (clutch-db-error (finish nil err)))))
+    (pcase (gethash key cache)
+      ('pending 'pending)
+      ((and (pred consp) doc) (clutch--format-help-doc doc)))))
 
 (defun clutch--schema-for-connection (&optional conn)
   "Return the schema hash-table for CONN, or nil.

@@ -10,13 +10,27 @@
 
 - Oracle console and REPL execution keep PL/SQL blocks together, including their final semicolon.
 
+- Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
+
+- Typing during JDBC identifier completion no longer waits for column metadata or an Oracle prefix search.
+
+- Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
+
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
+
+- High-risk SQL confirmation ignores apparent clauses inside dialect-specific string literals when checking updates and deletes.
 
 - JDBC query results and exports fetch remaining cursor batches in the background so large results no longer block Emacs while waiting for rows.
 
+- Debug reports preserve ordinary Emacs errors and mask credentials in connection URLs.
+
 - JDBC schema refresh fetches all table-list pages in the background. Opening an Oracle console no longer blocks cursor movement while the remaining pages load.
 
+- Late output and exit notifications from a replaced JDBC agent no longer interrupt its replacement’s requests. Pending metadata requests finish when the agent exits, and a failed startup handshake releases its process.
+
 - Oracle Thin uses in-band cancellation so `C-g` works across network routes that drop TCP urgent data. Confirmed cancellations now show `Query cancelled` without recording a problem.
+
+- MySQL drains a timed-out transaction reply or closes the connection before reuse. A commit with an unknown outcome is never retried. A late reply to a database switch updates the selected database only when the server accepts it.
 
 - Clutch pins JDBC agent 0.2.31 so `C-g` can cancel a submitted statement before it starts. Clutch skips automatic retry when cancellation and an idle connection failure coincide.
 

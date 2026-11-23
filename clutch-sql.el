@@ -39,10 +39,10 @@ A plist with :tick, :beg, :end and :dialect identifying the scanned text,
 and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
 
 (defconst clutch--schema-inline-table-limit 3
-  "Maximum number of statement tables for synchronous schema hints.")
+  "Maximum number of statement tables for automatic column hints.")
 
 (defconst clutch--schema-inline-min-prefix-length 2
-  "Minimum symbol prefix length before loading column hints synchronously.")
+  "Minimum symbol prefix length before loading unqualified column hints.")
 
 ;;;; SQL context, completion, eldoc, and xref
 
@@ -61,8 +61,9 @@ and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
                              'face 'font-lock-constant-face))))
    "  "))
 
-(defun clutch--eldoc-column-string (conn table col-name)
-  "Format an eldoc string for COL-NAME in TABLE using CONN."
+(defun clutch--eldoc-column-string (conn table col-name &optional wait)
+  "Format help for COL-NAME in TABLE on CONN.
+With WAIT, return `pending' until the column details arrive."
   (let* ((table (if (and (consp table)
                          (null (car table))
                          (equal (nth 1 table)
@@ -84,20 +85,26 @@ and :scan holding (TEXT . BREAKS) as returned by `clutch--statement-scan'.")
                          "."
                          (propertize canonical-name
                                      'face 'font-lock-variable-name-face))))
-    (unless details
+    (unless (or (clutch--column-details-cached-p conn table)
+                (eq (plist-get (clutch--metadata-status conn table :column-details-status)
+                               :state) 'failed))
       (clutch--ensure-column-details-async conn table))
-    (if col
-        (let ((type (plist-get col :type))
-              (comment (plist-get col :comment))
-              (extras (clutch--eldoc-column-extras col)))
-          (string-join
-           (delq nil (list header
-                           (propertize type 'face 'font-lock-type-face)
-                           (unless (string-empty-p extras) extras)
-                           (when comment
-                             (propertize (format "— %s" comment) 'face 'shadow))))
-           "  "))
-      header)))
+    (cond
+     (col
+      (let ((type (plist-get col :type))
+            (comment (plist-get col :comment))
+            (extras (clutch--eldoc-column-extras col)))
+        (string-join
+         (delq nil (list header
+                         (propertize type 'face 'font-lock-type-face)
+                         (unless (string-empty-p extras) extras)
+                         (when comment
+                           (propertize (format "— %s" comment) 'face 'shadow))))
+         "  ")))
+     ((and wait (memq (plist-get (clutch--metadata-status conn table :column-details-status)
+                                 :state) '(queued loading)))
+      'pending)
+     (t header))))
 
 (defun clutch--statement-breaks-after-edit (text previous dialect)
   "Return top-level semicolon offsets of TEXT, reusing PREVIOUS where possible.
@@ -1496,33 +1503,82 @@ appropriate."
                      (<= (length tables) clutch--schema-inline-table-limit)))
         tables))))
 
+(defun clutch--sql-column-key (conn table)
+  "Return the metadata key for SQL TABLE on CONN."
+  (if-let* ((namespace (clutch-db-sql-table-schema table)))
+      (clutch--table-key
+       (clutch-db--source-table-name conn table)
+       (or (clutch-db--source-table-schema conn table) namespace)
+       (clutch-db--source-table-catalog conn table))
+    table))
+
+(defun clutch--scoped-column-values (conn schema key)
+  "Read column names for qualified KEY on CONN, reusing SCHEMA when in scope."
+  (or (plist-get (clutch--table-metadata conn key) :columns)
+      (and (not (car key))
+           (equal (nth 1 key) (plist-get clutch--connection-render-state :namespace))
+           (clutch--cached-columns schema (clutch--table-key-name key)))
+      (clutch--completion-qualified-columns conn key)))
+
+(defun clutch--completion-await-metadata (conn key property)
+  "Let interactive completion use the pending CONN request at KEY and PROPERTY.
+Plain CAPF probes only read the cache.  A completion UI can wait for the
+first answer until the next keystroke, leaving the background fetch alive."
+  (when-let* ((status (clutch--metadata-status conn key property))
+              ((eq (plist-get status :state) 'loading)))
+    (cl-flet ((wait-for-reply ()
+                (while (and (eq status (clutch--metadata-status conn key property))
+                            (clutch-db-live-p conn))
+                  (sit-for 0.05))))
+      (cond
+       (throw-on-input (wait-for-reply))
+       ((memq this-command '(completion-at-point clutch-complete-at-point
+                             clutch-complete-qualified-or-indent))
+        (pcase (while-no-input (wait-for-reply) 'ready)
+          ;; Claim the old slot so another CAPF cannot complete it.
+          ('t (throw 'clutch--completion-interrupted (list (point) (point) nil)))
+          ('nil (keyboard-quit))))))))
+
+(defun clutch--completion-prefix-names (conn table prefix)
+  "Return cached PREFIX matches for TABLE on CONN, or search in the background.
+A nil TABLE searches table names.  Keep only the last prefix for each source."
+  (if-let* ((fetch (clutch-db-completion-prefix-fetcher conn)))
+      (let ((entry (plist-get (clutch--table-metadata conn table) :completion-prefix)))
+        (when (and (clutch-db-live-p conn) (not (equal prefix (car entry))))
+          (setq entry (cons prefix nil))
+          (clutch--set-table-metadata conn table :completion-prefix entry)
+          (clutch--start-table-metadata-request
+           conn table table :prefix-status "completion"
+           (lambda (connection source done fail)
+             (funcall fetch connection source prefix done fail))
+           (lambda (names) (setcdr entry names))
+           (lambda (msg)
+             (clutch--set-table-metadata conn table :completion-prefix nil)
+             (clutch--report-completion-error conn (list 'clutch-db-error msg)))))
+        (clutch--completion-await-metadata conn table :prefix-status)
+        (cdr entry))
+    (clutch--safe-completion-call
+     (lambda ()
+       (if table (clutch-db-complete-columns conn table prefix)
+         (clutch-db-complete-tables conn prefix))))))
+
 (defun clutch--completion-column-values (conn schema table prefix sync-columns-p)
   "Return raw column names for TABLE on CONN in completion context.
 SCHEMA supplies cached columns.  PREFIX is passed to direct backend completion
 when SYNC-COLUMNS-P is nil."
-  (if-let* ((namespace (clutch-db-sql-table-schema table)))
-      (let* ((key (clutch--table-key
-                   (clutch-db--source-table-name conn table)
-                   (or (clutch-db--source-table-schema conn table) namespace)
-                   (clutch-db--source-table-catalog conn table))))
-        (or (plist-get (clutch--table-metadata conn key) :columns)
-            (and (not (clutch-db--source-table-catalog conn table))
-                 (equal (nth 1 key)
-                        (plist-get clutch--connection-render-state :namespace))
-                 (clutch--cached-columns schema (clutch--table-key-name key)))
-            (clutch--completion-qualified-columns conn key)))
-    (if (clutch-db-completion-deferred-columns-p conn)
-        (or (clutch--cached-columns schema table)
-            (when schema
-              (clutch--ensure-columns-async conn schema table)
-              nil))
-      (if sync-columns-p
-          (or (clutch--cached-columns schema table)
-              (and schema (clutch--ensure-columns conn schema table)))
-        (or (clutch--cached-columns schema table)
-            (clutch--safe-completion-call
-             (lambda ()
-               (clutch-db-complete-columns conn table prefix))))))))
+  (let ((key (clutch--sql-column-key conn table)))
+    (cond
+     ((consp key) (clutch--scoped-column-values conn schema key))
+     ((clutch--cached-columns schema table))
+     ((clutch-db-completion-deferred-columns-p conn)
+      (when schema (clutch--ensure-columns-async conn schema table))
+      nil)
+     (sync-columns-p
+      (when schema
+        (clutch--ensure-columns-async conn schema table)
+        (clutch--completion-await-metadata conn table :columns-status)
+        (clutch--cached-columns schema table)))
+     (t (clutch--completion-prefix-names conn table prefix)))))
 
 (defun clutch--completion-column-candidates (conn schema tables prefix
                                                   sync-columns-p)
@@ -1674,16 +1730,20 @@ it, so nothing is scanned there."
       (`(,beg ,end ,collection . ,plist)
        (let ((completion-extra-properties plist)
              (completion-in-region-mode-predicate #'always))
-         (unless (completion-in-region beg end collection
-                                       (plist-get plist :predicate))
+         (unless (or (null collection)
+                     (completion-in-region beg end collection
+                                           (plist-get plist :predicate)))
            (user-error "No completion at point"))))
       (_
        (user-error "No completion at point")))))
 
 (defun clutch-completion-at-point ()
-  "Completion-at-point function for SQL identifiers.
-Skips column loading if the connection is busy (prevents re-entrancy
-when completion triggers during an in-flight query)."
+  "Complete SQL identifiers at point without delaying further input."
+  (catch 'clutch--completion-interrupted
+    (clutch--sql-identifier-capf)))
+
+(defun clutch--sql-identifier-capf ()
+  "Build identifier candidates for the SQL at point."
   (let* ((quoted (and clutch-connection (clutch--completion-quoted-identifier)))
          (symbol-bounds (or (plist-get quoted :bounds)
                             (bounds-of-thing-at-point 'symbol)))
@@ -1722,8 +1782,7 @@ when completion triggers during an in-flight query)."
             (when (and table-context-p (not namespace) (not busy)
                        (>= prefix-len clutch--schema-inline-min-prefix-length))
               (or (clutch--schema-table-candidates conn schema prefix)
-                  (clutch--safe-completion-call
-                   (lambda () (clutch-db-complete-tables conn prefix))))))
+                  (clutch--completion-prefix-names conn nil prefix))))
            (derived (and (not table-context-p)
                          (clutch--completion-derived-source
                           (clutch--tables-in-query-cache-entry schema)
@@ -1831,79 +1890,38 @@ when completion triggers during an in-flight query)."
       (completion-at-point)
     (indent-for-tab-command)))
 
-(defun clutch--eldoc-metadata-plan (schema sym qualified-table statement-tables sync-columns-p)
-  "Return a pure metadata plan for documenting SYM from SCHEMA.
-The plan contains (ACTION TABLE COLUMNS) entries selected using
-QUALIFIED-TABLE, STATEMENT-TABLES, and SYNC-COLUMNS-P."
-  (cond
-   ((not (eq (gethash sym schema 'missing) 'missing))
-    (let ((columns (clutch--cached-columns schema sym)))
-      (append (and sync-columns-p (not columns) `((queue-column ,sym)))
-              `((table-summary ,sym ,columns)))))
-   ((< (length sym) clutch--schema-inline-min-prefix-length) '((skip)))
-   (t
-    (let ((tables (or (and qualified-table (list qualified-table)) statement-tables)))
-      (if (or (null tables) (and (not qualified-table)
-                                 (> (length tables) clutch--schema-inline-table-limit)))
-          '((skip))
-        (mapcar (lambda (table)
-                  (cond
-                   ((clutch-db-sql-table-schema table)
-                    (list 'qualified-column table))
-                   ((clutch--cached-columns schema table)
-                    (list 'cached-column table (clutch--cached-columns schema table)))
-                   (t (list (if sync-columns-p 'sync-column 'skip) table))))
-                tables))))))
-
-(defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table)
-  "Return an eldoc string for SYM via SCHEMA on CONN, or nil."
-  (let* ((sync-columns-p (clutch-db-completion-sync-columns-p conn))
-         (statement-tables
-          (and (eq (gethash sym schema 'missing) 'missing)
-               (>= (length sym) clutch--schema-inline-min-prefix-length)
-               (not qualified-table) (clutch--tables-in-current-statement schema))))
-    (cl-loop for (action table columns)
-             in (clutch--eldoc-metadata-plan
-                 schema sym qualified-table statement-tables sync-columns-p)
-             do (pcase action
-                  ('queue-column
-                   (clutch--ensure-columns-async conn schema table))
-                  ('table-summary
-                   (let ((comment (clutch--cached-table-comment conn table)))
-                     (unless (clutch--table-comment-cached-p conn table)
-                       (clutch--ensure-table-comment-async conn table))
-                     (cl-return
-                      (concat
-                       (propertize (format "[%s] " (clutch-db-database conn))
-                                   'face 'shadow)
-                       (propertize table 'face 'font-lock-type-face)
-                       (when columns
-                         (propertize
-                          (format "  (%d col%s)" (length columns)
-                                  (if (= (length columns) 1) "" "s"))
-                          'face 'shadow))
-                       (when comment
-                         (propertize (format "  — %s" comment) 'face 'shadow))))))
-                  ((or 'cached-column 'sync-column 'qualified-column)
-                   (let* ((values (if (eq action 'qualified-column)
-                                      (clutch--completion-column-values
-                                       conn schema table "" sync-columns-p)
-                                    (or columns
-                                        (clutch--ensure-columns conn schema table))))
-                          (match (and values
-                                      (clutch--identifier-match sym values))))
-                     (when match
-                       (cl-return
-                        (clutch--eldoc-column-string
-                         conn
-                         (if (clutch-db-sql-table-schema table)
-                             (clutch--table-key
-                              (clutch-db--source-table-name conn table)
-                              (or (clutch-db--source-table-schema conn table)
-                                  (clutch-db-sql-table-schema table))
-                              (clutch-db--source-table-catalog conn table))
-                           table)
-                         match)))))))))
+(defun clutch--eldoc-schema-string (conn schema sym &optional qualified-table wait)
+  "Return help for SYM in SCHEMA on CONN, or `pending' on a cold lookup.
+QUALIFIED-TABLE narrows the search.  WAIT requests full column details."
+  (let ((load-columns (clutch-db-completion-sync-columns-p conn)))
+    (if (not (eq (gethash sym schema 'missing) 'missing))
+        (let ((columns (clutch--cached-columns schema sym))
+              (comment (clutch--cached-table-comment conn sym)))
+          (when (and load-columns (not columns))
+            (clutch--ensure-columns-async conn schema sym t))
+          (unless (clutch--table-comment-cached-p conn sym)
+            (clutch--ensure-table-comment-async conn sym))
+          (concat (propertize (format "[%s] " (clutch-db-database conn)) 'face 'shadow)
+                  (propertize sym 'face 'font-lock-type-face)
+                  (when columns
+                    (propertize (format "  (%d col%s)" (length columns)
+                                        (if (= (length columns) 1) "" "s")) 'face 'shadow))
+                  (when comment (propertize (concat "  — " comment) 'face 'shadow))))
+      (when (>= (length sym) clutch--schema-inline-min-prefix-length)
+        (cl-loop for table in (clutch--completion-context-tables
+                               schema qualified-table (length sym) nil nil)
+                 for key = (clutch--sql-column-key conn table)
+                 for columns = (if (consp key)
+                                   (clutch--scoped-column-values conn schema key)
+                                 (or (clutch--cached-columns schema table)
+                                     (when load-columns
+                                       (clutch--ensure-columns-async conn schema table t)
+                                       (clutch--cached-columns schema table))))
+                 for match = (clutch--identifier-match sym columns)
+                 when match return (clutch--eldoc-column-string conn key match wait)
+                 when (eq (plist-get (clutch--metadata-status conn key :columns-status)
+                                     :state) 'loading)
+                 return 'pending)))))
 
 (defun clutch--eldoc-effective-symbol-at-point (sym schema)
   "Return the effective eldoc symbol at point for raw SYM and SCHEMA.
@@ -1924,28 +1942,46 @@ return SYM unchanged."
            next-sym))))
    sym))
 
-(defun clutch--eldoc-function (&rest _)
-  "Eldoc backend for `clutch-mode'.
-Returns a documentation string for the SQL identifier at point.
-Schema-based info (tables, columns) requires an active connection.
-SQL keyword/function docs are shown even without a connection."
-  (when-let* ((bounds (bounds-of-thing-at-point 'symbol))
-              (sym (buffer-substring-no-properties (car bounds) (cdr bounds))))
-    (let* ((schema (clutch--schema-for-connection))
-           (qualified-table (clutch--qualified-identifier-table
-                             schema (car bounds)))
-           (effective-sym (clutch--eldoc-effective-symbol-at-point sym schema)))
-    (or
-     (when-let* ((conn clutch-connection)
-                 (schema schema)
-                 ((clutch-db-live-p conn))
-                 ((not (clutch-db-in-use-p conn))))
-       (clutch--eldoc-schema-string conn schema effective-sym qualified-table))
-     (when-let* ((conn clutch-connection)
-                 ((clutch-db-live-p conn))
-                 ((not (clutch-db-in-use-p conn))))
-       (clutch--ensure-help-doc conn effective-sym))
-     (clutch--eldoc-keyword-string effective-sym)))))
+(defvar-local clutch--eldoc-retry nil
+  "Resume the current Eldoc request when its metadata arrives.")
+
+(defun clutch--eldoc-metadata-ready (conn)
+  "Resume pending Eldoc in the selected buffer when CONN has new metadata."
+  (with-current-buffer (window-buffer (selected-window))
+    (when (and clutch--eldoc-retry (eq clutch-connection conn)
+               (not (clutch-db-in-use-p conn)))
+      (funcall (prog1 clutch--eldoc-retry (setq clutch--eldoc-retry nil))))))
+
+(add-hook 'clutch--metadata-state-changed-hook #'clutch--eldoc-metadata-ready)
+
+(defun clutch--eldoc-function (&optional callback &rest _)
+  "Document the SQL identifier at point, using CALLBACK for delayed metadata."
+  (let ((previous (prog1 clutch--eldoc-retry (setq clutch--eldoc-retry nil))))
+    (when-let* ((bounds (bounds-of-thing-at-point 'symbol)))
+      (let* ((conn clutch-connection)
+             (schema (clutch--schema-for-connection))
+             (sym (clutch--eldoc-effective-symbol-at-point
+                   (buffer-substring-no-properties (car bounds) (cdr bounds)) schema))
+             (doc (when (clutch-db-live-p conn)
+                    (if (clutch-db-in-use-p conn)
+                        (and previous 'pending)
+                      (or (and schema (clutch--eldoc-schema-string
+                                       conn schema sym (clutch--qualified-identifier-table
+                                                        schema (car bounds)) callback))
+                          (unless (clutch-db-in-use-p conn)
+                            (clutch--ensure-help-doc conn sym)))))))
+        (cond
+         ((and (eq doc 'pending) callback)
+          (let ((pos (point)) (tick (buffer-chars-modified-tick)))
+            (setq clutch--eldoc-retry
+                  (lambda ()
+                    (when (and (eq conn clutch-connection) (= pos (point))
+                               (= tick (buffer-chars-modified-tick)))
+                      (let ((fresh (clutch--eldoc-function callback)))
+                        (unless (eq fresh t) (funcall callback (or fresh ""))))))))
+          t)
+         ((stringp doc) doc)
+         (t (clutch--eldoc-keyword-string sym)))))))
 
 (provide 'clutch-sql)
 

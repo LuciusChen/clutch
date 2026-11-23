@@ -358,8 +358,13 @@ as the automatic reconnect does, rather than with PARAMS."
         (when is-new
           (let* ((coding-system-for-read 'utf-8)
                  (file (clutch--console-file storage-name))
-                 (legacy-file (clutch--console-file name))
-                 (read-file (if (file-readable-p file) file legacy-file)))
+                 (read-file
+                  (cond ((file-readable-p file) file)
+                        ((when-let* (((plist-get params :url))
+                                     (old (clutch--console-file
+                                           (clutch--console-identity-from-params params t))))
+                           (and (file-readable-p old) old)))
+                        (t (clutch--console-file name)))))
             (when (file-readable-p read-file)
               (insert-file-contents read-file))))
         (clutch--activate-current-buffer-connection conn params product)
@@ -1030,32 +1035,28 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--risky-dml-trivially-true-expression-p (expr)
   "Return non-nil when EXPR is visibly true without row data."
   (cl-labels
-      ((code (expr)
-         (string-trim (clutch-db-sql-mask-literal-or-comment
-                       expr (clutch--buffer-sql-dialect))))
-       (strip-parens (expr)
-         (let ((expr (code expr)))
+      ((strip-parens (expr)
+         (let ((expr (string-trim expr)))
            (while (and (> (length expr) 1)
                        (= (aref expr 0) ?\()
                        (let ((close
                               (clutch-db-sql-matching-paren-position expr 0)))
                          (and close (= close (1- (length expr))))))
-             (setq expr (code (substring expr 1 (1- (length expr))))))
+             (setq expr (string-trim (substring expr 1 -1))))
            expr))
        (split-keyword (expr keyword)
-         (let ((case-fold-search t)
-               (pattern (format "\\b%s\\b" keyword))
+         (let ((matches (clutch-db-sql-code-match-positions
+                         expr 0 nil (concat "\\b" keyword "\\b")))
                (start 0)
                parts)
            (clutch-db-sql-scan-code
             expr 0 nil
             (lambda (pos _ch depth)
-              (when (and (zerop depth)
-                         (string-match pattern expr pos)
-                         (= (match-beginning 0) pos))
+              (when (zerop depth)
                 (push (string-trim (substring expr start pos)) parts)
-                (setq start (match-end 0)))
-              nil))
+                (setq start (gethash pos matches)))
+              nil)
+            nil matches)
            (nreverse (cons (string-trim (substring expr start)) parts))))
        (literal-true-p (expr)
          (let ((expr (strip-parens expr))
@@ -1088,11 +1089,13 @@ its table.  Arbitrary query results are displayed as result sets instead."
 (defun clutch--high-risk-query-reason (sql)
   "Return a confirmation reason for high-risk SQL, or nil.
 An UPDATE or DELETE embedded in SQL is checked like the main statement."
-  (if (equal (clutch-db-sql-leading-keyword sql) "TRUNCATE")
-      "TRUNCATE removes all rows"
-    (cl-some #'clutch--risky-dml-reason
-             (cons (clutch-db-sql-normalize sql)
-                   (clutch-db-sql-embedded-statements sql)))))
+  (let ((code (clutch-db-sql-mask-literal-or-comment
+               sql (clutch--buffer-sql-dialect) t)))
+    (if (equal (clutch-db-sql-leading-keyword code) "TRUNCATE")
+        "TRUNCATE removes all rows"
+      (cl-some #'clutch--risky-dml-reason
+               (cons (clutch-db-sql-normalize code)
+                     (clutch-db-sql-embedded-statements code))))))
 
 (defun clutch--confirm-high-risk-query (sql)
   "Apply the configured high-risk confirmation to SQL.
