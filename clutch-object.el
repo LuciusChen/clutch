@@ -637,25 +637,20 @@ When TABLE-LIKE-ONLY is non-nil, only consider table-like matches."
      ((= (length candidates) 1) (car candidates))
      (t nil))))
 
-(defun clutch--object-matches-by-name (conn name &optional table-like-only allowed-types)
+(defun clutch--object-matches-by-name (conn name &optional table-like-only)
   "Return object entries on CONN whose name matches NAME.
-TABLE-LIKE-ONLY and ALLOWED-TYPES narrow the result set.  On a backend that
+TABLE-LIKE-ONLY restricts matches to table-like entries.  On a backend that
 searches by name, table-like matches come from the prefix search and, unless
 TABLE-LIKE-ONLY, the other types from the warmed categories, so resolving an
 object never lists the schema there."
   (let ((entries
-         (clutch--filter-object-entries-by-types
-          (cond
-           ((clutch-db-object-name-search-p conn)
-            (clutch--merge-object-entries
-             (clutch-db-search-table-entries conn name)
-             (unless table-like-only
-               (clutch--warmed-object-entries conn))))
-           (table-like-only
-            (clutch--browseable-object-entries conn))
-           (t
-            (clutch--object-entries conn)))
-          allowed-types)))
+         (cond
+          ((clutch-db-object-name-search-p conn)
+           (clutch--merge-object-entries
+            (clutch-db-search-table-entries conn name)
+            (unless table-like-only (clutch--warmed-object-entries conn))))
+          (table-like-only (clutch--browseable-object-entries conn))
+          (t (clutch--object-entries conn)))))
     (seq-filter
      (lambda (entry)
        (and (or (not table-like-only)
@@ -671,16 +666,16 @@ object never lists the schema there."
       (clutch--sql-source-table-at-point t)
     (thing-at-point 'symbol t)))
 
-(defun clutch--object-name-matches (name &optional table-like-only allowed-types required)
-  "Find objects matching NAME, respecting TABLE-LIKE-ONLY and ALLOWED-TYPES.
+(defun clutch--object-name-matches (name &optional table-like-only required)
+  "Find objects matching NAME, respecting TABLE-LIKE-ONLY.
 When REQUIRED, report a missing qualified SQLite table."
   (when-let* (name (conn clutch-connection) ((clutch-db-live-p conn)))
     (if (eq (clutch-db-backend-key conn) 'sqlite)
         (if-let* ((entry (clutch-db-find-table-entry conn name)))
-            (when (clutch--object-type-allowed-p entry allowed-types) (list entry))
+            (list entry)
           (when (and required (clutch-db-sql-table-schema name))
             (user-error "No such table: %s" name)))
-      (clutch--object-matches-by-name conn name table-like-only allowed-types))))
+      (clutch--object-matches-by-name conn name table-like-only))))
 
 (defun clutch--remember-current-object (entry)
   "Store ENTRY as the current object for the active buffer."
@@ -766,7 +761,7 @@ Results are filtered by ALLOWED-TYPES and deduplicated."
                  allowed-types)
           :full-entries full-entries)))
 
-(defun clutch--resolve-object-entry (prompt &optional table-like-only allowed-types)
+(defun clutch--resolve-object-entry (prompt &optional table-like-only allowed-types pick-table-at-point)
   "Return the object entry for PROMPT in the current buffer context.
 Uses a layered resolution strategy:
 1. Buffer-local current object or exact match at point
@@ -775,22 +770,22 @@ Uses a layered resolution strategy:
 4. On-demand remote search → direct return or picker with results
 5. No match → picker with full candidate list, no pre-fill
 
-TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set."
-  (let ((current-object (clutch--buffer-current-object table-like-only allowed-types))
-        name matches)
+TABLE-LIKE-ONLY and ALLOWED-TYPES refine the candidate set.
+With PICK-TABLE-AT-POINT, preselect an exact table-like match in the picker."
+  (let* ((current (or clutch--object-dispatch-entry
+                      (and (eq transient-current-command 'clutch-object-actions-menu)
+                           clutch--object-action-entry)
+                      (clutch--buffer-current-object table-like-only allowed-types)))
+         (name (unless current (clutch--object-name-at-point)))
+         (all (and name (clutch--object-name-matches name table-like-only t)))
+         (at-point (and pick-table-at-point (clutch--preferred-object-match all)))
+         (matches (clutch--filter-object-entries-by-types all allowed-types)))
     (clutch--remember-current-object
      (cond
-      (clutch--object-dispatch-entry
-       clutch--object-dispatch-entry)
-      ((and (eq transient-current-command 'clutch-object-actions-menu)
-            clutch--object-action-entry)
-       clutch--object-action-entry)
-      (current-object
-       current-object)
-      ((clutch--preferred-object-match
-        (setq matches (clutch--object-name-matches
-                       (setq name (clutch--object-name-at-point)) table-like-only allowed-types t))
-        table-like-only))
+      (current)
+      ((and at-point (clutch--table-like-entry-p at-point) (memq at-point matches))
+       (clutch-object-read prompt at-point allowed-types))
+      ((clutch--preferred-object-match matches table-like-only))
       ((> (length matches) 1)
        (clutch--object-entry-reader clutch-connection
                                     prompt
@@ -2011,17 +2006,9 @@ When ENTRY is nil, use the current table-like object."
 (defun clutch-jump (&optional entry)
   "Resolve ENTRY, or an object at point, and run its default action."
   (interactive)
-  (let* ((prompt "Jump to object: ")
-         (entry (or entry
-                    (if-let* (((or (clutch--query-buffer-p)
-                                   (derived-mode-p 'clutch-repl-mode)))
-                              (at-point (clutch-object-at-point))
-                              ((clutch--table-like-entry-p at-point))
-                              ((clutch--object-type-allowed-p
-                                at-point clutch-primary-object-types)))
-                        (clutch-object-read prompt at-point clutch-primary-object-types)
-                      (clutch--resolve-object-entry
-                       prompt nil clutch-primary-object-types)))))
+  (let ((entry (or entry (clutch--resolve-object-entry
+                          "Jump to object: " nil clutch-primary-object-types
+                          (or (clutch--query-buffer-p) (derived-mode-p 'clutch-repl-mode))))))
     (clutch--run-object-action entry (clutch--object-default-action-id entry))))
 
 ;;;###autoload

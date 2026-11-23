@@ -530,7 +530,7 @@ The exact-name match only needs entries under the name's prefix."
           (clutch-db-query first "CREATE TABLE aux.orders (attached_only TEXT)")
           (dolist (sql '("SELECT * FROM aux.orders"
                          "SELECT * FROM (aux.orders)"
-                         "UPDATE OR IGNORE aux.orders SET attached_only = 'ok'"
+                         "UPDATE OR IGNORE aux.orders SET rowid = rowid"
                          "ALTER TABLE aux.orders ADD COLUMN n INTEGER"
                          "DROP TABLE IF EXISTS aux.orders"))
             (ert-info (sql)
@@ -1045,7 +1045,7 @@ warmed categories and performs no lookup."
   (ert-info ("table default browse")
     (let (resolved-prompt resolved-types action-call presented)
       (cl-letf (((symbol-function 'clutch--resolve-object-entry)
-                 (lambda (prompt &optional _table-like-only allowed-types)
+                 (lambda (prompt _table-like-only allowed-types &rest _)
                    (setq resolved-prompt prompt)
                    (setq resolved-types allowed-types)
                    '(:name "ORDERS" :type "TABLE")))
@@ -1064,7 +1064,7 @@ warmed categories and performs no lookup."
   (ert-info ("procedure default definition")
     (let (resolved-prompt action-call)
       (cl-letf (((symbol-function 'clutch--resolve-object-entry)
-                 (lambda (prompt &optional _table-like-only _allowed-types)
+                 (lambda (prompt &rest _)
                    (setq resolved-prompt prompt)
                    '(:name "PROCESS_ORDER" :type "PROCEDURE")))
                 ((symbol-function 'clutch--run-object-action)
@@ -1130,9 +1130,6 @@ warmed categories and performs no lookup."
                    (lambda (_conn)
                      '((:name "users" :schema "app" :type "COLLECTION")
                        (:name "orders" :schema "app" :type "COLLECTION"))))
-                  ((symbol-function 'clutch--resolve-object-entry)
-                   (lambda (&rest _args)
-                     (ert-fail "MongoDB collection at point should resolve directly")))
                   ((symbol-function 'clutch-object-read)
                    (lambda (prompt &optional initial-input allowed-types)
                      (setq read-args

@@ -2447,6 +2447,8 @@ then failed with \"Connection busy\"."
   "Alias xref should jump to the scoped source alias definition."
   (dolist (case
            (list
+            (list :label "SQLite UPDATE target" :sql "UPDATE OR IGNORE aux.users AS u SET id = u.id"
+                  :needle "u.id" :id "u" :before "AS " :char ?u)
             (list :label "where alias"
                   :sql "SELECT u.* FROM users u WHERE u.id = 1"
                   :needle "u.id"
@@ -2626,6 +2628,8 @@ then failed with \"Connection busy\"."
   "Xref should not treat source tables, strings, comments, or fields as aliases."
   (dolist (case
            (list
+            (list :label "column projected by subquery" :sql "SELECT id FROM (SELECT id FROM users) d"
+                  :needle "id" :no-definitions t)
             (list :label "field name"
                   :sql "SELECT name FROM users u"
                   :needle "name"
