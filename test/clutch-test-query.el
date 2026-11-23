@@ -1681,10 +1681,15 @@ the filter wraps the base query, not the last query run."
         (should-error (clutch--confirm-query-execution "BEGIN UPDATE demo SET val=1 WHERE id=1; DELETE FROM logs; END;")
                       :type 'user-error))
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
-        (dolist (prefix '("BEGIN" "BEGIN NULL;"))
+        (dolist (body '("DELETE FROM logs WHERE id=1;" "NULL; DELETE FROM logs WHERE id=1;"
+                        "IF flag THEN DELETE FROM logs WHERE id=1; END IF;"
+                        "IF flag THEN NULL; ELSE DELETE FROM logs WHERE id=1; END IF;"
+                        "FOR i IN 1..2 LOOP DELETE FROM logs WHERE id=i; END LOOP;"))
           (should-error (clutch--confirm-query-execution
-                         (concat prefix " DELETE FROM logs WHERE id=1; END;"))
-                        :type 'user-error))))
+                         (concat "BEGIN " body " END;"))
+                        :type 'user-error))
+        (should-not (clutch--confirm-query-execution
+                     "BEGIN UPDATE demo SET val=CASE WHEN val=1 THEN 2 ELSE 3 END WHERE id=1; END;"))))
     (let ((sql "SELECT 1 FROM dual WHERE 'x'=q'[it's;fine]'"))
       (with-temp-buffer
         (clutch-repl-mode)

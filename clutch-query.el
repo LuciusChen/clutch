@@ -1118,17 +1118,23 @@ Return non-nil when SQL is high-risk, including when confirmation is disabled."
 
 (defun clutch--plsql-confirmation-statements (sql dialect)
   "Return the statements to check before running an anonymous block in SQL.
-A BEGIN opens a statement just as a semicolon ends one.  Ignore both
-inside literals and comments according to DIALECT."
-  (let ((delimiters (clutch-db-sql-code-match-positions sql 0 nil "\\bBEGIN\\b\\|;"))
-        (start 0)
-        statements)
+Use DIALECT to skip literals and comments.  Once static SQL starts,
+its CASE or MERGE clauses belong to that statement until the semicolon."
+  (let ((delimiters (clutch-db-sql-code-match-positions
+                     sql 0 nil (concat ";\\|" (regexp-opt '("BEGIN" "THEN" "ELSE" "LOOP") 'words))))
+        (start 0) in-sql statements)
     (clutch-db-sql-scan-code
      sql 0 nil
-     (lambda (pos _ch depth)
+     (lambda (pos ch depth)
        (when (zerop depth)
-         (when (< start pos) (push (substring sql start pos) statements))
-         (setq start (gethash pos delimiters)))
+         (when (= ch ?\;)
+           (when (< start pos) (push (substring sql start pos) statements))
+           (setq in-sql nil))
+         (unless in-sql
+           (setq start (clutch-db-sql--skip-blank sql (gethash pos delimiters) dialect)
+                 in-sql (when-let* ((end (clutch-db-sql--token-end sql start)))
+                          (member (upcase (substring sql start end))
+                                  '("SELECT" "WITH" "INSERT" "UPDATE" "DELETE" "MERGE"))))))
        nil)
      dialect delimiters)
     (when (< start (length sql)) (push (substring sql start) statements))
