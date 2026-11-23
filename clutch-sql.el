@@ -1548,7 +1548,9 @@ A nil TABLE searches table names.  Keep only the last prefix for each source."
            (lambda (connection source done fail)
              (funcall fetch connection source prefix done fail))
            (lambda (names) (setcdr entry names))
-           (lambda (msg) (clutch--report-completion-error conn (list 'clutch-db-error msg)))))
+           (lambda (msg)
+             (clutch--set-table-metadata conn table :completion-prefix nil)
+             (clutch--report-completion-error conn (list 'clutch-db-error msg)))))
         (clutch--completion-await-metadata conn table :prefix-status)
         (cdr entry))
     (clutch--safe-completion-call
