@@ -159,18 +159,19 @@ ELAPSED, when non-nil, is the operation's duration in seconds."
     (puthash message-text t clutch--completion-metadata-warning-cache)
     (message "Completion metadata unavailable: %s" message-text)))
 
+(defun clutch--report-completion-error (conn err)
+  "Report recoverable completion error ERR on CONN."
+  (clutch--remember-recoverable-metadata-warning conn "completion" err)
+  (if (clutch--oracle-i18n-missing-p err)
+      (clutch--warn-oracle-i18n-once)
+    (clutch--warn-completion-metadata-error-once (clutch-db--error-message err)))
+  nil)
+
 (defun clutch--safe-completion-call (thunk)
   "Call THUNK for completion and swallow recoverable metadata errors."
   (condition-case err
       (funcall thunk)
-    (clutch-db-error
-     (clutch--remember-recoverable-metadata-warning
-      clutch-connection "completion" err)
-     (if (clutch--oracle-i18n-missing-p err)
-         (clutch--warn-oracle-i18n-once)
-       (clutch--warn-completion-metadata-error-once
-        (clutch-db--error-message err)))
-     nil)))
+    (clutch-db-error (clutch--report-completion-error clutch-connection err))))
 
 (defun clutch--table-metadata (conn key)
   "Return the metadata plist for KEY on CONN, or nil."
