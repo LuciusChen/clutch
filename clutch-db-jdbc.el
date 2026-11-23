@@ -353,7 +353,7 @@ Foreground requests are told that no response will arrive."
 
 (defun clutch-jdbc--agent-sentinel (proc _event)
   "Finish foreground requests when agent PROC is no longer running."
-  (unless (process-live-p proc)
+  (when (and (eq proc clutch-jdbc--agent-process) (not (process-live-p proc)))
     (clutch-jdbc--clear-async-callbacks nil t)))
 
 (defun clutch-jdbc--clear-request-state ()
@@ -407,7 +407,7 @@ Return non-nil when a request was waiting for it."
 (defun clutch-jdbc--agent-filter (proc string)
   "Process filter: deliver complete JSON lines from PROC output STRING."
   (let ((buf (process-buffer proc)))
-    (when (buffer-live-p buf)
+    (when (and (eq proc clutch-jdbc--agent-process) (buffer-live-p buf))
       (with-current-buffer buf
         (goto-char (point-max))
         (insert string)
