@@ -357,12 +357,13 @@ only cover constructs that change where a literal or statement ends:
 `:backslash-escapes' for the MySQL family, where a backslash escapes the
 next character inside a string literal.  `:hash-comments' enables MySQL's
 # line comments.  SQL Server and SQLite accept `:bracket-identifiers'.
-PRODUCT is an `sql-mode' product
-symbol as registered by `clutch-backend-sql-product'."
+Oracle recognizes alternative-quoted literals and slash-terminated PL/SQL units.
+PRODUCT is the `sql-mode' symbol registered by `clutch-backend-sql-product'."
   (pcase product
     ((or 'ms 'sqlite) '(:bracket-identifiers t))
     ('postgres '(:dollar-quotes t))
     ('mysql '(:backslash-escapes t :hash-comments t))
+    ('oracle '(:plsql t :oracle-quotes t))
     (_ nil)))
 
 (defun clutch-db-connection-sql-dialect (conn)
@@ -394,6 +395,18 @@ match data is left untouched."
         (backslash (plist-get dialect :backslash-escapes))
         (ch (and (< pos (length sql)) (aref sql pos))))
     (cond
+     ((and (eq ch ?\') (plist-get dialect :oracle-quotes) (> pos 0)
+           (memq (aref sql (1- pos)) '(?q ?Q)) (< (1+ pos) len)
+           ;; Q'...' and NQ'...' start a literal at a token boundary.
+           (let ((start (- pos (if (and (> pos 1)
+                                        (memq (aref sql (- pos 2)) '(?n ?N)))
+                                   2 1))))
+             (or (zerop start)
+                 (not (string-match-p "[[:alnum:]_$#]" (substring sql (1- start) start))))))
+      (let* ((open (aref sql (1+ pos)))
+             (close (or (cdr (assq open '((?\[ . ?\]) (?\{ . ?\}) (?\( . ?\)) (?< . ?>)))) open))
+             (end (string-search (string close ?\') sql (+ pos 2))))
+        (if end (+ end 2) len)))
      ((and (eq ch ?$) (plist-get dialect :dollar-quotes))
       (clutch-db-sql--skip-dollar-quote sql pos))
      ((let ((delimiter
@@ -651,16 +664,64 @@ See `clutch-db-sql-scan-code' for FN and DIALECT."
 
 ;;;; SQL helpers (statement boundaries)
 
+(defun clutch-db-sql-plsql-unit-kind (sql start)
+  "Return `anonymous' or `stored' for an Oracle PL/SQL unit at START in SQL."
+  (let ((pos (clutch-db-sql--skip-blank sql start)))
+    (cl-flet ((word ()
+                (when-let* (((< pos (length sql)))
+                            ((<= ?A (upcase (aref sql pos)) ?Z))
+                            (end (clutch-db-sql--token-end sql pos)))
+                  (prog1 (upcase (substring sql pos end))
+                    (setq pos (clutch-db-sql--skip-blank sql end))))))
+      (if (and (< (1+ pos) (length sql))
+               (= (aref sql pos) ?<) (= (aref sql (1+ pos)) ?<))
+          'anonymous
+        (pcase (word)
+          ((or "BEGIN" "DECLARE") 'anonymous)
+          ("CREATE"
+           (let ((kind (word)))
+             (when (and (equal kind "OR") (equal (word) "REPLACE"))
+               (setq kind (word)))
+             (when (member kind '("EDITIONABLE" "NONEDITIONABLE"))
+               (setq kind (word)))
+             (when (member kind '("PROCEDURE" "FUNCTION" "PACKAGE" "TRIGGER" "TYPE"))
+               'stored))))))))
+
+(defun clutch-db-sql--oracle-statement-breaks (sql dialect start)
+  "Find SQL terminators and PL/SQL slash lines in SQL from START under DIALECT."
+  (let* ((from (or start 0))
+         (unit (clutch-db-sql-plsql-unit-kind sql from))
+         breaks)
+    (clutch-db-sql-scan-code
+     sql from nil
+     (lambda (pos ch depth)
+       (when (and (zerop depth)
+                  (if unit
+                      (and (= ch ?/)
+                           (let ((left pos))
+                             (while (and (> left 0) (memq (aref sql (1- left)) '(?\s ?\t)))
+                               (cl-decf left))
+                             (or (zerop left) (= (aref sql (1- left)) ?\n)))
+                           (let ((end (string-match "[^ \t\r]" sql (1+ pos))))
+                             (or (null end) (= (aref sql end) ?\n))))
+                    (= ch ?\;)))
+         (push pos breaks)
+         (setq unit (clutch-db-sql-plsql-unit-kind sql (1+ pos))))
+       nil)
+     dialect ";/")
+    (nreverse breaks)))
+
 (defun clutch-db-sql-statement-breaks (sql &optional dialect start)
-  "Return zero-based offsets of top-level semicolons in SQL.
+  "Return zero-based offsets of statement delimiters in SQL.
 Semicolons inside strings and comments do not count.  DIALECT is a
 `clutch-db-sql-dialect' plist; its rules decide where a literal ends, so a
 semicolon inside one is not a break.  A CQL batch's inner separators
-are skipped.  START, when non-nil, is an offset
-known to be top-level code outside any literal, such as the position just
-past a top-level semicolon; scanning begins there instead of at 0."
-  (if (plist-get dialect :cql)
-      (clutch-db-sql--cql-statement-breaks sql dialect start)
+are skipped; an Oracle PL/SQL unit ends at a slash on its own line.
+START, when non-nil, is the offset just past a statement delimiter."
+  (cond
+   ((plist-get dialect :plsql) (clutch-db-sql--oracle-statement-breaks sql dialect start))
+   ((plist-get dialect :cql) (clutch-db-sql--cql-statement-breaks sql dialect start))
+   (t
     (let (breaks)
       (clutch-db-sql-scan-code
        sql (or start 0) nil
@@ -669,7 +730,7 @@ past a top-level semicolon; scanning begins there instead of at 0."
            (push pos breaks))
          nil)
        dialect ";")
-      (nreverse breaks))))
+      (nreverse breaks)))))
 
 (defun clutch-db-sql--cql-statement-breaks (sql dialect start)
   "Return CQL statement breaks in SQL using DIALECT, scanning from START.
@@ -756,7 +817,9 @@ need their statement starts computed."
   (let ((effective-offset
          (clutch-db-sql-statement-effective-offset text offset))
         before before-that)
-    (while (and breaks (< (car breaks) effective-offset))
+    (while (and breaks (< (car breaks) effective-offset)
+                (not (and (= (aref text (car breaks)) ?/)
+                          (= (1+ (car breaks)) offset))))
       (setq before-that before
             before (car breaks)
             breaks (cdr breaks)))
