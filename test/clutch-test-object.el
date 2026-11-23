@@ -526,6 +526,21 @@ The exact-name match only needs entries under the name's prefix."
         (save-window-excursion
           (clutch-db-query first "CREATE TABLE orders (dev_only TEXT)")
           (clutch-db-query second "CREATE TABLE orders (test_only TEXT)")
+          (clutch-db-query first "ATTACH ':memory:' AS aux")
+          (clutch-db-query first "CREATE TABLE aux.orders (attached_only TEXT)")
+          (dolist (sql '("SELECT * FROM aux.orders"
+                         "SELECT * FROM (aux.orders)"
+                         "UPDATE OR IGNORE aux.orders SET attached_only = 'ok'"
+                         "ALTER TABLE aux.orders ADD COLUMN n INTEGER"
+                         "DROP TABLE IF EXISTS aux.orders"))
+            (ert-info (sql)
+              (with-temp-buffer
+                (clutch-mode)
+                (setq-local clutch-connection first)
+                (insert sql)
+                (search-backward "orders")
+                (push (call-interactively #'clutch-object-show-ddl-or-source) buffers)
+                (should (string-search "attached_only" (buffer-string))))))
           (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
             (ert-info ((symbol-name command))
               (let ((views
@@ -1062,35 +1077,39 @@ warmed categories and performs no lookup."
                          show-definition)))))))
 
 (ert-deftest clutch-test-jump-on-table-at-point-in-console-prompts-before-browse ()
-  "Jump should prompt before browsing when point is on a table-like name."
-  (with-temp-buffer
-    (clutch-mode)
-    (insert "users")
-    (goto-char (point-min))
-    (setq-local clutch-connection 'fake-conn)
-    (let (read-args resolved-called action-call)
-      (cl-letf (((symbol-function 'clutch-object-at-point)
-                 (lambda () '(:name "users" :type "TABLE")))
-                ((symbol-function 'thing-at-point)
-                 (lambda (&rest _args) "users"))
-                ((symbol-function 'clutch-object-read)
-                 (lambda (prompt &optional initial-input allowed-types)
-                   (setq read-args (list prompt initial-input allowed-types))
-                   '(:name "users" :type "TABLE")))
-                ((symbol-function 'clutch--resolve-object-entry)
-                 (lambda (&rest _args)
-                   (setq resolved-called t)
-                   '(:name "users" :type "TABLE")))
-                ((symbol-function 'clutch--run-object-action)
-                 (lambda (entry action-id)
-                   (setq action-call (list entry action-id)))))
-        (clutch-jump)
-        (should (equal read-args
-                       (list "Jump to object: " "users"
-                             clutch-primary-object-types)))
-        (should-not resolved-called)
-        (should (equal action-call
-                       '((:name "users" :type "TABLE") browse)))))))
+  "The picker browses the table at point or an explicitly selected alternative."
+  (skip-unless (sqlite-available-p))
+  (clutch-test--with-isolated-metadata-caches
+    (let ((conn (clutch-db-sqlite-connect '(:database ":memory:"))))
+      (unwind-protect
+          (save-window-excursion
+            (clutch-db-query conn "CREATE TABLE orders (main_only TEXT)")
+            (clutch-db-query conn "ATTACH ':memory:' AS aux")
+            (clutch-db-query conn "CREATE TABLE aux.orders (aux_only TEXT)")
+            (clutch-db-query conn "CREATE TEMP TABLE orders (temp_only TEXT)")
+            (pcase-dolist (`(,table-name ,column) '(("aux.orders" "aux_only")
+                                                    ("aux.orders" "main_only")
+                                                    ("orders" "temp_only")))
+              (with-temp-buffer
+                (switch-to-buffer (current-buffer))
+                (clutch-mode)
+                (setq-local clutch-connection conn)
+                (insert "SELECT * FROM " table-name ";")
+                (search-backward "orders")
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (_prompt table pred _require initial _hist default &rest _)
+                             (if (equal column "main_only")
+                                 (let ((choices (all-completions "orders" table pred)))
+                                   (should (length= choices 2))
+                                   (car (remove (or initial default) choices)))
+                               (or initial default)))))
+                  (call-interactively #'clutch-jump))
+                (goto-char (point-min))
+                (re-search-forward "^SELECT \\* FROM \".*;$")
+                (should (equal (clutch-db-result-column-names
+                                (clutch-db-result-columns (clutch-db-query conn (match-string 0))))
+                               (list column))))))
+        (clutch-db-disconnect conn)))))
 
 (ert-deftest clutch-test-jump-on-collection-at-point-in-mongodb-console-browses ()
   "Jump should treat MongoDB collections as primary browseable objects."
@@ -1125,7 +1144,7 @@ warmed categories and performs no lookup."
           (clutch-jump)
           (should (equal read-args
                          (list "Jump to object: "
-                               "users"
+                               '(:name "users" :schema "app" :type "COLLECTION")
                                clutch-primary-object-types)))
           (should (equal action-call
                          '((:name "users" :schema "app" :type "COLLECTION")
@@ -1248,7 +1267,7 @@ and schema ignored, so the search offered the first overload alone."
               (transient-current-command
                (and (eq source 'transient) 'clutch-object-actions-menu))
               (clutch--object-action-entry (and (eq source 'transient) entry)))
-          (cl-letf (((symbol-function 'clutch--object-matches-at-point)
+          (cl-letf (((symbol-function 'clutch--object-name-matches)
                      (lambda (&rest _) (ert-fail "Unexpected schema lookup"))))
             (should (equal (clutch--resolve-object-entry "Table: " t) entry))))))))
 
@@ -1733,9 +1752,7 @@ alone does not bound how long completion blocks."
   "A closed object menu should not override normal object resolution."
   (let ((clutch--object-action-entry '(:name "OLD" :type "TABLE")))
     (cl-letf (((symbol-function 'clutch--buffer-current-object)
-               (lambda (&rest _) '(:name "CURRENT" :type "TABLE")))
-              ((symbol-function 'clutch--object-matches-at-point)
-               (lambda (&rest _) nil)))
+               (lambda (&rest _) '(:name "CURRENT" :type "TABLE"))))
       (let ((transient-current-command nil))
         (should (equal (clutch--resolve-object-entry "Test: ")
                        '(:name "CURRENT" :type "TABLE"))))

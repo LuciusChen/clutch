@@ -226,6 +226,11 @@ NAME is the PRAGMA's argument, a table or an index."
 WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
       (mapcar #'car rows))))
 
+(cl-defmethod clutch-db-list-table-entries ((conn clutch-db-sqlite-conn) &optional _all-schemas)
+  "Return the tables listed in the main SQLite catalog on CONN."
+  (mapcar (lambda (name) (list :name name :schema "main" :type "TABLE"))
+          (clutch-db-list-tables conn)))
+
 (cl-defmethod clutch-db-list-columns ((conn clutch-db-sqlite-conn) table)
   "Return column names for TABLE on SQLite CONN."
   (clutch-db--translate-library-error sqlite-error
@@ -242,20 +247,34 @@ SQLite metadata needs no network wait, so retain synchronous completion."
     (funcall callback (mapcar (lambda (row) (nth 1 row)) rows)))
   t)
 
+(defun clutch-db-sqlite--table-record (conn table schema)
+  "Return (NAME SQL TYPE) for a table or view named TABLE in SCHEMA on CONN."
+  (clutch-db--translate-library-error sqlite-error
+    (car (sqlite-select
+          (clutch-db-sqlite-conn-handle conn)
+          (format "SELECT name, sql, type FROM %ssqlite_master WHERE type IN ('table','view') AND name = ? COLLATE NOCASE"
+                  (clutch-db-sqlite--schema-prefix schema))
+          (vector table)))))
+
+(cl-defmethod clutch-db-find-table-entry ((conn clutch-db-sqlite-conn) token)
+  "Look up the possibly qualified table TOKEN on CONN."
+  (let* ((schema (clutch-db-sql-table-schema token))
+         (name (clutch-db-sql-table-name token))
+         (schemas
+          (if schema
+              (list (if (string-equal-ignore-case schema "main") "main" schema))
+            ;; Bare names resolve in temp, main, then attachment order.
+            (let ((dbs (clutch-db-result-rows (clutch-db-query conn "PRAGMA database_list"))))
+              (cons "temp" (remove "temp" (mapcar #'cadr dbs)))))))
+    (cl-loop for db in schemas
+             for row = (clutch-db-sqlite--table-record conn name db)
+             when row return (list :name (car row) :schema db :type (upcase (nth 2 row))))))
+
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."
-  (clutch-db--translate-library-error sqlite-error
-    (pcase (upcase (or (plist-get entry :type) ""))
-      ("TABLE"
-       (let* ((table (plist-get entry :name))
-              (handle (clutch-db-sqlite-conn-handle conn))
-              (rows (sqlite-select
-                     handle
-                     (format "SELECT sql FROM sqlite_master \
-WHERE type='table' AND name=%s"
-                             (clutch-db-sqlite--escape-lit table)))))
-         (caar rows)))
-      (_ nil))))
+  (when (member (upcase (or (plist-get entry :type) "")) '("TABLE" "VIEW"))
+    (cadr (clutch-db-sqlite--table-record
+           conn (plist-get entry :name) (plist-get entry :schema)))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table
                                        &optional _schema)
@@ -306,21 +325,11 @@ WHERE type='table' AND name=%s"
 
 (defun clutch-db-sqlite--rowid-identity (conn table schema)
   "Return a rowid row locator candidate for TABLE in SCHEMA on CONN, or nil."
-  (clutch-db--translate-library-error sqlite-error
-    (let* ((handle (clutch-db-sqlite-conn-handle conn))
-           (rows (sqlite-select
-                  handle
-                  (format "SELECT sql FROM %ssqlite_master WHERE type='table' AND name=%s"
-                          (clutch-db-sqlite--schema-prefix schema)
-                          (clutch-db-sqlite--escape-lit table))))
-           (ddl (caar rows)))
-      (when (and ddl
-                 (not (string-match-p "\\bWITHOUT\\s-+ROWID\\b"
-                                      (upcase ddl))))
-        (list :kind 'row-locator
-              :name "rowid"
-              :select-expressions '("rowid")
-              :where-sql "rowid = ?")))))
+  (pcase (clutch-db-sqlite--table-record conn table schema)
+    (`(,_ ,ddl "table")
+     (unless (string-match-p "\\bWITHOUT\\s-+ROWID\\b" (upcase ddl))
+       (list :kind 'row-locator :name "rowid"
+             :select-expressions '("rowid") :where-sql "rowid = ?")))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table
                                                  &optional schema _catalog)
