@@ -7124,18 +7124,18 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
           (query (symbol-function 'mysql-query)))
       (unwind-protect
           (progn
-            ;; A read timeout after USE was sent leaves its actual reply pending.
-            (dolist (schema '("information_schema" "clutch_missing_timeout_schema"))
-              (let ((read-packet (symbol-function 'mysql--read-packet)) (first t))
-                (cl-letf (((symbol-function 'mysql--read-packet)
-                           (lambda (c)
-                             (if first
-                                 (progn (setq first nil) (signal 'mysql-timeout '("read timed out")))
-                               (funcall read-packet c)))))
-                  (if (equal schema "information_schema")
-                      (should (equal (clutch-db-set-current-schema conn schema) schema))
-                    (should (string-search "[1049]" (cadr (should-error
-                        (clutch-db-set-current-schema conn schema) :type 'clutch-db-error))))))))
+            ;; Expire the USE read immediately; recovery reads its real OK or ERR.
+            (cl-letf* ((select (symbol-function 'mysql-select-database))
+                       ((symbol-function 'mysql-select-database)
+                        (lambda (c database)
+                          (cl-letf (((mysql-conn-read-idle-timeout c) 0))
+                            (let ((err (should-error (funcall select c database) :type 'mysql-timeout)))
+                              (signal (car err) (cdr err)))))))
+              (should (equal (clutch-db-set-current-schema conn "information_schema")
+                             "information_schema"))
+              (should (string-search "[1049]" (cadr (should-error
+                  (clutch-db-set-current-schema conn "clutch_missing_timeout_schema")
+                  :type 'clutch-db-error)))))
             (should (equal (clutch-db-current-schema conn) "information_schema"))
             (should (equal (caar (clutch-db-result-rows (clutch-db-query conn "SELECT DATABASE()")))
                            "information_schema"))
