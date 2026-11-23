@@ -475,7 +475,22 @@ after them asked for no confirmation."
                  "DELETE FROM users WHERE status='active'"
                  "WITH x AS (SELECT 1) SELECT * FROM x"
                  "SELECT * FROM users"))
-    (should-not (clutch--high-risk-query-reason sql))))
+    (should-not (clutch--high-risk-query-reason sql)))
+  (dolist (clutch--conn-sql-product '(ms sqlite))
+    (should-not (clutch--high-risk-query-reason "DELETE FROM [foo--bar] WHERE id=2")))
+  (let ((clutch--conn-sql-product 'postgres))
+    (should-not (clutch--high-risk-query-reason "UPDATE t SET a[b[1]] = 0 WHERE id=1"))
+    (dolist (array '("arr[idx[1]]" "ARRAY['a]b']"))
+      (should (equal (clutch--high-risk-query-reason
+                      (concat "DELETE FROM t WHERE " array " IS NULL OR 1=1"))
+                     "WHERE is always true")))
+    (dolist (literal '("$$ WHERE id=1 $$" "$tag$ ) WHERE id=1 $tag$"))
+      (let ((update (concat "UPDATE users SET name=" literal)))
+        (should (equal (clutch--high-risk-query-reason update) "no WHERE"))
+        (should-not (clutch--high-risk-query-reason (concat update " WHERE id=1")))
+        (should (equal (clutch--high-risk-query-reason
+                        (concat "WITH u AS (" update " RETURNING id) SELECT * FROM u"))
+                       "no WHERE"))))))
 
 (ert-deftest clutch-test-mysql-backslash-quote-keeps-statement-visible ()
   "A backslash-escaped quote in MySQL must not hide the rest of the statement."
@@ -484,6 +499,9 @@ after them asked for no confirmation."
     (should (equal (clutch--high-risk-query-reason
                     "DELETE FROM users WHERE name = 'it\\'s' OR 1 = 1")
                    "WHERE is always true"))
+    (should (equal (clutch--high-risk-query-reason "UPDATE users SET name=1 # WHERE id=1")
+                   "no WHERE"))
+    (should-not (clutch--high-risk-query-reason "UPDATE users SET name=1 # comment\nWHERE id=1"))
     (let ((sql "SELECT 'it\\'s', o.id FROM users u JOIN orders o ON o.uid = u.id"))
       (should (equal (car (clutch--extract-tables-and-aliases sql 0 (length sql)))
                      '("users" "orders")))
@@ -1343,7 +1361,7 @@ Keywords inside a function body are literal text, not clauses."
                     ("backslash is plain" "'a\\'b' c" nil nil 4)
                     ("doubled double quote" "\"a\"\"b\" c" t nil 6)
                     ("doubled bracket" "[a]]b] c" t nil 6)
-                    ("bracket has no escape" "[a\\] c" t ,mysql 4)
+                    ("bracket identifier has no backslash escape" "[a\\] c" t ,(clutch-db-sql-dialect 'ms) 4)
                     ("identifier only with flag" "\"a\" c" nil nil nil)
                     ("single dash" "-x" nil nil nil)
                     ("single slash" "/x" nil nil nil)
