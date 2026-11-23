@@ -13,7 +13,7 @@ For the wire protocol, RPC inventory, runtime session model, and startup/error s
 | `oracle` | Oracle Database | Core SQL | Maven Central | 1521 |
 | `sqlserver` | Microsoft SQL Server | Core SQL | Maven Central | 1433 |
 | `redshift` | Amazon Redshift | Basic SQL | Maven Central | 5439 |
-| `snowflake` | Snowflake | Basic SQL | Maven Central | — |
+| `snowflake` | Snowflake | Basic SQL | Maven Central | 443 |
 | `clickhouse` | ClickHouse | Basic SQL | Maven Central | 8123 |
 | `mongodb` + `:surface sql-interface` | MongoDB SQL Interface | SQL Interface surface | Maven Central | 27017 |
 | `cassandra` | Apache Cassandra | Basic CQL | Manual download | 9042 |
@@ -40,7 +40,7 @@ If you prefer to pre-install everything up front:
 (clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
 (clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
 (clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
-(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc42.jar from Maven Central
 (clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar plus SLF4J jars from Maven Central
 (clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar from Maven Central
 (clutch-jdbc-install-driver 'mongodb)     ; MongoDB SQL Interface JDBC driver

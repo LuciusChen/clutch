@@ -136,11 +136,7 @@ Tip: staged mutations and the server transaction are two separate layers. Submis
 
 Tip: a result remembers where its query resolved table names, as the server reports it: the database and schema, on PostgreSQL the whole effective path (`current_schemas(true)`), and on DuckDB the catalog, schema and `search_path`. Submitting a change, loading a page, counting rows and exporting all rows run SQL that names the result's tables as the query did, so once the connection resolves names elsewhere, as after `clutch-switch-schema` or an automatic reconnect that restored another path, they are refused, and so is staging a change. Switching back lifts the refusal, and so does running the query again (`g`), though where the result buffer is named after the database, as on MySQL, the new result opens in the current database's buffer. A table that the query names with its schema is no exception: DuckDB, for one, looks that schema up in the current catalog. A move that Clutch does not follow, such as those listed under Object Workflow, is not noticed here either, and on PostgreSQL a schema on the path that is created or dropped, or the temporary schema that a first temporary table adds, is noticed only after the next statement that may change the path.
 
-## Insert Buffer Values
-
-An untouched blank insert field is omitted, allowing the database to supply its default. `C-c C-n` explicitly selects SQL NULL, `C-c C-e` selects an empty string, and `C-c C-d` returns the field to omission/default. Typing `NULL` inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
-
-INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
+## BLOB Viewer
 
 Press `v` on a BLOB cell, then `x` to switch between the text and hexadecimal views when bytes are available. The hex view shows at most 256 leading bytes. A JSON-looking BLOB with invalid UTF-8 opens in hex. Raw BLOBs larger than 64 KiB open directly in the bounded viewer, which checks only the text preview prefix for invalid UTF-8 and shows up to 1024 bytes in text mode when available. SQLite can identify BLOB cells even when the same result column also contains text. Both views use the result already in memory.
 
@@ -198,8 +194,17 @@ The insert buffer is intentionally form-like: `TAB` moves between fields, while 
 | `C-c '` | Edit current JSON field in a dedicated buffer |
 | `C-c .` | Set current date/time field to "now" |
 | `C-c C-y` | Import TSV / CSV from region or kill ring |
+| `C-c C-n` | Set the current field to SQL NULL |
+| `C-c C-e` | Set the current field to an empty string |
+| `C-c C-d` | Omit the current field and use the database default |
 | `C-c C-c` | Stage new row / update staged insert |
 | `C-c C-k` | Cancel |
+
+## Insert Buffer Values
+
+An untouched blank insert field is omitted, allowing the database to supply its default. Typing `NULL` inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
+
+INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
 Insert buffers show every field by default, including generated/defaulted ones. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. The active field line is highlighted. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
 
@@ -218,7 +223,7 @@ The region can be set with `C-x SPC` (rectangle mark), a normal mark (`C-SPC`), 
 Typical flow:
 
 1.  Select a region, then press `c` to open the copy transient.
-2.  Toggle `-r` and choose the target format (`t` / `c` / `i`).
+2.  Toggle `-r` and choose a format from the copy menu.
 3.  In refine mode, use `m` to exclude rows and `x` to exclude columns.
 4.  Press `RET` to confirm and copy only the remaining rectangle.
 
@@ -399,18 +404,18 @@ A key over several columns names all of them, as in `SELECT * FROM regions WHERE
                                validation uses compact inline tokens so long errors do not deform the form layout
 10. C-c C-c                    → validate locally, then stage (C-c C-k cancels)
                                staged rows appear as ghost rows in result buffer
-                               left marker shows =I= and status line shows =I-<n>=
+                               left marker shows I and status line shows I-<n>
                                missing generated/defaulted columns render as <generated> / <default>
-12. C-c ' on a staged insert row → re-open that staged insert with its previous values
-13. Use normal Emacs region selection to select rows
-14. d                          → stage current row or selected region for deletion
-                               left marker shows =D= and status line shows =D-<n>=
+11. C-c ' on a staged insert row → re-open that staged insert with its previous values
+12. Use normal Emacs region selection to select rows
+13. d                          → stage current row or selected region for deletion
+                               left marker shows D and status line shows D-<n>
                                deleted rows are visually marked in the result buffer
-15. C-c C-k                   → discard staged change at point
-16. g with staged changes     → prompts "Discard staged changes and re-run query?"
-17. C-c C-c in result buffer → confirmation prompt showing all statements
+14. C-c C-k                   → discard staged change at point
+15. g with staged changes     → prompts "Discard staged changes and re-run query?"
+16. C-c C-c in result buffer → confirmation prompt showing all statements
                                submits in order: INSERT → UPDATE → DELETE
-                               edited rows show =E= in the left marker column and =E-<n>= in the status line
+                               edited rows show E in the left marker column and E-<n> in the status line
 ```
 
 The confirmation preview always shows fully rendered SQL text. Native MySQL, PostgreSQL, SQLite, and JDBC backends execute staged DML through parameterized prepared/bound values under the hood; only the preview renders readable SQL literals.
