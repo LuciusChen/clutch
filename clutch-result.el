@@ -129,6 +129,9 @@ The name is relative to `clutch-export-default-directory' unless absolute."
 (defvar-local clutch--base-query nil
   "The original unfiltered SQL query, used by WHERE filtering.")
 
+(defvar-local clutch--result-query-prep nil
+  "Unfiltered query preparation that produced this result's columns.")
+
 (defvar-local clutch--aggregate-summary nil
   "Last aggregate summary plist for result footer, or nil.
 Plist keys: :label, :rows, :cells, :skipped, :sum, :avg, :min, :max, :count.")
@@ -365,40 +368,13 @@ Uses the full connection key so each console gets its own result buffer."
     (cl-loop for row in rows
              collect (nth idx row))))
 
-(defun clutch-result--query-plan (base &optional filter)
-  "Return SQL execution plan for BASE with optional FILTER.
-The plan keeps the user-visible SQL and the internal row-identity SQL together
-so callers cannot apply WHERE before hidden identity columns are injected."
-  (when base
-    (let* ((prep (if clutch--row-identity
-                     (clutch--prepare-row-identity-query
-                      clutch-connection base clutch--row-identity
-                      clutch--result-source-table)
-                   (list :sql base
-                         :table clutch--result-source-table
-                         :source-schema clutch--result-source-schema
-                         :source-catalog clutch--result-source-catalog
-                         :identity-status clutch--row-identity-status
-                         :identity-error-message
-                         clutch--row-identity-error-message)))
-           (sql (if filter (clutch-db-apply-where clutch-connection base filter) base)))
-      (list :sql sql
-            :row-identity-prep
-            (if filter
-                (plist-put (copy-sequence prep)
-                           :sql (clutch-db-apply-where
-                                 clutch-connection (plist-get prep :sql) filter))
-              prep)))))
-
-(defun clutch-result--current-query-plan ()
-  "Return SQL execution plan for the current result workflow."
-  (clutch-result--query-plan
-   (or clutch--base-query clutch--last-query)
-   (and clutch--base-query clutch--where-filter)))
-
-(defun clutch-result--effective-query ()
-  "Return the effective SQL for the current result workflow."
-  (plist-get (clutch-result--current-query-plan) :sql))
+(defun clutch-result--effective-query (&optional prepared-sql)
+  "Return the result's query under its current filter.
+Use PREPARED-SQL to include the hidden identity columns for a fetch."
+  (let ((base (or prepared-sql clutch--base-query clutch--last-query)))
+    (if (and clutch--base-query clutch--where-filter)
+        (clutch-db-apply-where clutch-connection base clutch--where-filter)
+      base)))
 
 (defun clutch-result--pending-changes-p ()
   "Return non-nil for staged row mutations in the current result buffer."
@@ -559,6 +535,7 @@ RESOLUTION-CONTEXT is the `clutch-db-resolution-context' SQL ran in.
 Returns column names."
   (setq-local clutch--last-query sql
               clutch--base-query sql
+              clutch--result-query-prep row-identity-prep
               clutch--result-source-table source-table
               clutch--result-source-schema source-schema
               clutch--result-source-catalog source-catalog
@@ -598,7 +575,8 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
                             (equal clutch--last-query sql))))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
-         (analysis-sql (clutch-db-sql-normalize sql))
+         (analysis-sql (clutch-db-sql-normalize
+                        (or (plist-get result-context :base-query) sql)))
          (raw-columns (clutch-db-result-columns result))
          (columns (clutch--apply-row-identity-column-metadata
                    raw-columns row-identity-prep connection))
@@ -713,9 +691,8 @@ loaded."
   (unless (clutch-result--server-pageable-p)
     (user-error "Server-side pagination is not available for this query result"))
   (clutch-result--require-connection)
-  (let* ((plan (clutch-result--current-query-plan))
-         (effective-sql (plist-get plan :sql))
-         (row-identity-prep (plist-get plan :row-identity-prep))
+  (let* ((effective-sql (clutch-result--effective-query))
+         (row-identity-prep clutch--result-query-prep)
          (page-size clutch-result-max-rows)
          (offset (or page-offset (* page-num page-size)))
          (order-by (if sort-p
@@ -730,8 +707,8 @@ loaded."
     (clutch-result--run-query
      effective-sql
      (clutch-db-build-paged-sql
-      clutch-connection (plist-get row-identity-prep :sql) page-num
-      (1+ page-size) order-by offset)
+      clutch-connection (clutch-result--effective-query (plist-get row-identity-prep :sql))
+      page-num (1+ page-size) order-by offset)
      (lambda (result elapsed)
        (pcase-let ((`(,rows . ,has-more)
                     (clutch-result--split-page-lookahead-rows
@@ -1209,17 +1186,16 @@ THEN, when non-nil, is called in this buffer once the count arrives."
 ;;;###autoload
 (defun clutch-result-rerun ()
   "Re-execute the last query that produced this result buffer.
-A server-side filter stays applied, with the row identity it had."
+A server-side filter stays applied to the original query."
   (interactive)
   (clutch-result--require-connection)
   (let* ((filter (and clutch--base-query clutch--where-filter))
-         (plan (clutch-result--current-query-plan))
-         (sql (or (plist-get plan :sql)
+         (sql (or (clutch-result--effective-query)
                   (user-error "No query to re-execute"))))
     (clutch--execute sql
                      (and filter
                           (clutch-result--filter-context
-                           clutch--base-query filter plan)))))
+                           clutch--base-query filter)))))
 
 (defun clutch-result--revert (_ignore-auto _noconfirm)
   "Revert function for result buffer — re-executes the query."
@@ -1615,28 +1591,22 @@ result in place."
                            (nth clutch--header-active-col clutch--result-columns)))
          (input (clutch--read-where-filter current columns default-col
                                            clutch-connection))
-         (filter (unless (string-empty-p input) input))
-         (plan (and filter (clutch-result--query-plan base filter))))
-    (clutch--execute (or (plist-get plan :sql) base)
+         (filter (unless (string-empty-p input) input)))
+    (clutch--execute (if filter (clutch-db-apply-where clutch-connection base filter) base)
                      (append
-                      (clutch-result--filter-context base filter plan)
+                      (clutch-result--filter-context base filter)
                       (list :keep-result-on-error t
                             :success-message
                             (if filter
                                 (format "Filter applied: WHERE %s" filter)
                               "Filter cleared"))))))
 
-(defun clutch-result--filter-context (base filter plan)
-  "Return the result context of BASE filtered by FILTER through PLAN.
-It restores the filter and keeps the current result's paging, server-side
-rewrites, source table and the row identity of PLAN, which the filtered SQL
-alone would lose.  With FILTER nil it only clears the filter."
+(defun clutch-result--filter-context (base filter)
+  "Return the result context for running BASE with optional FILTER."
   (append (list :base-query base :where-filter filter)
           (and filter
                (list :server-pageable (clutch-result--server-pageable-p)
-                     :server-rewritable t
-                     :source-table clutch--result-source-table
-                     :row-identity-prep (plist-get plan :row-identity-prep)))))
+                     :server-rewritable t))))
 
 ;;;; Client-side filter
 
@@ -3643,8 +3613,7 @@ rows.  DONE gets nil after the last batch, or the error that stopped the
 export.  Pages are fetched without blocking, as statements run, so DONE
 may run after this function returns."
   (clutch--ensure-connection)
-  (let* ((plan (clutch-result--current-query-plan))
-         (effective-sql (plist-get plan :sql))
+  (let* ((effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
                   (clutch-result--emit-export-batches rows page-size function)))
@@ -3656,7 +3625,7 @@ may run after this function returns."
         (clutch-result--refuse-if-moved)
         (clutch-result--export-pages
          effective-sql
-         (plist-get (plist-get plan :row-identity-prep) :sql)
+         (clutch-result--effective-query (plist-get clutch--result-query-prep :sql))
          (and clutch--base-query
               (or clutch--order-by
                   (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))

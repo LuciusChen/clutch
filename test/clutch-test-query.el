@@ -291,7 +291,19 @@ table sits in another schema, or the column is generated."
           sql
         (should (equal (clutch-result--build-insert-statements-for-rows
                         clutch--result-rows (clutch--visible-columns))
-                       (list (format "INSERT INTO %s VALUES (1, 'alpha');" target))))))))
+                       (list (format "INSERT INTO %s VALUES (1, 'alpha');" target)))))))
+  (let ((clutch-result-max-rows 1))
+    (clutch-test--with-sqlite-result (conn result)
+        '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, label TEXT)"
+          "INSERT INTO people VALUES (1, 'alpha', 'one'), (2, 'beta', 'two')")
+        "SELECT name AS label, upper(name) AS calculated /* display */ FROM people ORDER BY id"
+      (clutch-result-next-page)
+      (clutch--goto-cell 0 0)
+      (clutch-result-copy 'insert)
+      (clutch-db-query conn (current-kill 0))
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT name, label FROM people WHERE id = 3"))
+                     '(("beta" nil)))))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."
