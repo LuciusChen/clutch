@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Column completion and alias navigation now recognize a single table grouped in parentheses.
+
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
 
 - Clutch pins JDBC agent 0.2.32. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
