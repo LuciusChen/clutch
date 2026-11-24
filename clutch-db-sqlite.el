@@ -85,6 +85,10 @@ Use \":memory:\" for a transient in-memory database."
   "Return the registered backend key for SQLite connections."
   'sqlite)
 
+(cl-defmethod clutch-db-identifier-case ((_conn clutch-db-sqlite-conn))
+  "Compare SQLite identifiers ignoring ASCII case, including quoted names."
+  'ascii-insensitive)
+
 (cl-defmethod clutch-db-init-connection ((conn clutch-db-sqlite-conn))
   "Initialize SQLite CONN: enable foreign key enforcement."
   (clutch-db--translate-library-error sqlite-error

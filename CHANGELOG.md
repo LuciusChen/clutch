@@ -12,6 +12,8 @@
 
 - Column completion and alias navigation recognize grouped single tables, quoted table names with spaces, and SQLite UPDATE conflict clauses.
 
+- Independent connections with the same label keep separate result buffers and ER diagrams.
+
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
 
 - Clutch pins JDBC agent 0.2.32. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
@@ -26,7 +28,11 @@
 
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
+- Opening a cell, insert form, or JSON editor preserves other drafts. An insert form can be staged again after returning to its original table and schema.
+
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
+
+- Copy as INSERT and staged inserts use the underlying columns on every result page, including when an alias names another column of the table. Editing and deletion also require the row key to come from the key column itself.
 
 - Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 

@@ -231,27 +231,9 @@ TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
 wins.  Otherwise, accept a single case-insensitive match so unquoted
 identifiers can be reconciled with backend canonical case.
 Return nil when no metadata column matches, and reject ambiguous matches."
-  (let* ((source-column (clutch-result--writable-source-column cidx op))
-         (details (or details (clutch-result--source-column-details table op)))
-         (exact
-          (cl-find-if
-           (lambda (detail)
-             (string= (or (plist-get detail :name) "") source-column))
-           details)))
-    (or exact
-        (let ((matches
-               (cl-remove-if-not
-                (lambda (detail)
-                  (string-equal-ignore-case
-                   (or (plist-get detail :name) "") source-column))
-                details)))
-          (pcase matches
-            ('nil nil)
-            (`(,match) match)
-            (_
-             (user-error
-              "Cannot %s: source column %s is ambiguous in table metadata"
-              op source-column)))))))
+  (clutch--source-column-detail
+   (clutch-result--writable-source-column cidx op)
+   (or details (clutch-result--source-column-details table op)) op))
 
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
@@ -701,11 +683,10 @@ RETURN-BUFFER is the buffer that invoked the edit command."
              (viewport (when-let* ((win (get-buffer-window result-buf t)))
                          (list :window-start (window-start win)
                                :hscroll (window-hscroll win))))
-             (edit-buf (get-buffer-create
-                        (format "*clutch-edit: [%d].%s*" ridx col-name))))
-        (when (plist-get detail :read-only)
-          (user-error "Cannot %s: source column %s is generated"
-                      op source-column))
+             (edit-buf
+              (if (plist-get detail :read-only)
+                  (user-error "Cannot %s: source column %s is generated" op source-column)
+                (generate-new-buffer (format "*clutch-edit: [%d].%s*" ridx col-name)))))
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
@@ -725,7 +706,6 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                       clutch-result-edit--initial-value-state nil
                       completion-at-point-functions
                       '(clutch-result-edit-completion-at-point))
-          (erase-buffer)
           (cond
            ((eq val clutch--cell-default-placeholder)
             (clutch-result-edit--set-special-value 'default))
@@ -1621,13 +1601,12 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.
-BUFFER-NAME is the buffer to reuse or create.
+BUFFER-NAME is the preferred name of the new draft.
 INITIAL-TEXT seeds the editor contents.
 FIELD-NAME is shown in the header line.
 FINISH-FN and CANCEL-FN become the local save and cancel bindings."
-  (let ((buf (get-buffer-create buffer-name)))
+  (let ((buf (generate-new-buffer buffer-name)))
     (with-current-buffer buf
-      (erase-buffer)
       (insert initial-text)
       (goto-char (point-min))
       (condition-case nil
@@ -1943,60 +1922,62 @@ DETAIL is the column detail plist when available."
          (not (plist-get detail :primary-key))
          (not (memq cidx identity-indices)))))
 
-(defun clutch-result-insert--filter-clone-fields (table fields)
-  "Return cloned insert FIELDS with generated and primary-key columns removed.
-TABLE, a metadata key from `clutch--table-key', resolves column details
-for the current result buffer."
-  (let ((details (when clutch-connection
-                   (clutch--ensure-column-details clutch-connection table))))
-    (cl-loop for col in clutch--result-columns
-             for cidx from 0
-             for col-def = (nth cidx clutch--result-column-defs)
-             for detail = (cl-find col details
-                                   :key (lambda (item) (plist-get item :name))
-                                   :test #'string=)
-             for cell = (assoc col fields)
-             when (and cell
-                       (not (plist-get col-def :hidden))
-                       (clutch-result-insert--clone-copy-column-p detail cidx))
-             collect (cons col (cdr cell)))))
+(defun clutch-result-insert--form-fields (table fields clone-index)
+  "Build the visible insert fields for TABLE from FIELDS or row CLONE-INDEX.
+FIELDS and staged inserts use source column names.  The form keeps the
+projection labels for editing and importing."
+  (let* ((details (when clutch-connection
+                    (clutch--ensure-column-details clutch-connection table)))
+         (rows (and clone-index (clutch--result-display-rows)))
+         (row (and clone-index (nth clone-index rows)))
+         (values (and row (clutch-result-insert--row-values-with-pending-edits row)))
+         (staged (if (and clone-index (not row))
+                     (or (nth (- clone-index (length rows)) clutch--pending-inserts)
+                         (user-error "No staged insert at this row"))
+                   fields))
+         names sources)
+    (cl-loop for idx in (clutch--visible-columns)
+             for def = (nth idx clutch--result-column-defs)
+             for label = (nth idx clutch--result-columns)
+             for source = (plist-get def :source-column)
+             for detail = (and source (clutch--source-column-detail source details "insert"))
+             for name = (or (plist-get detail :name) source)
+             when (and name (not (member name sources)))
+             collect
+             (let ((cell (and (or (not clone-index)
+                                   (clutch-result-insert--clone-copy-column-p detail idx))
+                               (if values
+                                   (let ((v (nth idx values)))
+                                     (unless (eq v clutch--cell-default-placeholder)
+                                       (cons name (and v (clutch-result--editable-field-string
+                                                         v def detail)))))
+                                 (assoc name staged)))))
+               (when (member label names)
+                 (user-error "Cannot insert: result label %s names two source columns" label))
+               (push label names)
+               (push name sources)
+               (list :name label :source-column name :column-def def :detail detail
+                     :value (or (cdr cell) "") :provided (and cell t)
+                     :special-value (and cell (null (cdr cell)) 'null)
+                     :special-overlay nil :value-marker nil
+                     :error-overlay nil :error-message nil)))))
 
 (defun clutch-result-insert--open-buffer
-    (table result-buf &optional fields reedit)
+    (table result-buf &optional fields reedit clone-index)
   "Open an insert buffer for TABLE backed by RESULT-BUF.
-TABLE is a metadata key from `clutch--table-key'.  FIELDS prefill the
-buffer.  When REEDIT is non-nil, FIELDS is the staged insert being edited."
-  (let* ((field-state
-          (with-current-buffer result-buf
-            (let* ((indices (clutch--visible-columns))
-                   (details (when clutch-connection
-                              (clutch--ensure-column-details clutch-connection table))))
-              (cl-loop for cidx in indices
-                       for name = (nth cidx clutch--result-columns)
-                       for entry = (assoc name fields)
-                       collect (list :name name
-                                     :value (or (cdr entry) "")
-                                     :provided (and entry t)
-                                     :special-value (and entry (null (cdr entry)) 'null)
-                                     :special-overlay nil
-                                     :value-marker nil
-                                     :column-def (nth cidx clutch--result-column-defs)
-                                     :detail (cl-find name details
-                                                      :key (lambda (detail)
-                                                             (plist-get detail :name))
-                                                      :test #'string=)
-                                     :error-overlay nil
-                                     :error-message nil)))))
-         (buf (get-buffer-create (format "*clutch-insert: %s*"
-                                         (clutch--table-key-name table)))))
+FIELDS prefill the form by source column.  REEDIT identifies FIELDS as a
+staged insert to update.  CLONE-INDEX prefills from a result or staged row."
+  (let* ((field-state (or (with-current-buffer result-buf
+                            (clutch-result-insert--form-fields table fields clone-index))
+                          (user-error "No direct source columns to insert")))
+         (buf (generate-new-buffer (format "*clutch-insert: %s*"
+                                           (clutch--table-key-name table)))))
     (with-current-buffer buf
-      (let ((inhibit-read-only t)
-            (inhibit-modification-hooks t))
-        (erase-buffer)
-        (setq-local clutch-result-insert--fields nil))
       (clutch--result-insert-major-mode)
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
+                  clutch--result-resolution-context
+                  (buffer-local-value 'clutch--result-resolution-context result-buf)
                   clutch-result-insert--fields field-state
                   clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
@@ -2009,12 +1990,14 @@ buffer.  When REEDIT is non-nil, FIELDS is the staged insert being edited."
 Staging is also refused while a statement runs on its connection, and
 once the connection moved from where the result's query ran."
   (let ((result-buf clutch-result-insert--result-buffer)
-        (source-table clutch-result-insert--table))
+        (source-table clutch-result-insert--table)
+        (context clutch--result-resolution-context))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
-      (unless (equal (clutch--result-source-key) source-table)
-        (user-error "Result table changed; reopen the insert buffer"))
+      (unless (and (equal (clutch--result-source-key) source-table)
+                   (equal clutch--result-resolution-context context))
+        (user-error "Result table or schema changed; switch back or reopen the insert buffer"))
       (clutch--refuse-while-running clutch-connection)
       (clutch-result--refuse-if-moved))))
 
@@ -2042,45 +2025,6 @@ once the connection moved from where the result's query ran."
             (setcar (nthcdr cidx values) new-value)))))
     values))
 
-(defun clutch-result-insert--clone-fields-from-row-values (table row-values)
-  "Return prefilled insert fields for TABLE from ROW-VALUES.
-TABLE is a metadata key from `clutch--table-key'."
-  (let ((details (when clutch-connection
-                   (clutch--ensure-column-details clutch-connection table)))
-        fields)
-    (cl-loop for col in clutch--result-columns
-             for cidx from 0
-             for col-def = (nth cidx clutch--result-column-defs)
-             for value = (nth cidx row-values)
-             for detail = (cl-find col details
-                                   :key (lambda (item) (plist-get item :name))
-                                   :test #'string=)
-             unless (or (plist-get col-def :hidden)
-                        (not (clutch-result-insert--clone-copy-column-p detail cidx))
-                        (eq value clutch--cell-default-placeholder))
-             do (push (cons col (if (null value)
-                                    nil
-                                  (clutch-result--editable-field-string
-                                   value col-def detail)))
-                      fields))
-    (nreverse fields)))
-
-(defun clutch-result-insert--clone-fields-from-result-row (result-buf ridx)
-  "Return prefilled insert fields for result row RIDX in RESULT-BUF."
-  (with-current-buffer result-buf
-    (let* ((table (or (clutch--result-source-key)
-                      (user-error "Cannot detect source table")))
-           (display-rows (clutch--result-display-rows))
-           (nrows (length display-rows)))
-      (if (>= ridx nrows)
-          (clutch-result-insert--filter-clone-fields
-           table
-           (or (nth (- ridx nrows) clutch--pending-inserts)
-               (user-error "No staged insert at this row")))
-        (let* ((row (nth ridx display-rows))
-               (values (clutch-result-insert--row-values-with-pending-edits row)))
-          (clutch-result-insert--clone-fields-from-row-values table values))))))
-
 ;;;###autoload
 (defun clutch-clone-row-to-insert ()
   "Open a prefilled insert buffer cloned from the current result or record row."
@@ -2098,23 +2042,11 @@ TABLE is a metadata key from `clutch--table-key'."
                    (user-error "Clone row is only available from result or record buffers"))))
          (result-buf (nth 0 source))
          (ridx (nth 1 source)))
-    (with-current-buffer result-buf
-      (clutch-edit--require-sql-staged-mutation "Clone row to insert"))
-    (let* ((table (with-current-buffer result-buf
-                    (or (clutch--result-source-key)
-                        (user-error "Cannot detect source table"))))
-           (fields
-            (if record-source-p
-                (with-current-buffer result-buf
-                  (let* ((display-rows (clutch--result-display-rows))
-                         (row (or (nth ridx display-rows)
-                                  (user-error "Row %d no longer exists" ridx)))
-                         (values (clutch-result-insert--row-values-with-pending-edits
-                                  row)))
-                    (clutch-result-insert--clone-fields-from-row-values table values)))
-              (clutch-result-insert--clone-fields-from-result-row
-               result-buf ridx))))
-      (clutch-result-insert--open-buffer table result-buf fields))))
+    (let ((table (with-current-buffer result-buf
+                   (clutch-edit--require-sql-staged-mutation "Clone row to insert")
+                   (or (clutch--result-source-key)
+                       (user-error "Cannot detect source table")))))
+      (clutch-result-insert--open-buffer table result-buf nil nil ridx))))
 
 (defun clutch-result-insert--read-import-text ()
   "Return import text from the active region or the current kill."
@@ -2254,11 +2186,10 @@ immediately."
                                   (clutch-result-insert--fields-from-import-row
                                    columns row))
                                 data-rows)))
-        (dolist (fields field-rows)
-          (unless fields
-            (user-error "Cannot stage an empty imported row"))
-          (clutch-result-insert--validate-fields fields))
-        (clutch-result-insert--stage-imported-rows field-rows)
+        (when (memq nil field-rows)
+          (user-error "Cannot stage an empty imported row"))
+        (clutch-result-insert--stage-imported-rows
+         (mapcar #'clutch-result-insert--validated-source-fields field-rows))
         (clutch-result-insert--clear-fields)
         (clutch-result-insert--populate-buffer)
         (message "%s rows staged from %s import — C-c C-c to submit"
@@ -2372,10 +2303,12 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
     (clutch-result--validate-field-value
      field-name value (clutch-result-insert--column-def field-name) detail)))
 
-(defun clutch-result-insert--validate-fields (fields)
-  "Validate staged insert FIELDS in the current insert buffer."
-  (dolist (field fields)
-    (clutch-result-insert--validate-field (car field) (cdr field))))
+(defun clutch-result-insert--validated-source-fields (fields)
+  "Validate form FIELDS and return values keyed by their target columns."
+  (cl-loop for (label . value) in fields
+           for field = (clutch-result-insert--field-state label)
+           do (clutch-result-insert--validate-field label value)
+           collect (cons (plist-get field :source-column) value)))
 
 (defun clutch-result--insert-target (conn key sql)
   "Return how an INSERT names the table of metadata KEY on CONN.
@@ -2422,7 +2355,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (entry clutch-result-insert--pending-entry))
     (unless fields (user-error "No values entered"))
     (clutch-result-insert--ensure-live-result-context)
-    (clutch-result-insert--validate-fields fields)
+    (setq fields (clutch-result-insert--validated-source-fields fields))
     (with-current-buffer result-buf
       (if entry
           (let ((index (or (cl-position entry clutch--pending-inserts :test #'eq)

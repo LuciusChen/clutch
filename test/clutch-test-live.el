@@ -3814,10 +3814,12 @@ A quote inside the CTE's quoted name must not hide the modification."
               (clutch-db-query
                conn (format "INSERT INTO %s (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b')"
                             table))
+              (when (eq (clutch-test-live-backend-id) 'pg)
+                (clutch-db-query conn (format "ALTER TABLE %s ADD COLUMN \"NAME\" text" table)))
               ;; None of the queries projects the key, and both rows share a name.
               (cl-loop
                for (select-sql value)
-               in `((,(format "WITH c (n, t) AS (SELECT name, team FROM %s) SELECT n, t FROM c ORDER BY t"
+               in `((,(format "WITH c (n, t) AS (SELECT NAME, team FROM %s) SELECT n, t FROM c ORDER BY t"
                               table)
                      "gamma")
                     (,(format "WITH c AS (SELECT name AS n, team AS t FROM %s), d AS (SELECT * FROM c) SELECT x.n, x.t FROM d x ORDER BY x.t"

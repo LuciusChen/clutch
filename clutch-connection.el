@@ -356,6 +356,17 @@ A connection to no database leaves out \"/db\"."
               (or (clutch--connection-remote-port conn) "?")
               (if (member database '(nil "")) "" (concat "/" database))))))
 
+(defun clutch--connection-view-buffer (conn name &optional create)
+  "Find the view named NAME belonging to CONN, or allocate one if CREATE.
+Emacs adds a numeric suffix when another session already uses NAME."
+  (let ((case-fold-search nil)
+        (pattern (concat "\\`" (regexp-quote name) "\\(?:<[0-9]+>\\)?\\'")))
+    (or (cl-find-if (lambda (buf)
+                      (and (eq (buffer-local-value 'clutch-connection buf) conn)
+                           (string-match-p pattern (buffer-name buf))))
+                    (buffer-list))
+        (and create (generate-new-buffer name)))))
+
 (defun clutch--connection-user-host (user host)
   "Return HOST or USER@HOST when USER is non-empty."
   (let ((host (or host "?")))
