@@ -3190,41 +3190,55 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defconst clutch--insert-placeholder-table "MY_TABLE"
   "Placeholder target table for INSERT copy/export without a known destination.")
 
-(defun clutch-result--distinct-insert-columns (columns)
-  "Keep the first (source name . index) in COLUMNS for each physical column."
-  (let ((seen (make-hash-table :test #'equal)))
-    (cl-loop for column in columns
-             for name = (car column)
-             unless (gethash name seen)
-             do (puthash name t seen) and collect column)))
+(defun clutch-result--insert-name-bindings (names target)
+  "Resolve distinct spellings in NAMES that may name one column of TARGET."
+  (when (and (cdr names) (null (clutch-db-identifier-case clutch-connection)))
+    (let* ((spellings (delete-dups (copy-sequence names)))
+           (catalog (make-hash-table :test #'equal))
+           (unknown (progn
+                      (dolist (column clutch--result-column-defs)
+                        (when (plist-get column :catalog-column)
+                          (puthash (plist-get column :source-column) t catalog)))
+                      (seq-remove (lambda (name) (gethash name catalog)) spellings))))
+      (when (and unknown (cdr spellings))
+        (when-let* ((possible (clutch-db--competing-column-names unknown spellings)))
+          (clutch-result--refuse-if-moved)
+          (clutch-db-resolve-column-names clutch-connection possible target))))))
 
-(defun clutch-result--build-insert-statements-for-rows (rows col-indices)
-  "Return INSERT statements for ROWS using COL-INDICES.
-Use the query's table and physical columns when all have known origins.
-Otherwise use the result labels in an editable SQL template."
+(defun clutch-result--insert-selection (indices)
+  "Plan an INSERT for INDICES as a SQL prefix and (column . index) pairs."
   (let* ((conn clutch-connection)
          (table (clutch--result-source-key))
-         (origins (cl-loop for i in col-indices
+         (origins (cl-loop for i in indices
                            for def = (nth i clutch--result-column-defs)
                            collect (if (plist-member def :source-column)
                                        (plist-get def :source-column)
                                      (nth i clutch--result-columns))))
          (known (and table (not (memq nil origins))))
-         (names (if known origins (clutch--column-names-for-indices col-indices)))
-         (selection (cl-mapcar #'cons names col-indices))
-         (columns (if known (clutch-result--distinct-insert-columns selection) selection))
-         (cols (mapconcat (lambda (column) (clutch-db-escape-identifier conn (car column)))
-                          columns ", "))
-         (target (and rows (if known
-                               (clutch-result--insert-target conn table (or clutch--base-query clutch--last-query))
-                             (clutch-db-escape-identifier conn clutch--insert-placeholder-table)))))
+         (target (if known
+                     (clutch-result--insert-target conn table (or clutch--base-query clutch--last-query))
+                   (clutch-db-escape-identifier conn clutch--insert-placeholder-table)))
+         (names (if known origins (clutch--column-names-for-indices indices)))
+         (bindings (and known (clutch-result--insert-name-bindings names target)))
+         (seen (make-hash-table :test #'equal))
+         (columns (cl-loop for spelling in names for i in indices
+                           for name = (or (cdr (assoc spelling bindings)) spelling)
+                           unless (and known (gethash name seen))
+                           collect (cons name i) and do (puthash name t seen)))
+         (column-list (mapconcat (lambda (col) (clutch-db-escape-identifier conn (car col)))
+                                 columns ", ")))
+    (cons (format "INSERT INTO %s (%s) VALUES " target column-list) columns)))
+
+(defun clutch-result--build-insert-statements-for-rows (rows col-indices &optional selection)
+  "Return INSERT statements for ROWS using COL-INDICES or a prepared SELECTION."
+  (let* ((conn clutch-connection)
+         (table (clutch--result-source-key))
+         (selection (or selection (and rows (clutch-result--insert-selection col-indices)))))
     (cl-loop for row in rows
-             for vals = (cl-loop for (name . index) in columns
+             for vals = (cl-loop for (name . index) in (cdr selection)
                                  collect (clutch-result--typed-param-for-column
                                           table name (nth index row) index))
-             collect (format "INSERT INTO %s (%s) VALUES (%s);"
-                             target
-                             cols
+             collect (format "%s(%s);" (car selection)
                              (mapconcat
                               (lambda (param)
                                 (clutch-db-value-to-literal
@@ -3806,11 +3820,10 @@ returns, and it does not run when the export fails."
        (unless err
          (funcall on-rows (apply #'nconc (nreverse batches))))))))
 
-(defun clutch--export-insert-content (rows)
-  "Return INSERT statement export text for ROWS using current result metadata."
-  (let* ((col-indices (clutch--visible-columns))
-         (stmts (clutch-result--build-insert-statements-for-rows
-                 rows col-indices)))
+(defun clutch--export-insert-content (rows &optional selection)
+  "Return INSERT export text for ROWS using the prepared SELECTION, if any."
+  (let ((stmts (clutch-result--build-insert-statements-for-rows
+                rows (unless selection (clutch--visible-columns)) selection)))
     (if stmts
         (concat (mapconcat #'identity stmts "\n") "\n")
       "")))
@@ -3860,6 +3873,10 @@ text already formatted and the number of rows it holds.  For CSV/TSV rows,
 provide COLUMNS and optional COL-INDICES, or pass the batch's column names
 as the third argument to the consumer."
   (let* ((path (expand-file-name path))
+         (content (if (eq kind 'insert)
+                      (let ((selection (clutch-result--insert-selection (clutch--visible-columns))))
+                        (lambda (rows) (clutch--export-insert-content rows selection)))
+                    (plist-get spec :content)))
          (target (file-truename path))
          transformed
          documents
@@ -3899,10 +3916,10 @@ as the third argument to the consumer."
            ;; ROWS may be text a backend already formatted, holding COUNT rows.
            (let ((text (cond ((stringp rows) rows)
                              ((memq kind '(csv tsv))
-                              (funcall (plist-get spec :content)
+                              (funcall content
                                        rows (or batch-columns columns)
                                        (or omit-header (not first)) col-indices))
-                             (t (funcall (plist-get spec :content) rows)))))
+                             (t (funcall content rows)))))
              (push text pending)
              (cl-incf pending-size (length text))
              (when (>= pending-size clutch-result--export-write-size)

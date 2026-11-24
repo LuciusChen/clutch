@@ -2697,17 +2697,65 @@ Signal ambiguity for a write operation OP."
            (user-error "Cannot %s: source column %s is ambiguous in table metadata"
                        op name))))))
 
-(cl-defgeneric clutch-db-resolve-column-names (conn names table &optional schema catalog)
-  "Resolve NAMES against TABLE on CONN.
-SCHEMA and CATALOG qualify TABLE.  Return an alist from each SQL spelling
-to its catalog name, or nil for a column that could not be resolved.")
+(defun clutch-db--column-spelling-hint (name)
+  "Screen NAME for possible matches; the database decides column identity.
+Return an ASCII spelling, or (PREFIX . ASCII-POSSIBLE) for an opaque
+spelling.  For example cœur can match coeur, while 金额 cannot match id."
+  (let ((case-fold-search nil))
+    (if (string-match-p "\\`[A-Za-z0-9_]+\\'" name)
+        (downcase name)
+      (let ((word (concat (seq-remove
+                           (lambda (c) (memq (get-char-code-property c 'general-category)
+                                             '(Mn Mc Me Cf)))
+                           (downcase (upcase (ucs-normalize-NFKD-string (string-trim-right name " +"))))))))
+        (string-match "\\`[a-z0-9_]*" word)
+        (let ((prefix (match-string 0 word)))
+          (if (equal prefix word) word
+            (cons prefix (not (seq-some
+                               (lambda (c) (and (eq (get-char-code-property c 'general-category) 'Lo)
+                                                (not (eq (aref char-script-table c) 'latin))))
+                               word)))))))))
 
-(cl-defmethod clutch-db-resolve-column-names ((conn t) names table &optional schema catalog)
-  "Match NAMES against fresh column details from CONN for TABLE."
-  (let ((details (clutch-db-column-details conn table schema catalog)))
-    (mapcar (lambda (name)
-              (cons name (plist-get (clutch-db-source-column-detail name details) :name)))
-            names)))
+(defun clutch-db--competing-column-names (names peers)
+  "Return spellings in NAMES that may also be written differently in PEERS."
+  (let ((words (make-hash-table :test #'equal)) opaque)
+    (dolist (peer peers)
+      (let ((hint (clutch-db--column-spelling-hint peer)))
+        (if (stringp hint) (push peer (gethash hint words))
+          (push (cons peer hint) opaque))))
+    (seq-filter
+     (lambda (name)
+       (let ((hint (clutch-db--column-spelling-hint name)))
+         (if (stringp hint)
+             (or (seq-some (lambda (peer) (not (equal peer name))) (gethash hint words))
+                 (cl-loop for (_ prefix . ascii) in opaque
+                          thereis (and ascii (string-prefix-p prefix hint))))
+           (or (cl-loop for (peer prefix) in opaque
+                        thereis (and (not (equal peer name))
+                                     (or (string-prefix-p prefix (car hint))
+                                         (string-prefix-p (car hint) prefix))))
+               (and (cdr hint)
+                    (cl-loop for word being the hash-keys of words
+                             thereis (string-prefix-p (car hint) word)))))))
+     names)))
+
+(defun clutch-db--column-binding-select (conn names source-token)
+  "Select identifiers NAMES directly from SQL SOURCE-TOKEN on CONN."
+  (format "SELECT %s FROM %s"
+          (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) names ", ")
+          source-token))
+
+(cl-defgeneric clutch-db-resolve-column-names (conn names source-token)
+  "Resolve competing spellings in NAMES on CONN against SQL SOURCE-TOKEN.
+Return an alist mapping each resolved spelling to its physical column name.")
+
+(cl-defmethod clutch-db-resolve-column-names ((conn t) names source-token)
+  "Match NAMES to the columns of SOURCE-TOKEN visible in CONN's session."
+  (let ((columns (clutch-db-result-columns
+                  (clutch-db-query conn (format "SELECT * FROM %s WHERE 1=0" source-token)))))
+    (cl-loop for name in names
+             for detail = (clutch-db-source-column-detail name columns)
+             when detail collect (cons name (plist-get detail :name)))))
 
 ;; Re-entrancy guard
 

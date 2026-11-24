@@ -823,30 +823,21 @@ as its last columns."
                         (nth 2 edit)
                         (substring sql (nth 1 edit)))))))
 
-(defun clutch--projection-source-names (conn projection table keys)
-  "Bind PROJECTION's source names when reading TABLE on CONN.
-KEYS are its physical row key names.  A mixed star or different spellings
-that can name one column need the current table's bindings on a backend
-whose identifier comparison depends on the catalog."
-  (if (not (consp projection)) projection
-    (let ((items (mapcar (lambda (token)
-                           (if (stringp token) (clutch-db-sql-fold-identifier conn token) token))
-                         projection)))
-      (if (or (null table) (clutch-db-identifier-case conn)) items
-        (let* ((names (delete-dups (seq-filter #'stringp items)))
-               (spellings (delete-dups (append names keys nil)))
-               (case-fold-search nil))
-          (if (and names
-                   (or (memq 'star items)
-                       (/= (length spellings) (length (delete-dups (mapcar #'downcase spellings))))
-                       ;; A collation can ignore accents, width, punctuation or trailing spaces.
-                       (and (cdr spellings)
-                            (seq-some (lambda (name) (string-match-p "[^a-zA-Z0-9_]" name)) spellings))))
-              (let ((bindings (apply #'clutch-db-resolve-column-names
-                                     conn names (clutch--table-key-arguments table))))
-                (mapcar (lambda (name) (if (stringp name) (cdr (assoc name bindings)) name))
-                        items))
-            items))))))
+(defun clutch--projection-source-names (conn projection source-token keys)
+  "Fold source names in PROJECTION and bind possible row KEYS on CONN.
+SOURCE-TOKEN names the relation as the query reads it.  Return the folded
+projection followed by any column names confirmed by the database."
+  (if (not (consp projection)) (list projection)
+    (let* ((items (mapcar (lambda (token)
+                            (if (stringp token) (clutch-db-sql-fold-identifier conn token) token))
+                          projection))
+           (possible (and source-token keys (null (clutch-db-identifier-case conn))
+                          (clutch-db--competing-column-names
+                           (seq-difference (seq-filter #'stringp items) keys #'equal) keys))))
+      (if (not possible) (list items)
+        (let ((bindings (clutch-db-resolve-column-names conn (delete-dups possible) source-token)))
+          (cons (mapcar (lambda (name) (or (cdr (assoc name bindings)) name)) items)
+                (mapcar #'cdr bindings)))))))
 
 (defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
@@ -923,11 +914,10 @@ key would change the current row instead of the one shown."
                 (clutch--projection-source-names
                  conn (if chain (plist-get chain :projection)
                         (clutch--writable-select-projection conn analysis-sql table))
-                 (clutch--table-key table source-schema source-catalog)
-                 (plist-get candidate :columns))
+                 source-token (plist-get candidate :columns))
               (clutch-db-error
                (setq identity-error (or identity-error err))
-               'none)))
+               '(none))))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -945,7 +935,8 @@ key would change the current row instead of the one shown."
             :source-catalog source-catalog
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
-            :writable-projection projection
+            :writable-projection (car projection)
+            :catalog-columns (append (plist-get candidate :columns) (cdr projection))
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -1038,6 +1029,10 @@ same-named projection with Clutch's hidden values."
                                             ((plist-member column :source-column) (plist-get column :source-column))
                                             ((eq source 'star) (plist-get column :name))
                                             (t source))))))
+                 when (and (plist-get copy :source-column)
+                           (or (eq source 'star)
+                               (member (plist-get copy :source-column) (plist-get prep :catalog-columns))))
+                 do (setq copy (plist-put copy :catalog-column t))
                  collect copy)))))
 
 ;;;; SQL pagination helpers

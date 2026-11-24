@@ -7216,6 +7216,9 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
               (should (equal (plist-get column :foreign-key)
                              `(:ref-table "parent" :ref-column "id"
                                :ref-schema ,schema :constraint "fk_people"))))
+            (clutch-db-query conn "CREATE TEMPORARY TABLE people (TempCode INT)")
+            (should (equal (clutch-db-resolve-column-names conn '("tempcode" "TEMPCODE") "people")
+                           '(("tempcode" . "TempCode") ("TEMPCODE" . "TempCode"))))
             (should (equal local (clutch-db-current-schema conn))))
         (clutch-db-set-current-schema conn current)
         (clutch-db-query conn (format "DROP DATABASE IF EXISTS %s" schema))
@@ -9028,7 +9031,6 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 The columns of every table of the same name answered for it, and a foreign
 key into another schema lost that schema."
   :tags '(:db-live :jdbc-live :mssql-live)
-  (require 'clutch-query)
   (clutch-db-test--with-mssql conn
     (let* ((schema (clutch-db-test--live-name "cc_alt"))
            (table (clutch-db-test--live-name "cc_people"))
@@ -9052,14 +9054,15 @@ key into another schema lost that schema."
             (should (equal (mapcar (lambda (column) (plist-get column :name))
                                    (clutch-db-column-details conn table schema))
                            '("id" "parent_id")))
-            (let ((case-insensitive (equal 1 (caar (clutch-db-result-rows
-                                             (clutch-db-query conn "SELECT CASE WHEN N'É' = N'é' THEN 1 ELSE 0 END"))))))
+            (let* ((synonym (concat schema ".people_syn"))
+                   (case-insensitive (equal 1 (caar (clutch-db-result-rows
+                                              (clutch-db-query conn "SELECT CASE WHEN N'É' = N'é' THEN 1 ELSE 0 END"))))))
+              (push (concat "DROP SYNONYM IF EXISTS " synonym) drops)
+              (clutch-db-query conn (format "CREATE SYNONYM %s FOR %s.%s" synonym schema table))
               (clutch-db-query conn (format "ALTER TABLE %s.%s ADD %s" schema table
                                             (if case-insensitive "[État] INT" "[État] INT, [état] INT")))
-              (should (equal (plist-get (clutch--prepare-row-identity-query
-                                         conn (format "SELECT État AS a, état AS b FROM %s.%s" schema table))
-                                        :writable-projection)
-                             (if case-insensitive '("État" "État") '("État" "état")))))
+              (should (equal (clutch-db-resolve-column-names conn '("État" "état") synonym)
+                             (list (cons "État" "État") (cons "état" (if case-insensitive "État" "état"))))))
             (should (equal (clutch-db-foreign-keys conn table schema)
                            `(("parent_id" :ref-table ,parents :ref-column "id"
                               :ref-schema ,schema :constraint ,key)))))

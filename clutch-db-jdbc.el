@@ -1982,25 +1982,17 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
          'lower)
         ((clutch-jdbc--duckdb-conn-p conn) 'ascii-insensitive)))
 
-(cl-defmethod clutch-db-resolve-column-names
-  ((conn clutch-jdbc-conn) names table &optional schema catalog)
-  "Bind NAMES on CONN using TABLE's catalog collation.
-SCHEMA and CATALOG qualify TABLE."
+(cl-defmethod clutch-db-resolve-column-names ((conn clutch-jdbc-conn) names source-token)
+  "Ask SQL Server how NAMES bind on SOURCE-TOKEN in CONN's catalog collation."
   (if (not (or (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
                (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
       (cl-call-next-method)
-    (let* ((qualify (lambda (name) (clutch-db-escape-identifier conn name)))
-           (target (mapconcat qualify (delq nil (list catalog schema table)) "."))
-           (sql (format (concat "SELECT v.spelling, c.name FROM %ssys.columns c "
-                                "JOIN (VALUES %s) v(spelling) ON c.name = v.spelling "
-                                "WHERE c.object_id = OBJECT_ID(N%s)")
-                        (if catalog (concat (funcall qualify catalog) ".") "")
-                        (mapconcat (lambda (name)
-                                     (format "(N%s)" (clutch-db-escape-literal conn name)))
-                                   names ", ")
-                        (clutch-db-escape-literal conn target))))
-      (cl-loop for (spelling physical) in (clutch-db-result-rows (clutch-db-query conn sql))
-               collect (cons spelling physical)))))
+    ;; Browse mode 2 reports a view's own column names, also through a synonym.
+    (let* ((select (clutch-db--column-binding-select conn names source-token))
+           (sql (format (concat "SELECT source_column FROM sys.dm_exec_describe_first_result_set"
+                                "(N%s, NULL, 2) WHERE is_hidden = 0 ORDER BY column_ordinal")
+                        (clutch-db-escape-literal conn select))))
+      (cl-mapcar #'cons names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.

@@ -750,6 +750,9 @@
              '(("simple filter"
                 "SELECT name FROM users WHERE active = 1"
                 "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")
+               ("mixed star and direct column"
+                "SELECT users.*, 金额 AS balance FROM users"
+                "SELECT users.*, 金额 AS balance, \"id\" AS \"clutch__rid_0\" FROM users")
                ("leading comment"
                 "-- comment\nSELECT * FROM users;"
                 "SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users")
