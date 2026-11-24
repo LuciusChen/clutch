@@ -16,6 +16,8 @@
 
 - Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
 
+- Refreshing Describe for a missing qualified table no longer shows columns from a same-named table in another database.
+
 - Typing during JDBC identifier completion no longer waits for column metadata or an Oracle prefix search.
 
 - MongoDB queries decode Unicode string escapes and reject malformed numeric literals before sending a command.
@@ -23,6 +25,8 @@
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
+
+- Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 

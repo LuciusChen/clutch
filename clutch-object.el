@@ -1193,19 +1193,19 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
   "Return describe sections for ENTRY on CONN."
   (pcase (clutch--object-type-string entry)
     ((or "TABLE" "VIEW")
-     (let ((name (plist-get entry :name))
-           (schema (plist-get entry :schema)))
+     (let* ((name (plist-get entry :name))
+            (schema (plist-get entry :schema))
+            (table (clutch--table-key name schema (plist-get entry :catalog))))
        (delq nil
              (list
               (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
                                          (clutch--ensure-table-comment
                                           conn name schema))))
                 (cons "Comment" (list (format "  %s" comment))))
-              (when-let* ((details (or (clutch--ensure-column-details
-                                        conn (clutch--table-key name schema) t)
-                                       (clutch-db-list-columns conn name))))
+              (let ((details (or (clutch--ensure-column-details conn table t)
+                                 (and (stringp table) (clutch-db-list-columns conn name)))))
                 (cons "Columns"
-                      (mapcar (if (and details (plist-get (car-safe details) :name))
+                      (mapcar (if (plist-get (car-safe details) :name)
                                   #'clutch--object-format-column
                                 (lambda (column) (format "  %s" column)))
                               details)))

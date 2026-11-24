@@ -663,7 +663,7 @@ When RESTORER is non-nil, run it in PARENT before switching back."
     (let ((table (or (clutch--result-source-key)
                      (user-error "Cannot detect source table")))
           (fields (nth iidx clutch--pending-inserts)))
-      (clutch-result-insert--open-buffer table (current-buffer) fields iidx))))
+      (clutch-result-insert--open-buffer table (current-buffer) fields t))))
 
 (defun clutch-result-edit--open-cell (cell return-buffer)
   "Open an edit buffer for CELL using the current result buffer state.
@@ -1321,8 +1321,8 @@ Use \\[clutch-result-submit] in the result buffer to submit."
 (defvar-local clutch-result-insert--table nil
   "Metadata key of the table for the INSERT (Insert buffer local).")
 
-(defvar-local clutch-result-insert--pending-index nil
-  "Staged insert index being edited, or nil for a new insert.")
+(defvar-local clutch-result-insert--pending-entry nil
+  "Original fields of the staged insert being edited, or nil for a new insert.")
 
 (defvar-local clutch-result-insert--fields nil
   "Canonical field state for the current insert buffer.")
@@ -1962,10 +1962,10 @@ for the current result buffer."
              collect (cons col (cdr cell)))))
 
 (defun clutch-result-insert--open-buffer
-    (table result-buf &optional fields pending-index)
+    (table result-buf &optional fields reedit)
   "Open an insert buffer for TABLE backed by RESULT-BUF.
 TABLE is a metadata key from `clutch--table-key'.  FIELDS prefill the
-buffer.  PENDING-INDEX re-edits an existing staged insert."
+buffer.  When REEDIT is non-nil, FIELDS is the staged insert being edited."
   (let* ((field-state
           (with-current-buffer result-buf
             (let* ((indices (clutch--visible-columns))
@@ -1998,7 +1998,7 @@ buffer.  PENDING-INDEX re-edits an existing staged insert."
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
                   clutch-result-insert--fields field-state
-                  clutch-result-insert--pending-index pending-index
+                  clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
       (clutch-result-insert--populate-buffer))
@@ -2247,7 +2247,7 @@ immediately."
                (clutch--message-count 1)
                (clutch--message-keyword
                 (clutch-result-insert--delimiter-name delim))))
-     (clutch-result-insert--pending-index
+     (clutch-result-insert--pending-entry
       (user-error "Cannot bulk import multiple rows while editing a staged insert"))
      (t
       (let ((field-rows (mapcar (lambda (row)
@@ -2419,32 +2419,26 @@ Use \\[clutch-result-submit] in the result buffer to submit."
   (interactive)
   (let* ((fields (clutch-result-insert--parse-fields))
          (result-buf clutch-result-insert--result-buffer)
-         (pending-index clutch-result-insert--pending-index))
+         (entry clutch-result-insert--pending-entry))
     (unless fields (user-error "No values entered"))
     (clutch-result-insert--ensure-live-result-context)
-    (when pending-index
-      (with-current-buffer result-buf
-        (unless (nthcdr pending-index clutch--pending-inserts)
-          (user-error "Staged insert no longer exists"))))
     (clutch-result-insert--validate-fields fields)
-    (quit-window 'kill)
     (with-current-buffer result-buf
-      (let ((new-index (length clutch--pending-inserts))
-            (nrows (length (clutch--result-display-rows))))
-        (if pending-index
-            (progn
-              (setcar (nthcdr pending-index clutch--pending-inserts) fields)
-              (clutch--replace-row-at-index (+ nrows pending-index)))
-          (setq clutch--pending-inserts
-                (append clutch--pending-inserts (list fields)))
-          (clutch--append-pending-insert-row new-index))
-        (clutch--refresh-footer-line)
-        (force-mode-line-update))
-      (if pending-index
-          (message "Staged insert updated — C-c C-c to submit")
+      (if entry
+          (let ((index (or (cl-position entry clutch--pending-inserts :test #'eq)
+                           (user-error "Staged insert no longer exists"))))
+            (setcar (nthcdr index clutch--pending-inserts) fields)
+            (clutch--replace-row-at-index (+ (length (clutch--result-display-rows)) index))
+            (message "Staged insert updated — C-c C-c to submit"))
+        (let ((index (length clutch--pending-inserts)))
+          (setq clutch--pending-inserts (append clutch--pending-inserts (list fields)))
+          (clutch--append-pending-insert-row index))
         (message "%s insertion%s staged — C-c C-c to submit"
                  (clutch--message-count (length clutch--pending-inserts))
-                 (if (= (length clutch--pending-inserts) 1) "" "s"))))))
+                 (if (= (length clutch--pending-inserts) 1) "" "s")))
+      (clutch--refresh-footer-line)
+      (force-mode-line-update))
+    (quit-window 'kill)))
 
 ;;;###autoload
 (defun clutch-result-insert-cancel ()
