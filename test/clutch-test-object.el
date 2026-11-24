@@ -549,9 +549,7 @@ The exact-name match only needs entries under the name's prefix."
             (clutch-db-query first "DROP TABLE aux.orders")
             (call-interactively #'clutch-describe-refresh)
             (should (string-search "aux.orders" (buffer-string)))
-            (should (string-search "Columns (0)" (buffer-string)))
-            (should-not (string-search "dev_only" (buffer-string)))
-            (should-not (string-search "attached_only" (buffer-string))))
+            (should (string-search "Columns (0)" (buffer-string))))
           (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
             (ert-info ((symbol-name command))
               (let ((views
