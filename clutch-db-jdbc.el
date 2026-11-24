@@ -1982,6 +1982,26 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
          'lower)
         ((clutch-jdbc--duckdb-conn-p conn) 'ascii-insensitive)))
 
+(cl-defmethod clutch-db-resolve-column-names
+  ((conn clutch-jdbc-conn) names table &optional schema catalog)
+  "Bind NAMES on CONN using TABLE's catalog collation.
+SCHEMA and CATALOG qualify TABLE."
+  (if (not (or (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
+               (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
+      (cl-call-next-method)
+    (let* ((qualify (lambda (name) (clutch-db-escape-identifier conn name)))
+           (target (mapconcat qualify (delq nil (list catalog schema table)) "."))
+           (sql (format (concat "SELECT v.spelling, c.name FROM %ssys.columns c "
+                                "JOIN (VALUES %s) v(spelling) ON c.name = v.spelling "
+                                "WHERE c.object_id = OBJECT_ID(N%s)")
+                        (if catalog (concat (funcall qualify catalog) ".") "")
+                        (mapconcat (lambda (name)
+                                     (format "(N%s)" (clutch-db-escape-literal conn name)))
+                                   names ", ")
+                        (clutch-db-escape-literal conn target))))
+      (cl-loop for (spelling physical) in (clutch-db-result-rows (clutch-db-query conn sql))
+               collect (cons spelling physical)))))
+
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.
 Snowflake and DB2 are asked for names as written, though they fold them:

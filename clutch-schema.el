@@ -348,34 +348,9 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
         (puthash key metadata cache)
       (remhash key cache))))
 
-(defun clutch--source-column-detail (name details &optional op)
-  "Find NAME in DETAILS, allowing a unique match in another case.
-Signal ambiguity for a write operation OP."
-  (let ((key (lambda (detail) (plist-get detail :name))))
-    (or (cl-find name details :key key :test #'string=)
-        (pcase (cl-remove-if-not (lambda (detail)
-                                   (string-equal-ignore-case name (funcall key detail)))
-                                 details)
-          (`(,match) match)
-          ((and (pred consp) (guard op))
-           (user-error "Cannot %s: source column %s is ambiguous in table metadata"
-                       op name))))))
-
 (defun clutch--cached-column-details (conn table)
   "Return cached column details for TABLE on CONN, or nil if not loaded."
   (plist-get (clutch--table-metadata conn table) :column-details))
-
-(defun clutch--resolve-source-column-case (conn table name spelling)
-  "Resolve NAME in TABLE on CONN given an ASCII case variant SPELLING.
-Use SPELLING when the engine ignores ASCII case, or the catalog name
-when the database collation determines which column NAME refers to."
-  (pcase (clutch-db-identifier-case conn)
-    ('ascii-insensitive spelling)
-    ('nil (let ((details (if (clutch-db-live-p conn)
-                             (clutch--ensure-column-details conn table)
-                           (clutch--cached-column-details conn table))))
-            (or (plist-get (clutch--source-column-detail name details) :name) name)))
-    (_ name)))
 
 (defun clutch--column-details-cached-p (conn table)
   "Return non-nil when TABLE has cached column details on CONN."

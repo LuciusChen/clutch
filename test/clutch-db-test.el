@@ -361,6 +361,7 @@ An unquoted name folds to lower case and a quoted one keeps its case."
   (let ((conn (clutch-db-pg--make-connection :client 'fake-pgsql-client)))
     (pcase-dolist (`(,token ,name ,schema)
                    '(("People" "people" nil)
+                     ("ÉTAT" "État" nil)
                      ("Other.People" "people" "other")
                      ("\"Other\".\"People\"" "People" "Other")
                      ("other.\"MiXed\"" "MiXed" "other")))
@@ -9027,6 +9028,7 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
 The columns of every table of the same name answered for it, and a foreign
 key into another schema lost that schema."
   :tags '(:db-live :jdbc-live :mssql-live)
+  (require 'clutch-query)
   (clutch-db-test--with-mssql conn
     (let* ((schema (clutch-db-test--live-name "cc_alt"))
            (table (clutch-db-test--live-name "cc_people"))
@@ -9050,6 +9052,14 @@ key into another schema lost that schema."
             (should (equal (mapcar (lambda (column) (plist-get column :name))
                                    (clutch-db-column-details conn table schema))
                            '("id" "parent_id")))
+            (let ((case-insensitive (equal 1 (caar (clutch-db-result-rows
+                                             (clutch-db-query conn "SELECT CASE WHEN N'É' = N'é' THEN 1 ELSE 0 END"))))))
+              (clutch-db-query conn (format "ALTER TABLE %s.%s ADD %s" schema table
+                                            (if case-insensitive "[État] INT" "[État] INT, [état] INT")))
+              (should (equal (plist-get (clutch--prepare-row-identity-query
+                                         conn (format "SELECT État AS a, état AS b FROM %s.%s" schema table))
+                                        :writable-projection)
+                             (if case-insensitive '("État" "État") '("État" "état")))))
             (should (equal (clutch-db-foreign-keys conn table schema)
                            `(("parent_id" :ref-table ,parents :ref-column "id"
                               :ref-schema ,schema :constraint ,key)))))

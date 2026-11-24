@@ -231,7 +231,7 @@ TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
 wins.  Otherwise, accept a single case-insensitive match so unquoted
 identifiers can be reconciled with backend canonical case.
 Return nil when no metadata column matches, and reject ambiguous matches."
-  (clutch--source-column-detail
+  (clutch-db-source-column-detail
    (clutch-result--writable-source-column cidx op)
    (or details (clutch-result--source-column-details table op)) op))
 
@@ -1940,7 +1940,7 @@ projection labels for editing and importing."
              for def = (nth idx clutch--result-column-defs)
              for label = (nth idx clutch--result-columns)
              for source = (plist-get def :source-column)
-             for detail = (and source (clutch--source-column-detail source details "insert"))
+             for detail = (and source (clutch-db-source-column-detail source details "insert"))
              for name = (or (plist-get detail :name) source)
              when (and name (not (member name sources)))
              collect

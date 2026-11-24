@@ -288,13 +288,14 @@ table sits in another schema, or the column is generated."
                  '(("SELECT id AS k, name AS v FROM people" "people (\"id\", \"name\")")
                    ("SELECT id AS k, id AS other_k, name AS v, NAME AS other_v FROM people"
                     "people (\"id\", \"name\")")
+                   ("SELECT É AS a, É AS b, é AS c FROM people" "people (\"É\", \"é\")")
                    ("WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"
                     "people (\"id\", \"name\")")
                    ("SELECT id AS k, lower(name) AS v FROM people"
                     "\"MY_TABLE\" (\"k\", \"v\")")))
     (ert-info (sql)
       (clutch-test--with-sqlite-result (conn result)
-          '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
+          '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, É INT DEFAULT 1, é TEXT DEFAULT 'alpha')"
             "INSERT INTO people (id, name) VALUES (1, 'alpha')")
           sql
         (should (equal (clutch-result--build-insert-statements-for-rows

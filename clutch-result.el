@@ -466,7 +466,7 @@ COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
 describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
 offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
   (let* ((column-defs (clutch--apply-row-identity-column-metadata
-                       columns row-identity-prep))
+                       columns row-identity-prep clutch-connection))
          (row-identity (clutch--finalize-row-identity
                         row-identity-prep column-defs))
          (prep-identity-status (plist-get row-identity-prep :identity-status))
@@ -579,15 +579,6 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
          (analysis-sql (clutch-db-sql-normalize
                         (or (plist-get result-context :base-query) sql)))
          (raw-columns (clutch-db-result-columns result))
-         (columns (clutch--apply-row-identity-column-metadata
-                   raw-columns row-identity-prep))
-         (visible-columns
-          (cl-remove-if (lambda (col) (plist-get col :hidden)) columns))
-         (server-rewritable
-          (if (plist-member result-context :server-rewritable)
-              (plist-get result-context :server-rewritable)
-            (and server-pageable
-                 (clutch--server-rewritable-result-p sql visible-columns))))
          (prepared-source-table (plist-get row-identity-prep :table))
          (source-table
           (or (plist-get result-context :source-table)
@@ -612,11 +603,16 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
              :page-offset 0
              :page-has-more has-more
              :server-pageable server-pageable
-             :server-rewritable server-rewritable
+             :server-rewritable (plist-get result-context :server-rewritable)
              :source-table source-table
              :source-schema (plist-get row-identity-prep :source-schema)
              :source-catalog (plist-get row-identity-prep :source-catalog)
              :resolution-context resolution-context))
+      (when (and server-pageable (not (plist-member result-context :server-rewritable)))
+        (setq-local clutch--result-server-rewritable
+                    (clutch--server-rewritable-result-p
+                     sql (cl-remove-if (lambda (col) (plist-get col :hidden))
+                                       clutch--result-column-defs))))
       ;; A server-side filter result restores the query it filters.
       (when (plist-member result-context :where-filter)
         (setq-local clutch--base-query (plist-get result-context :base-query)
@@ -3194,21 +3190,13 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defconst clutch--insert-placeholder-table "MY_TABLE"
   "Placeholder target table for INSERT copy/export without a known destination.")
 
-(defun clutch-result--distinct-insert-columns (columns table)
-  "Keep the first (NAME . INDEX) in COLUMNS for each source column of TABLE."
-  (let ((spellings (make-hash-table :test #'equal))
-        (seen (make-hash-table :test #'equal)))
-    ;; Only different spellings of a name can need a catalog lookup.
-    (dolist (name (delete-dups (mapcar #'car columns)))
-      (cl-incf (gethash (with-case-table ascii-case-table (downcase name)) spellings 0)))
+(defun clutch-result--distinct-insert-columns (columns)
+  "Keep the first (source name . index) in COLUMNS for each physical column."
+  (let ((seen (make-hash-table :test #'equal)))
     (cl-loop for column in columns
              for name = (car column)
-             for folded = (with-case-table ascii-case-table (downcase name))
-             for key = (if (> (gethash folded spellings) 1)
-                           (clutch--resolve-source-column-case clutch-connection table name folded)
-                         name)
-             unless (gethash key seen)
-             do (puthash key t seen) and collect column)))
+             unless (gethash name seen)
+             do (puthash name t seen) and collect column)))
 
 (defun clutch-result--build-insert-statements-for-rows (rows col-indices)
   "Return INSERT statements for ROWS using COL-INDICES.
@@ -3224,7 +3212,7 @@ Otherwise use the result labels in an editable SQL template."
          (known (and table (not (memq nil origins))))
          (names (if known origins (clutch--column-names-for-indices col-indices)))
          (selection (cl-mapcar #'cons names col-indices))
-         (columns (if known (clutch-result--distinct-insert-columns selection table) selection))
+         (columns (if known (clutch-result--distinct-insert-columns selection) selection))
          (cols (mapconcat (lambda (column) (clutch-db-escape-identifier conn (car column)))
                           columns ", "))
          (target (and rows (if known
