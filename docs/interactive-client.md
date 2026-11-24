@@ -206,7 +206,7 @@ An untouched blank insert field is omitted, allowing the database to supply its 
 
 INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
-Insert buffers show every field by default, including generated/defaulted ones. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. The active field line is highlighted. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
+Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. The active field line is highlighted. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
 
 `C-c C-y` imports delimited text directly into the form. A single imported row prefills the current insert buffer; multiple imported rows become staged inserts immediately. Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
 

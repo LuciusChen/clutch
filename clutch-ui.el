@@ -1392,28 +1392,23 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
           (propertize result 'clutch-cell-truncated t)
         result))))
 
-(defun clutch--pending-insert-placeholders ()
-  "Return placeholder sentinels aligned with `clutch--result-columns'."
-  (when (and clutch--pending-inserts
-             clutch-connection
-             clutch--result-source-table)
-    (let ((details (clutch--cached-column-details
-                    clutch-connection (clutch--result-source-key))))
-      (unless details
-        (clutch--ensure-column-details-async
-         clutch-connection (clutch--result-source-key)))
-      (if details
-          (mapcar (lambda (col-name)
-                    (when-let* ((detail (cl-find col-name details
-                                                 :key (lambda (d)
-                                                        (plist-get d :name))
-                                                 :test #'string=)))
-                      (cond
-                       ((plist-get detail :generated) clutch--cell-generated-placeholder)
-                       ((plist-get detail :default) clutch--cell-default-placeholder)
-                       (t nil))))
-                  clutch--result-columns)
-        (make-list (length clutch--result-columns) nil)))))
+(defun clutch--pending-insert-columns ()
+  "Return (SOURCE . PLACEHOLDER) for each column of a staged result row."
+  (when clutch--pending-inserts
+    (let* ((table (clutch--result-source-key))
+           (details (and table clutch-connection
+                         (clutch--cached-column-details clutch-connection table))))
+      (when (and table clutch-connection (not details))
+        (clutch--ensure-column-details-async clutch-connection table))
+      (cl-loop for label in clutch--result-columns
+               for defs = clutch--result-column-defs then (cdr defs)
+               for def = (car defs)
+               for source = (if (plist-member def :source-column)
+                                (plist-get def :source-column) label)
+               for detail = (and source (clutch--source-column-detail source details))
+               collect (cons (or (plist-get detail :name) source)
+                             (cond ((plist-get detail :generated) clutch--cell-generated-placeholder)
+                                   ((plist-get detail :default) clutch--cell-default-placeholder)))))))
 
 (defun clutch--build-render-state ()
   "Return hash-table lookups for the current result render.
@@ -1431,7 +1426,7 @@ rendering large result pages."
     (list :edits edit-table
           :edit-rows edit-row-table
           :deletes delete-table
-          :insert-placeholders (clutch--pending-insert-placeholders)
+          :insert-columns (clutch--pending-insert-columns)
           :active-edit-cell clutch--active-edit-cell
           :row-identity row-identity)))
 
@@ -1450,16 +1445,11 @@ rendering large result pages."
   "Return staged insert rows expanded with placeholders from RENDER-STATE.
 A result without placeholders, as after its connection closed, leaves the
 columns an insert does not set empty."
-  (let ((placeholders (or (plist-get render-state :insert-placeholders)
-                          (make-list (length clutch--result-columns) nil))))
-    (mapcar
-     (lambda (fields)
-       (cl-mapcar (lambda (column placeholder)
-                    (if-let* ((entry (assoc column fields)))
-                        (cdr entry)
-                      placeholder))
-                  clutch--result-columns placeholders))
-     clutch--pending-inserts)))
+  (mapcar (lambda (fields)
+            (cl-loop for (source . placeholder) in (plist-get render-state :insert-columns)
+                     for entry = (assoc source fields)
+                     collect (if entry (cdr entry) placeholder)))
+          clutch--pending-inserts))
 
 (defun clutch--pixel-layout-scan-columns (widths pixel-metric)
   "Return body columns that need pixel measurement for WIDTHS.

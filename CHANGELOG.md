@@ -26,6 +26,8 @@
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
+- Inserting or cloning a projected row writes to the underlying columns, including when an alias names a different column of the same table.
+
 - Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.

@@ -459,19 +459,30 @@ unambiguous.  Expressions and implicit aliases intentionally fail closed."
       (when (string-match (concat "\\(" ident "\\)\\s-*\\'") source)
         (clutch-db-sql--unquote-identifier (match-string 1 source))))))
 
-(defun clutch--writable-select-projection (sql)
+(defun clutch--writable-select-projection (sql &optional base-table)
   "Describe columns in SQL that are provably direct source projections.
 Return `star' for a sole * or qualified .* projection.  Otherwise return one
 source column name or nil per SELECT item.  Return `none' when the outer SELECT
-list cannot be established."
+list cannot be established.  A mixed BASE-TABLE projection can include
+one `star' among direct source columns."
   (if-let* ((items (clutch--select-list-items sql)))
       (let* ((ident clutch--source-column-identifier-pattern)
              (qualified (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
              (star-pattern (concat "\\`\\(?:" qualified "\\s-*\\.\\s-*\\)?\\*\\s-*\\'")))
-        (if (and (= (length items) 1)
-                 (string-match-p star-pattern (car items)))
-            'star
-          (mapcar #'clutch--direct-projection-source-column items)))
+        (cond
+         ((and (= (length items) 1) (string-match-p star-pattern (car items))) 'star)
+         ((and base-table (member "*" items))
+          ;; Only a single table's star and individually named columns have
+          ;; a known alignment once the driver returns the result labels.
+          (let ((sources (mapcar (lambda (item)
+                                   (if (equal item "*") 'star
+                                     (clutch--direct-projection-source-column item)))
+                                 items)))
+            (if (and (= (cl-count 'star sources) 1) (not (memq nil sources))
+                     (clutch-db-sql-source-table sql t))
+                sources
+              'none)))
+         (t (mapcar #'clutch--direct-projection-source-column items))))
     'none))
 
 (defun clutch--row-identity-key-expressions (conn candidate)
@@ -908,7 +919,7 @@ key would change the current row instead of the one shown."
             :writable-projection
             (if chain
                 (plist-get chain :projection)
-              (clutch--writable-select-projection analysis-sql))
+              (clutch--writable-select-projection analysis-sql table))
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -973,14 +984,21 @@ same-named projection with Clutch's hidden values."
                               (clutch--row-identity-hidden-indices
                                columns aliases)))
          (projection-present-p (plist-member prep :writable-projection))
-         (projection (plist-get prep :writable-projection))
+         (items (plist-get prep :writable-projection))
          (visible-count (- (length columns) (length hidden-indices)))
+         (wildcard (and (consp items) (memq 'star items)))
+         (projection (if (and wildcard (<= (length items) visible-count))
+                         (append (butlast items (length wildcard))
+                                 (make-list (1+ (- visible-count (length items))) 'star)
+                                 (cdr wildcard))
+                       items))
          (projection-aligned-p
           (or (eq projection 'star)
               (and (listp projection)
                    (= (length projection) visible-count)))))
     (cl-loop for column in columns
              for idx from 0
+             for sources = projection then (cdr-safe sources)
              for copy = (copy-sequence column)
              for hidden-p = (memq idx hidden-indices)
              do (when hidden-p
@@ -991,9 +1009,9 @@ same-named projection with Clutch's hidden values."
                        copy :source-column
                        (and (not hidden-p)
                             projection-aligned-p
-                            (if (eq projection 'star)
+                            (if (or (eq projection 'star) (eq (car-safe sources) 'star))
                                 (plist-get copy :name)
-                              (nth idx projection)))))
+                              (car-safe sources)))))
              collect copy)))
 
 ;;;; SQL pagination helpers

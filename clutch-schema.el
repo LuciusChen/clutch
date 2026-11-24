@@ -348,6 +348,19 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
         (puthash key metadata cache)
       (remhash key cache))))
 
+(defun clutch--source-column-detail (name details &optional op)
+  "Find NAME in DETAILS, allowing a unique match in another case.
+Signal ambiguity for a write operation OP."
+  (let ((key (lambda (detail) (plist-get detail :name))))
+    (or (cl-find name details :key key :test #'string=)
+        (pcase (cl-remove-if-not (lambda (detail)
+                                   (string-equal-ignore-case name (funcall key detail)))
+                                 details)
+          (`(,match) match)
+          ((and (pred consp) (guard op))
+           (user-error "Cannot %s: source column %s is ambiguous in table metadata"
+                       op name))))))
+
 (defun clutch--cached-column-details (conn table)
   "Return cached column details for TABLE on CONN, or nil if not loaded."
   (plist-get (clutch--table-metadata conn table) :column-details))
