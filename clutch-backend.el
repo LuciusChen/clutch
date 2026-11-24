@@ -1124,17 +1124,22 @@ nil for a recursive WITH clause or one this parser does not follow."
                   (throw 'unsupported nil)))))
             (nreverse definitions)))))))
 
-(defun clutch-db-sql--same-identifier-p (a b)
+(defun clutch-db-sql--same-identifier-p (a b &optional conn)
   "Compare identifiers A and B as written.
 Return t when they name the same object, nil when they differ, and
-`ambiguous' when that depends on how the database folds case."
+`ambiguous' when their case cannot be resolved.  CONN supplies its fold rule."
   (let ((name-a (clutch-db-sql--unquote-identifier a))
         (name-b (clutch-db-sql--unquote-identifier b)))
     (cond
+     ((string= a b) t)
      ((not (string-equal-ignore-case name-a name-b)) nil)
-     ((or (string= a b)
-          (and (equal a name-a) (equal b name-b)))
-      t)
+     ((and conn (eq (clutch-db-identifier-case conn) 'ascii-insensitive))
+      (with-case-table ascii-case-table (string-equal-ignore-case name-a name-b)))
+     ((and (equal a name-a) (equal b name-b)) t)
+     ((and conn (clutch-db-identifier-case conn))
+      (equal (clutch-db-sql-fold-identifier conn a)
+             (clutch-db-sql-fold-identifier conn b)))
+     ((and conn (string= name-a name-b)) t)
      (t 'ambiguous))))
 
 (defun clutch-db-sql-source-chain (sql)
@@ -1308,13 +1313,13 @@ ends comments instead of counting as whitespace.")
                                finally return len))))
         (if (= start end)
             (setq pos len parts nil)
-          (push (substring table start end) parts)
-          (setq pos end)
+          (push (string-trim-right (substring table start end)) parts)
+          (setq pos (clutch-db-sql--skip-blank table end))
           (cond
            ((= pos len)
             (setq valid t))
            ((= (aref table pos) ?.)
-            (cl-incf pos))
+            (setq pos (clutch-db-sql--skip-blank table (1+ pos))))
            (t
             (setq pos len parts nil))))))
     (and valid (nreverse parts))))
@@ -2001,14 +2006,13 @@ when non-nil."
   "Escape NAME as a SQL identifier for CONN's dialect.")
 
 (cl-defgeneric clutch-db-identifier-case (conn)
-  "Return the case CONN's database folds an unquoted identifier to, or nil.
-The value is `lower' or `upper' for a database that folds such a name and
-then compares names by case, as PostgreSQL and Oracle do.  It is nil for
-one that compares names regardless of case, which Clutch also assumes of
-a database whose rule no backend states.")
+  "Return the identifier case rule for CONN.
+`upper' and `lower' fold bare identifiers only.  `ascii-insensitive'
+compares even quoted identifiers ignoring ASCII case.  Return nil when
+the backend has no fixed rule.")
 
 (cl-defmethod clutch-db-identifier-case ((_conn t))
-  "Return nil: a database is taken to compare names regardless of case."
+  "Return nil for an unspecified identifier case rule."
   nil)
 
 (defun clutch-db-sql-fold-identifier (conn token)

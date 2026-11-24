@@ -1975,11 +1975,12 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
 (cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
   "Return how JDBC CONN's database folds unquoted names, or nil.
 Oracle, Snowflake and DB2 fold them to upper case.  Cassandra and
-PostgreSQL fold them to lower case."
+PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
   (cond ((memq (clutch-jdbc--conn-driver conn) '(oracle snowflake db2)) 'upper)
         ((or (clutch-jdbc--cassandra-conn-p conn)
              (clutch-jdbc--url-prefix-p conn "jdbc:postgresql:"))
-         'lower)))
+         'lower)
+        ((clutch-jdbc--duckdb-conn-p conn) 'ascii-insensitive)))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.

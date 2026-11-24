@@ -233,7 +233,7 @@ table sits in another schema, or the column is generated."
            '(("query alias"
               ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
                "INSERT INTO people VALUES (1, 'alpha'), (2, 'beta')")
-              "WITH c AS (SELECT name, 2 AS clutch__rid_0 FROM people WHERE id = 1) SELECT name FROM c"
+              "WITH c AS (SELECT \"P\".name, 2 AS clutch__rid_0 FROM people p WHERE id = 1) SELECT name FROM c"
               "people")
              ("table column"
               ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)"
@@ -268,13 +268,19 @@ table sits in another schema, or the column is generated."
                            conn (format "SELECT id, name FROM %s ORDER BY id"
                                         table)))
                          '((1 "edited") (2 "beta"))))))))
-  (clutch-test--with-sqlite-result (conn result)
-      '("CREATE TABLE people (id INTEGER PRIMARY KEY, manager_id INTEGER)"
-        "INSERT INTO people VALUES (1,2), (2,NULL)")
-      "SELECT manager_id AS id, 1 /* no injected key */ FROM people WHERE id = 1"
-    (clutch--goto-cell 0 0)
-    (should-error (clutch-result-delete-rows) :type 'user-error)
-    (should-not clutch--pending-deletes)))
+  (dolist (source '("ID" "manager_id"))
+    (clutch-test--with-sqlite-result (conn result)
+        '("CREATE TABLE people (id INTEGER PRIMARY KEY, manager_id INTEGER)"
+          "INSERT INTO people VALUES (1,2), (2,NULL)")
+        (format "SELECT %s AS id, 1 /* no injected key */ FROM people WHERE id = 1" source)
+      (clutch--goto-cell 0 0)
+      (if (equal source "manager_id")
+          (progn (should-error (clutch-result-delete-rows) :type 'user-error)
+                 (should-not clutch--pending-deletes))
+        (clutch-result-delete-rows)
+        (cl-letf (((symbol-function 'yes-or-no-p) #'always)) (clutch-result-submit))
+        (should (equal (clutch-db-result-rows (clutch-db-query conn "SELECT id FROM people"))
+                       '((2))))))))
 
 (ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
   "Copy targets the base table only when all selected columns belong to it."

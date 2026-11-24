@@ -1604,24 +1604,24 @@ table with its schema."
 
 (ert-deftest clutch-test-writable-projection-requires-direct-source-columns ()
   "Computed and uncertain projections must stay read-only."
-  (should (eq (clutch--writable-select-projection "SELECT * FROM products")
+  (should (eq (clutch--writable-select-projection nil "SELECT * FROM products")
               'star))
-  (should (eq (clutch--writable-select-projection "SELECT p.* FROM products p")
+  (should (eq (clutch--writable-select-projection nil "SELECT p.* FROM products p")
               'star))
   (should (equal (clutch--writable-select-projection
-                  "SELECT p.price, id FROM products p")
+                  nil "SELECT p.price, id FROM products p")
                  '("price" "id")))
   (should (equal (clutch--writable-select-projection
-                  "SELECT price AS retail_price FROM products")
+                  nil "SELECT price AS retail_price FROM products")
                  '("price")))
   (should (equal (clutch--writable-select-projection
-                  "SELECT price * 1.2 AS price, id FROM products")
+                  nil "SELECT price * 1.2 AS price, id FROM products")
                  '(nil "id")))
   (should (equal (clutch--writable-select-projection
-                  "SELECT price retail_price FROM products")
+                  nil "SELECT price retail_price FROM products")
                  '(nil)))
   (should (equal (clutch--writable-select-projection
-                  "SELECT p.*, p.price AS cost FROM products p" "products")
+                  nil "SELECT p.*, p.price AS cost FROM products p" "products")
                  '(star "price")))
   (let* ((prep '(:hidden-aliases ("clutch__rid_0")
                  :writable-projection (nil "id")))
