@@ -683,11 +683,10 @@ RETURN-BUFFER is the buffer that invoked the edit command."
              (viewport (when-let* ((win (get-buffer-window result-buf t)))
                          (list :window-start (window-start win)
                                :hscroll (window-hscroll win))))
-             (edit-buf (get-buffer-create
-                        (format "*clutch-edit: [%d].%s*" ridx col-name))))
-        (when (plist-get detail :read-only)
-          (user-error "Cannot %s: source column %s is generated"
-                      op source-column))
+             (edit-buf
+              (if (plist-get detail :read-only)
+                  (user-error "Cannot %s: source column %s is generated" op source-column)
+                (generate-new-buffer (format "*clutch-edit: [%d].%s*" ridx col-name)))))
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
@@ -707,7 +706,6 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                       clutch-result-edit--initial-value-state nil
                       completion-at-point-functions
                       '(clutch-result-edit-completion-at-point))
-          (erase-buffer)
           (cond
            ((eq val clutch--cell-default-placeholder)
             (clutch-result-edit--set-special-value 'default))
@@ -1603,13 +1601,12 @@ All field types use the same delay so feedback timing is consistent."
 
 (defun clutch--open-json-sub-editor (buffer-name initial-text field-name finish-fn cancel-fn)
   "Open a shared JSON sub-editor buffer and return it.
-BUFFER-NAME is the buffer to reuse or create.
+BUFFER-NAME is the preferred name of the new draft.
 INITIAL-TEXT seeds the editor contents.
 FIELD-NAME is shown in the header line.
 FINISH-FN and CANCEL-FN become the local save and cancel bindings."
-  (let ((buf (get-buffer-create buffer-name)))
+  (let ((buf (generate-new-buffer buffer-name)))
     (with-current-buffer buf
-      (erase-buffer)
       (insert initial-text)
       (goto-char (point-min))
       (condition-case nil
@@ -1973,16 +1970,14 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
   (let* ((field-state (or (with-current-buffer result-buf
                             (clutch-result-insert--form-fields table fields clone-index))
                           (user-error "No direct source columns to insert")))
-         (buf (get-buffer-create (format "*clutch-insert: %s*"
-                                         (clutch--table-key-name table)))))
+         (buf (generate-new-buffer (format "*clutch-insert: %s*"
+                                           (clutch--table-key-name table)))))
     (with-current-buffer buf
-      (let ((inhibit-read-only t)
-            (inhibit-modification-hooks t))
-        (erase-buffer)
-        (setq-local clutch-result-insert--fields nil))
       (clutch--result-insert-major-mode)
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
+                  clutch--result-resolution-context
+                  (buffer-local-value 'clutch--result-resolution-context result-buf)
                   clutch-result-insert--fields field-state
                   clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
@@ -1995,12 +1990,14 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
 Staging is also refused while a statement runs on its connection, and
 once the connection moved from where the result's query ran."
   (let ((result-buf clutch-result-insert--result-buffer)
-        (source-table clutch-result-insert--table))
+        (source-table clutch-result-insert--table)
+        (context clutch--result-resolution-context))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
-      (unless (equal (clutch--result-source-key) source-table)
-        (user-error "Result table changed; reopen the insert buffer"))
+      (unless (and (equal (clutch--result-source-key) source-table)
+                   (equal clutch--result-resolution-context context))
+        (user-error "Result table or schema changed; switch back or reopen the insert buffer"))
       (clutch--refuse-while-running clutch-connection)
       (clutch-result--refuse-if-moved))))
 

@@ -26,6 +26,8 @@
 
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
+- Opening a cell, insert form, or JSON editor preserves other drafts. An insert form can be staged again after returning to its original table and schema.
+
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
 - Copy as INSERT and staged inserts use the underlying columns on every result page, including when an alias names another column of the table. Editing and deletion also require the row key to come from the key column itself.
