@@ -3194,6 +3194,22 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defconst clutch--insert-placeholder-table "MY_TABLE"
   "Placeholder target table for INSERT copy/export without a known destination.")
 
+(defun clutch-result--distinct-insert-columns (columns table)
+  "Keep the first (NAME . INDEX) in COLUMNS for each source column of TABLE."
+  (let ((spellings (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal)))
+    ;; Only different spellings of a name can need a catalog lookup.
+    (dolist (name (delete-dups (mapcar #'car columns)))
+      (cl-incf (gethash (with-case-table ascii-case-table (downcase name)) spellings 0)))
+    (cl-loop for column in columns
+             for name = (car column)
+             for folded = (with-case-table ascii-case-table (downcase name))
+             for key = (if (> (gethash folded spellings) 1)
+                           (clutch--resolve-source-column-case clutch-connection table name folded)
+                         name)
+             unless (gethash key seen)
+             do (puthash key t seen) and collect column)))
+
 (defun clutch-result--build-insert-statements-for-rows (rows col-indices)
   "Return INSERT statements for ROWS using COL-INDICES.
 Use the query's table and physical columns when all have known origins.
@@ -3206,17 +3222,18 @@ Otherwise use the result labels in an editable SQL template."
                                        (plist-get def :source-column)
                                      (nth i clutch--result-columns))))
          (known (and table (not (memq nil origins))))
-         (col-names (if known origins (clutch--column-names-for-indices col-indices)))
-         (cols (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) col-names ", "))
+         (names (if known origins (clutch--column-names-for-indices col-indices)))
+         (selection (cl-mapcar #'cons names col-indices))
+         (columns (if known (clutch-result--distinct-insert-columns selection table) selection))
+         (cols (mapconcat (lambda (column) (clutch-db-escape-identifier conn (car column)))
+                          columns ", "))
          (target (and rows (if known
                                (clutch-result--insert-target conn table (or clutch--base-query clutch--last-query))
                              (clutch-db-escape-identifier conn clutch--insert-placeholder-table)))))
     (cl-loop for row in rows
-             for vals = (cl-mapcar
-                         (lambda (cidx col-name)
-                           (clutch-result--typed-param-for-column
-                            table col-name (nth cidx row) cidx))
-                         col-indices col-names)
+             for vals = (cl-loop for (name . index) in columns
+                                 collect (clutch-result--typed-param-for-column
+                                          table name (nth index row) index))
              collect (format "INSERT INTO %s (%s) VALUES (%s);"
                              target
                              cols
@@ -3366,7 +3383,7 @@ When OMIT-HEADER is non-nil, omit headers from tabular formats."
                 (if (= (length col-indices) 1) "" "s")))
       ((or 'insert 'update)
        (let ((op (upcase (symbol-name kind))))
-         (message "Copied %s %s statement%s (%s col%s)"
+         (message "Copied %s %s statement%s (%s col%s selected)"
                   (clutch--message-count (length lines))
                   (clutch--message-keyword op)
                   (if (= (length lines) 1) "" "s")

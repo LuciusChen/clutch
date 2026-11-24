@@ -286,6 +286,8 @@ table sits in another schema, or the column is generated."
   "Copy targets the base table only when all selected columns belong to it."
   (pcase-dolist (`(,sql ,target)
                  '(("SELECT id AS k, name AS v FROM people" "people (\"id\", \"name\")")
+                   ("SELECT id AS k, id AS other_k, name AS v, NAME AS other_v FROM people"
+                    "people (\"id\", \"name\")")
                    ("WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"
                     "people (\"id\", \"name\")")
                    ("SELECT id AS k, lower(name) AS v FROM people"

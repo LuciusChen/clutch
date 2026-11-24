@@ -837,12 +837,7 @@ from a separate column."
                               (with-case-table ascii-case-table
                                 (cl-find name keys :test #'string-equal-ignore-case)))))
                (if key
-                   (pcase (clutch-db-identifier-case conn)
-                     ('ascii-insensitive key)
-                     ('nil (or (plist-get (clutch--source-column-detail
-                                           name (clutch--ensure-column-details conn table)) :name)
-                               name))
-                     (_ name))
+                   (clutch--resolve-source-column-case conn table name key)
                  name))
            token))
        projection)

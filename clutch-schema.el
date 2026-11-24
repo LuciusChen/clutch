@@ -365,6 +365,18 @@ Signal ambiguity for a write operation OP."
   "Return cached column details for TABLE on CONN, or nil if not loaded."
   (plist-get (clutch--table-metadata conn table) :column-details))
 
+(defun clutch--resolve-source-column-case (conn table name spelling)
+  "Resolve NAME in TABLE on CONN given an ASCII case variant SPELLING.
+Use SPELLING when the engine ignores ASCII case, or the catalog name
+when the database collation determines which column NAME refers to."
+  (pcase (clutch-db-identifier-case conn)
+    ('ascii-insensitive spelling)
+    ('nil (let ((details (if (clutch-db-live-p conn)
+                             (clutch--ensure-column-details conn table)
+                           (clutch--cached-column-details conn table))))
+            (or (plist-get (clutch--source-column-detail name details) :name) name)))
+    (_ name)))
+
 (defun clutch--column-details-cached-p (conn table)
   "Return non-nil when TABLE has cached column details on CONN."
   (plist-member (clutch--table-metadata conn table) :column-details))
