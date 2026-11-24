@@ -411,21 +411,13 @@ NAME comes from `clutch--sql-alias-name' or is a token already."
 
 (defun clutch--sql-names-alias-p (written alias)
   "Return non-nil when WRITTEN and ALIAS name the same query source.
-Each is a name from `clutch--sql-alias-name' or a token.  Where only case
-decides, as for \"U\" and u, `clutch-db-identifier-case' does: a database
-that folds unquoted names compares the folded names by case, so they
-match on Oracle but not on PostgreSQL, and any other compares them
-regardless of case, as SQLite does.  Match data is preserved, since
-callers run this inside their own searches."
+Each is a name from `clutch--sql-alias-name' or a token.  Apply the
+connection's identifier case rule.  Navigation accepts a possible match
+when the rule is unknown.  Preserve the caller's match data."
   (save-match-data
     (let ((a (clutch--sql-alias-token written))
           (b (clutch--sql-alias-token alias)))
-      (pcase (clutch-db-sql--same-identifier-p a b)
-        ('ambiguous
-         (or (null (clutch-db-identifier-case clutch-connection))
-             (string= (clutch-db-sql-fold-identifier clutch-connection a)
-                      (clutch-db-sql-fold-identifier clutch-connection b))))
-        (same same)))))
+      (and (clutch-db-sql--same-identifier-p a b clutch-connection) t))))
 
 (defun clutch--query-source-named (written sources)
   "Return the (ALIAS . SOURCE) of query SOURCES that WRITTEN names, or nil.

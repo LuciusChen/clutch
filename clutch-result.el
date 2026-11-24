@@ -465,7 +465,7 @@ COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
 describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
 offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
   (let* ((column-defs (clutch--apply-row-identity-column-metadata
-                       columns row-identity-prep clutch-connection))
+                       columns row-identity-prep))
          (row-identity (clutch--finalize-row-identity
                         row-identity-prep column-defs))
          (prep-identity-status (plist-get row-identity-prep :identity-status))
@@ -579,7 +579,7 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
                         (or (plist-get result-context :base-query) sql)))
          (raw-columns (clutch-db-result-columns result))
          (columns (clutch--apply-row-identity-column-metadata
-                   raw-columns row-identity-prep connection))
+                   raw-columns row-identity-prep))
          (visible-columns
           (cl-remove-if (lambda (col) (plist-get col :hidden)) columns))
          (server-rewritable
