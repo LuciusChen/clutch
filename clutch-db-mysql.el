@@ -164,13 +164,17 @@ any other charset means a TEXT column."
         'text)))
 
 (defun clutch-db-mysql--convert-columns (mysql-columns)
-  "Convert MYSQL-COLUMNS to `clutch-db' column plists.
-Each output plist has :name and :type-category."
+  "Convert MYSQL-COLUMNS to result column plists.
+MySQL gives constants no original table, even when a CTE names them.
+Its original column name, however, can be the name exposed by the CTE."
   (mapcar (lambda (col)
-            (list :name (plist-get col :name)
-                  :type-category (clutch-db-mysql--type-category
-                                  (plist-get col :type)
-                                  (plist-get col :character-set))))
+            (let ((column (list :name (plist-get col :name)
+                                :type-category (clutch-db-mysql--type-category
+                                                (plist-get col :type)
+                                                (plist-get col :character-set)))))
+              (if (equal (plist-get col :org-table) "")
+                  (plist-put column :source-column nil)
+                column)))
           mysql-columns))
 
 (defconst clutch-db-mysql--max-warning-messages 100

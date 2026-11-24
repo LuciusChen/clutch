@@ -1860,10 +1860,10 @@ from closing."
         (clutch-test--with-sqlite-result (conn result)
             (list "ATTACH DATABASE ':memory:' AS other"
                   "CREATE TABLE main.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
-                  "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback', label TEXT)"
+                  "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback', label TEXT, \"NULL\" TEXT DEFAULT 'kept')"
                   (format "INSERT INTO other.audit (payload) VALUES (%s)"
                           (if value (format "'%s'" value) "NULL")))
-            "SELECT id, payload AS label FROM other.audit"
+            "SELECT id, payload AS label, NULL AS computed FROM other.audit"
           (let (insert-buf)
             (unwind-protect
                 (progn
@@ -1876,8 +1876,8 @@ from closing."
                   (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                     (clutch-result-submit))
                   (should (equal (clutch-db-result-rows
-                                  (clutch-db-query conn "SELECT payload, label FROM other.audit ORDER BY id"))
-                                 (list (list value nil) (list (if import "replacement" value) nil))))
+                                  (clutch-db-query conn "SELECT payload, label, \"NULL\" FROM other.audit ORDER BY id"))
+                                 (list (list value nil "kept") (list (if import "replacement" value) nil "kept"))))
                   (should-not (clutch-db-result-rows
                                (clutch-db-query conn "SELECT * FROM main.audit"))))
               (when (buffer-live-p insert-buf)

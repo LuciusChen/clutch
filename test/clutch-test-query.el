@@ -188,7 +188,6 @@
                            (lambda (&rest _) t)))
                   (clutch-result-submit))))
       (should (equal clutch--result-source-table "people"))
-      (should (equal (clutch--insert-target-table) "people"))
       (edit-first-name "gamma")
       (should (equal (table-rows)
                      '((1 "gamma" "a") (2 "alpha" "b") (3 "beta" "b"))))
@@ -268,12 +267,23 @@ table sits in another schema, or the column is generated."
                           (clutch-db-query
                            conn (format "SELECT id, name FROM %s ORDER BY id"
                                         table)))
-                         '((1 "edited") (2 "beta")))))))))
+                         '((1 "edited") (2 "beta"))))))))
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE people (id INTEGER PRIMARY KEY, manager_id INTEGER)"
+        "INSERT INTO people VALUES (1,2), (2,NULL)")
+      "SELECT manager_id AS id, 1 /* no injected key */ FROM people WHERE id = 1"
+    (clutch--goto-cell 0 0)
+    (should-error (clutch-result-delete-rows) :type 'user-error)
+    (should-not clutch--pending-deletes)))
 
 (ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
-  "INSERT export should name the table's columns, not the result's aliases."
-  (dolist (sql '("SELECT id AS k, name AS v FROM people"
-                 "WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"))
+  "Copy targets the base table only when all selected columns belong to it."
+  (pcase-dolist (`(,sql ,target)
+                 '(("SELECT id AS k, name AS v FROM people" "people (\"id\", \"name\")")
+                   ("WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"
+                    "people (\"id\", \"name\")")
+                   ("SELECT id AS k, lower(name) AS v FROM people"
+                    "\"MY_TABLE\" (\"k\", \"v\")")))
     (ert-info (sql)
       (clutch-test--with-sqlite-result (conn result)
           '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
@@ -281,7 +291,7 @@ table sits in another schema, or the column is generated."
           sql
         (should (equal (clutch-result--build-insert-statements-for-rows
                         clutch--result-rows (clutch--visible-columns))
-                       '("INSERT INTO people (\"id\", \"name\") VALUES (1, 'alpha');")))))))
+                       (list (format "INSERT INTO %s VALUES (1, 'alpha');" target))))))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."

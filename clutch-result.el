@@ -489,7 +489,7 @@ COLUMNS, ROWS, ELAPSED, and PAGE-NUM describe the page.  ROW-IDENTITY-PREP
 describes hidden row identity columns, PAGE-OFFSET overrides the derived SQL
 offset, and PAGE-HAS-MORE records one-row lookahead.  Return column names."
   (let* ((column-defs (clutch--apply-row-identity-column-metadata
-                       columns row-identity-prep))
+                       columns row-identity-prep clutch-connection))
          (row-identity (clutch--finalize-row-identity
                         row-identity-prep column-defs))
          (prep-identity-status (plist-get row-identity-prep :identity-status))
@@ -601,7 +601,7 @@ SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
          (analysis-sql (clutch-db-sql-normalize sql))
          (raw-columns (clutch-db-result-columns result))
          (columns (clutch--apply-row-identity-column-metadata
-                   raw-columns row-identity-prep))
+                   raw-columns row-identity-prep connection))
          (visible-columns
           (cl-remove-if (lambda (col) (plist-get col :hidden)) columns))
          (server-rewritable
@@ -3226,22 +3226,26 @@ Selects JSON, XML, or binary string view based on column type and content."
 
 ;;;; SQL and document copy builders
 
+(defconst clutch--insert-placeholder-table "MY_TABLE"
+  "Placeholder target table for INSERT copy/export without a known destination.")
+
 (defun clutch-result--build-insert-statements-for-rows (rows col-indices)
   "Return INSERT statements for ROWS using COL-INDICES.
-They name the table as `clutch--insert-target-table' does.  A column
-that reads a source column under another name, such as an alias, is named
-after that source column."
-  (let* ((conn      clutch-connection)
-         (table     (clutch--result-source-key))
-         (col-names (cl-loop for cidx in col-indices
-                             for name in (clutch--column-names-for-indices
-                                          col-indices)
-                             collect (or (plist-get (nth cidx clutch--result-column-defs)
-                                                    :source-column)
-                                         name)))
-         (cols      (mapconcat (lambda (c) (clutch-db-escape-identifier conn c))
-                               col-names ", "))
-         (target    (and rows (clutch--insert-target-table))))
+Use the query's table and physical columns when all have known origins.
+Otherwise use the result labels in an editable SQL template."
+  (let* ((conn clutch-connection)
+         (table (clutch--result-source-key))
+         (origins (cl-loop for i in col-indices
+                           for def = (nth i clutch--result-column-defs)
+                           collect (if (plist-member def :source-column)
+                                       (plist-get def :source-column)
+                                     (nth i clutch--result-columns))))
+         (known (and table (not (memq nil origins))))
+         (col-names (if known origins (clutch--column-names-for-indices col-indices)))
+         (cols (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) col-names ", "))
+         (target (and rows (if known
+                               (clutch-result--insert-target conn table (or clutch--base-query clutch--last-query))
+                             (clutch-db-escape-identifier conn clutch--insert-placeholder-table)))))
     (cl-loop for row in rows
              for vals = (cl-mapcar
                          (lambda (cidx col-name)
@@ -3256,20 +3260,6 @@ after that source column."
                                 (clutch-db-value-to-literal
                                  conn param #'clutch--format-value))
                               vals ", ")))))
-
-(defconst clutch--insert-placeholder-table "MY_TABLE"
-  "Placeholder target table used for ambiguous INSERT copy/export output.")
-
-(defun clutch--insert-target-table ()
-  "Return the table INSERT copy/export names, as a staged INSERT does.
-A result of one table, read directly or through CTEs, has a source
-table, named from the query before any server-side filter.  Ambiguous
-results use `clutch--insert-placeholder-table' instead."
-  (if-let* ((key (clutch--result-source-key)))
-      (clutch-result--insert-target clutch-connection key
-                                    (or clutch--base-query clutch--last-query))
-    (clutch-db-escape-identifier clutch-connection
-                                 clutch--insert-placeholder-table)))
 
 (defun clutch-result--selected-update-col-indices (row-identity col-indices op)
   "Return writable update column indices from ROW-IDENTITY, COL-INDICES, and OP.
