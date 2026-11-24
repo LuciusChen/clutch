@@ -516,7 +516,7 @@ The exact-name match only needs entries under the name's prefix."
       (should-not (string-match-p "PUBLIC.orders" clutch-describe--header-base)))))
 
 (ert-deftest clutch-test-object-views-keep-their-sqlite-connection ()
-  "Describe and DDL for the same name stay with their originating connection."
+  "Views with the same name stay with their originating SQLite connection."
   (skip-unless (sqlite-available-p))
   (let* ((entry '(:name "orders" :schema "main" :type "TABLE"))
          (first (clutch-db-sqlite-connect '(:database ":memory:")))
@@ -524,8 +524,8 @@ The exact-name match only needs entries under the name's prefix."
          buffers)
     (unwind-protect
         (save-window-excursion
-          (clutch-db-query first "CREATE TABLE orders (dev_only TEXT)")
-          (clutch-db-query second "CREATE TABLE orders (test_only TEXT)")
+          (clutch-db-query first "CREATE TABLE orders (dev_only TEXT PRIMARY KEY)")
+          (clutch-db-query second "CREATE TABLE orders (test_only TEXT PRIMARY KEY)")
           (clutch-db-query first "ATTACH ':memory:' AS aux")
           (clutch-db-query first "CREATE TABLE aux.orders (attached_only TEXT)")
           (dolist (sql '("SELECT * FROM aux.orders"
@@ -550,12 +550,20 @@ The exact-name match only needs entries under the name's prefix."
             (call-interactively #'clutch-describe-refresh)
             (should (string-search "aux.orders" (buffer-string)))
             (should (string-search "Columns (0)" (buffer-string))))
-          (dolist (command '(clutch-object-describe clutch-object-show-ddl-or-source))
-            (ert-info ((symbol-name command))
+          (clutch-db-query first "INSERT INTO orders VALUES ('dev_only')")
+          (clutch-db-query second "INSERT INTO orders VALUES ('test_only')")
+          (dolist (command (list #'clutch-object-describe #'clutch-object-show-ddl-or-source
+                                 #'clutch-er-diagram
+                                 (lambda (_entry)
+                                   (insert "SELECT * FROM orders")
+                                   (clutch-execute-buffer)
+                                   clutch--last-result-buffer)))
+            (ert-info ((if (symbolp command) (symbol-name command) "SELECT"))
               (let ((views
                      (mapcar
                       (lambda (conn)
                         (with-temp-buffer
+                          (clutch-mode)
                           (setq-local clutch-connection conn
                                       clutch--connection-params
                                       '(:backend sqlite :database ":memory:"))
