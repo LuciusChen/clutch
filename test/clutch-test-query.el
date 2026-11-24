@@ -188,7 +188,6 @@
                            (lambda (&rest _) t)))
                   (clutch-result-submit))))
       (should (equal clutch--result-source-table "people"))
-      (should (equal (clutch--insert-target-table) "people"))
       (edit-first-name "gamma")
       (should (equal (table-rows)
                      '((1 "gamma" "a") (2 "alpha" "b") (3 "beta" "b"))))
@@ -234,7 +233,7 @@ table sits in another schema, or the column is generated."
            '(("query alias"
               ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
                "INSERT INTO people VALUES (1, 'alpha'), (2, 'beta')")
-              "WITH c AS (SELECT name, 2 AS clutch__rid_0 FROM people WHERE id = 1) SELECT name FROM c"
+              "WITH c AS (SELECT \"P\".name, 2 AS clutch__rid_0 FROM people p WHERE id = 1) SELECT name FROM c"
               "people")
              ("table column"
               ("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, clutch__rid_0 INTEGER)"
@@ -268,12 +267,29 @@ table sits in another schema, or the column is generated."
                           (clutch-db-query
                            conn (format "SELECT id, name FROM %s ORDER BY id"
                                         table)))
-                         '((1 "edited") (2 "beta")))))))))
+                         '((1 "edited") (2 "beta"))))))))
+  (dolist (source '("ID" "manager_id"))
+    (clutch-test--with-sqlite-result (conn result)
+        '("CREATE TABLE people (id INTEGER PRIMARY KEY, manager_id INTEGER)"
+          "INSERT INTO people VALUES (1,2), (2,NULL)")
+        (format "SELECT %s AS id, 1 /* no injected key */ FROM people WHERE id = 1" source)
+      (clutch--goto-cell 0 0)
+      (if (equal source "manager_id")
+          (progn (should-error (clutch-result-delete-rows) :type 'user-error)
+                 (should-not clutch--pending-deletes))
+        (clutch-result-delete-rows)
+        (cl-letf (((symbol-function 'yes-or-no-p) #'always)) (clutch-result-submit))
+        (should (equal (clutch-db-result-rows (clutch-db-query conn "SELECT id FROM people"))
+                       '((2))))))))
 
 (ert-deftest clutch-test-insert-export-names-source-columns-real-sqlite ()
-  "INSERT export should name the table's columns, not the result's aliases."
-  (dolist (sql '("SELECT id AS k, name AS v FROM people"
-                 "WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"))
+  "Copy targets the base table only when all selected columns belong to it."
+  (pcase-dolist (`(,sql ,target)
+                 '(("SELECT id AS k, name AS v FROM people" "people (\"id\", \"name\")")
+                   ("WITH c (k, v) AS (SELECT id, name FROM people) SELECT * FROM c"
+                    "people (\"id\", \"name\")")
+                   ("SELECT id AS k, lower(name) AS v FROM people"
+                    "\"MY_TABLE\" (\"k\", \"v\")")))
     (ert-info (sql)
       (clutch-test--with-sqlite-result (conn result)
           '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)"
@@ -281,7 +297,19 @@ table sits in another schema, or the column is generated."
           sql
         (should (equal (clutch-result--build-insert-statements-for-rows
                         clutch--result-rows (clutch--visible-columns))
-                       '("INSERT INTO people (\"id\", \"name\") VALUES (1, 'alpha');")))))))
+                       (list (format "INSERT INTO %s VALUES (1, 'alpha');" target)))))))
+  (let ((clutch-result-max-rows 1))
+    (clutch-test--with-sqlite-result (conn result)
+        '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, label TEXT)"
+          "INSERT INTO people VALUES (1, 'alpha', 'one'), (2, 'beta', 'two')")
+        "SELECT name AS label, upper(name) AS calculated /* display */ FROM people ORDER BY id"
+      (clutch-result-next-page)
+      (clutch--goto-cell 0 0)
+      (clutch-result-copy 'insert)
+      (clutch-db-query conn (current-kill 0))
+      (should (equal (clutch-db-result-rows
+                      (clutch-db-query conn "SELECT name, label FROM people WHERE id = 3"))
+                     '(("beta" nil)))))))
 
 (ert-deftest clutch-test-column-sizing-bounds-long-value-work ()
   "Column sizing should stop measuring once the display cap is reached."

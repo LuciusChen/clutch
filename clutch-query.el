@@ -442,36 +442,57 @@ drawn at random for the session, which makes such a match very unlikely.")
         (nreverse
          (cons (string-trim (substring sql start from-pos)) items))))))
 
-(defun clutch--direct-projection-source-column (projection)
-  "Return source column for direct identifier PROJECTION, or nil.
-An explicit AS alias is accepted because the source identifier remains
-unambiguous.  Expressions and implicit aliases intentionally fail closed."
+(defun clutch--direct-projection-source-column (conn item qualifiers)
+  "Return ITEM's source token on CONN, `star', or nil for an expression.
+QUALIFIERS hold the identifier parts of each exposed relation name.
+Keep quoting until CONN resolves the base column, including through aliases."
   (let* ((ident clutch--source-column-identifier-pattern)
-         (qualified (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
-         (case-fold-search t)
-         source)
-    (when (or (string-match (concat "\\`\\(" qualified "\\)\\s-*\\'")
-                            projection)
-              (string-match (concat "\\`\\(" qualified
-                                    "\\)\\s-+AS\\s-+" ident "\\s-*\\'")
-                            projection))
-      (setq source (match-string 1 projection))
-      (when (string-match (concat "\\(" ident "\\)\\s-*\\'") source)
-        (clutch-db-sql--unquote-identifier (match-string 1 source))))))
+         (path (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
+         (case-fold-search t))
+    (when (string-match (concat "\\`\\(?:\\(" path "\\)\\s-*\\.\\s-*\\)?"
+                                "\\(" ident "\\|\\*\\)\\(?:\\s-+AS\\s-+" ident "\\)?\\'")
+                        item)
+      (let* ((token (match-string 2 item))
+             (qualifier (match-string 1 item))
+             (parts (and qualifier (clutch-db-sql--table-raw-parts qualifier))))
+        (when (or (null qualifier)
+                  (and parts
+                       (cl-loop for name in qualifiers
+                                thereis (null (cl-mismatch
+                                               parts name :test
+                                               (lambda (a b)
+                                                 (eq t (clutch-db-sql--same-identifier-p a b conn))))))))
+          (cond
+           ((equal token "*") 'star)
+           ;; SQL value expressions need neither parentheses nor a FROM column.
+           ((or qualifier
+                (not (member (upcase token)
+                             '("NULL" "TRUE" "FALSE" "UNKNOWN" "CURRENT_DATE"
+                               "CURRENT_TIME" "CURRENT_TIMESTAMP" "LOCALTIME"
+                               "LOCALTIMESTAMP" "CURRENT_USER" "SESSION_USER"
+                               "SYSTEM_USER" "CURRENT_ROLE" "CURRENT_SCHEMA"
+                               "CURRENT_CATALOG"))))
+            token)))))))
 
-(defun clutch--writable-select-projection (sql)
-  "Describe columns in SQL that are provably direct source projections.
-Return `star' for a sole * or qualified .* projection.  Otherwise return one
-source column name or nil per SELECT item.  Return `none' when the outer SELECT
-list cannot be established."
+(defun clutch--writable-select-projection (conn sql &optional base-table)
+  "Describe the direct source columns in SQL on CONN.
+Return `star' for the table's star or one source token or nil per item.
+A single BASE-TABLE star can also be expanded among direct columns."
   (if-let* ((items (clutch--select-list-items sql)))
-      (let* ((ident clutch--source-column-identifier-pattern)
-             (qualified (concat ident "\\(?:\\s-*\\.\\s-*" ident "\\)*"))
-             (star-pattern (concat "\\`\\(?:" qualified "\\s-*\\.\\s-*\\)?\\*\\s-*\\'")))
-        (if (and (= (length items) 1)
-                 (string-match-p star-pattern (car items)))
-            'star
-          (mapcar #'clutch--direct-projection-source-column items)))
+      (let* ((qualifiers (when (cl-some (lambda (item) (string-search "." item)) items)
+                           (mapcar #'clutch-db-sql--table-raw-parts
+                                   (clutch--row-identity-source-qualifiers
+                                    sql (clutch-db-sql-find-top-level-clause sql "FROM")))))
+             (sources (mapcar (lambda (item)
+                                (clutch--direct-projection-source-column conn item qualifiers))
+                              items)))
+        (cond
+         ((equal sources '(star)) 'star)
+         ((not (memq 'star sources)) sources)
+         ((and base-table (= (cl-count 'star sources) 1) (not (memq nil sources))
+               (clutch-db-sql-source-table sql t))
+          sources)
+         (t 'none)))
     'none))
 
 (defun clutch--row-identity-key-expressions (conn candidate)
@@ -597,7 +618,7 @@ list cannot be established."
        (let ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
          (or (not (and from-pos
                        (clutch--row-identity-bare-star-select-p sql from-pos)))
-             (and (clutch--row-identity-star-qualifier sql from-pos) t)))))
+             (and (clutch--row-identity-source-qualifiers sql from-pos) t)))))
 
 (defun clutch--row-identity-bare-star-select-p (sql from-pos)
   "Return non-nil when SQL's select list before FROM-POS is a sole *."
@@ -614,20 +635,13 @@ that only looks like a comment counts too, which merely skips the rewrite."
   (when-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
     (string-match-p "--\\|/\\*" (substring sql 0 from-pos))))
 
-(defun clutch--row-identity-star-qualifier (sql from-pos)
-  "Return TABLE.* qualifier for simple SELECT * SQL before FROM-POS, or nil.
-Nil also means the FROM body did not yield a usable qualifier; callers must
-not augment a bare * in that case."
-  (when (clutch--row-identity-bare-star-select-p sql from-pos)
-    (pcase-let* ((`(,body-start ,body-end)
-                  (clutch-db-sql-from-body-range sql from-pos))
-                 (body (substring sql body-start body-end))
-                 (parts (clutch-db-sql-from-body-parts body)))
-      (when parts
-        (when-let* ((qualifier (or (cadr parts)
-                                   (clutch-db-sql-table-qualifier
-                                    (car parts)))))
-          (format "%s.*" qualifier))))))
+(defun clutch--row-identity-source-qualifiers (sql from-pos)
+  "Return the exposed names of the single FROM relation in SQL at FROM-POS."
+  (pcase-let* ((`(,start ,end) (clutch-db-sql-from-body-range sql from-pos))
+               (parts (clutch-db-sql-from-body-parts (substring sql start end))))
+    (when parts
+      (if (cadr parts) (list (cadr parts))
+        (list (clutch-db-sql-table-qualifier (car parts)) (car parts))))))
 
 (defun clutch--row-identity-inject-select-list (conn sql expressions aliases)
   "Return SQL with hidden identity EXPRESSIONS inserted using ALIASES.
@@ -635,10 +649,11 @@ CONN supplies identifier escaping for the hidden aliases."
   (let ((sql (clutch-db-sql-trim-end sql)))
     (if-let* ((from-pos (clutch-db-sql-find-top-level-clause sql "FROM")))
       (let* ((star-qualifier
-              (clutch--row-identity-star-qualifier sql from-pos))
+              (and (clutch--row-identity-bare-star-select-p sql from-pos)
+                   (car (clutch--row-identity-source-qualifiers sql from-pos))))
              (select-head
               (if star-qualifier
-                  (format "SELECT %s" star-qualifier)
+                  (format "SELECT %s.*" star-qualifier)
                 (string-trim-right (substring sql 0 from-pos))))
              (hidden (mapconcat
                       #'identity
@@ -665,8 +680,8 @@ expression without an alias fails closed."
                             item))
       (match-string 1 item))))
 
-(defun clutch--cte-writable-projection (sql levels)
-  "Return the writable projection of CTE query SQL read through LEVELS.
+(defun clutch--cte-writable-projection (conn sql levels)
+  "Return the writable projection of CTE query SQL read through LEVELS on CONN.
 LEVELS run from the main statement inward, as `clutch-db-sql-source-chain'
 returns them.  Like `clutch--writable-select-projection', the value is
 `star' when every result column keeps its base table column's name, or one
@@ -683,7 +698,7 @@ base column name or nil per result column."
                                           for index from 0
                                           for same = (and label
                                                           (clutch-db-sql--same-identifier-p
-                                                           label name))
+                                                           label name conn))
                                           when (eq same 'ambiguous) return nil
                                           when same collect index)))
              (cond
@@ -713,7 +728,7 @@ base column name or nil per result column."
            (mapcar
             (lambda (level)
               (let* ((text (substring sql (nth 0 level) (nth 1 level)))
-                     (sources (clutch--writable-select-projection text))
+                     (sources (clutch--writable-select-projection conn text))
                      (column-list (plist-get (nth 2 level) :columns)))
                 (list sources
                       (or column-list
@@ -749,8 +764,8 @@ not count; a column of the same name does."
           (setq pos end))))
     count))
 
-(defun clutch--row-identity-cte-chain (sql)
-  "Return the source chain of CTE query SQL, or nil if it cannot be edited.
+(defun clutch--row-identity-cte-chain (conn sql)
+  "Return the source chain of CTE query SQL on CONN, or nil if it cannot be edited.
 The value is the plist from `clutch-db-sql-source-chain' with :projection
 added.  Every SELECT on the way must be one that row identity can pass
 through: one relation, no aggregate, DISTINCT, GROUP BY or HAVING, no
@@ -775,7 +790,7 @@ identity columns would change too."
                                 2)))))
                 (plist-get chain :levels))))
     (plist-put chain :projection
-               (clutch--cte-writable-projection sql (plist-get chain :levels)))))
+               (clutch--cte-writable-projection conn sql (plist-get chain :levels)))))
 
 (defun clutch--row-identity-inject-cte (conn sql levels expressions aliases)
   "Return CTE query SQL with identity EXPRESSIONS carried out through LEVELS.
@@ -791,7 +806,7 @@ as its last columns."
              for (start end definition) = level
              for text = (substring sql start end)
              do (unless (and rest
-                             (eq (clutch--writable-select-projection text)
+                             (eq (clutch--writable-select-projection conn text)
                                  'star))
                   (push (list start end
                               (clutch--row-identity-inject-select-list
@@ -808,12 +823,36 @@ as its last columns."
                         (nth 2 edit)
                         (substring sql (nth 1 edit)))))))
 
-(defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
+(defun clutch--projection-source-names (conn projection table keys)
+  "Resolve PROJECTION's source names on CONN when preparing the query.
+For a possible match in KEYS on a database with no fixed case rule,
+use TABLE's column metadata to distinguish another spelling of the key
+from a separate column."
+  (if (consp projection)
+      (mapcar
+       (lambda (token)
+         (if (stringp token)
+             (let* ((name (clutch-db-sql-fold-identifier conn token))
+                    (key (and (not (member name keys))
+                              (with-case-table ascii-case-table
+                                (cl-find name keys :test #'string-equal-ignore-case)))))
+               (if key
+                   (pcase (clutch-db-identifier-case conn)
+                     ('ascii-insensitive key)
+                     ('nil (or (plist-get (clutch--source-column-detail
+                                           name (clutch--ensure-column-details conn table)) :name)
+                               name))
+                     (_ name))
+                 name))
+           token))
+       projection)
+    projection))
+
+(defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
 The returned plist contains :sql, :table, :candidate, :hidden-aliases,
 :augmented, and :identity-status.  If no identity candidate is available, :sql
 is the original SQL.
-CANDIDATE and TABLE reuse row identity already established by a result buffer.
 A query that starts with a WITH clause reads its table as
 `clutch--row-identity-cte-chain' finds it, and :cte is then non-nil.  When
 that finds none, the query has no table, so a CTE's name is never looked up
@@ -822,26 +861,17 @@ as one.  A query of its table as of another time, as found by
 key would change the current row instead of the one shown."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
-         (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
-         (source-token (or (plist-get candidate :source-token)
-                           (and (not table)
-                                (if with-p
-                                    (plist-get chain :token)
-                                  (clutch-db-sql--source-table-token
-                                   analysis-sql)))))
-         (table (or table
-                    (and source-token
-                         (clutch-db--source-table-name conn source-token))))
+         (chain (and with-p (clutch--row-identity-cte-chain conn analysis-sql)))
+         (source-token (if with-p (plist-get chain :token)
+                         (clutch-db-sql--source-table-token analysis-sql)))
+         (table (and source-token (clutch-db--source-table-name conn source-token)))
          (source-schema (and source-token
                              (clutch-db--source-table-schema conn source-token)))
          (source-catalog (and source-token
                               (clutch-db--source-table-catalog conn source-token)))
          candidates
          identity-error)
-    (cond
-     (candidate
-      (setq candidates (list candidate)))
-     ((and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
+    (when (and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
       (let* ((start (float-time))
              (cached (clutch--cached-row-identity
                       conn table source-schema source-catalog)))
@@ -869,7 +899,7 @@ key would change the current row instead of the one shown."
                      (clutch-db--error-message identity-error))
            (format "Resolved %s"
                    (or (plist-get (car candidates) :name) "no candidate")))
-         (- (float-time) start)))))
+         (- (float-time) start))))
     (let* ((candidate (car candidates))
            (expressions (and candidate
                              (clutch--row-identity-select-expressions
@@ -906,9 +936,11 @@ key would change the current row instead of the one shown."
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
             :writable-projection
-            (if chain
-                (plist-get chain :projection)
-              (clutch--writable-select-projection analysis-sql))
+            (clutch--projection-source-names
+             conn (if chain (plist-get chain :projection)
+                    (clutch--writable-select-projection conn analysis-sql table))
+             (clutch--table-key table source-schema source-catalog)
+             (plist-get candidate :columns))
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -920,14 +952,12 @@ key would change the current row instead of the one shown."
             :identity-error identity-error))))
 
 (defun clutch--row-identity-column-indices (columns names)
-  "Return column indices in COLUMNS for NAMES, or nil if any is absent."
-  (let ((col-names (clutch-db-result-column-names columns))
-        indices)
-    (catch 'missing
-      (dolist (name names (nreverse indices))
-        (if-let* ((idx (cl-position name col-names :test #'string=)))
-            (push idx indices)
-          (throw 'missing nil))))))
+  "Return positions of the physical key columns NAMES in COLUMNS."
+  (let ((origins (mapcar (lambda (column) (plist-get column :source-column)) columns)))
+    (cl-loop for name in names
+             for index = (cl-position name origins :test #'equal)
+             unless index return nil
+             collect index)))
 
 (defun clutch--row-identity-hidden-indices (columns aliases)
   "Return verified trailing indices for hidden ALIASES in COLUMNS.
@@ -947,14 +977,8 @@ same-named projection with Clutch's hidden values."
   "Return finalized row identity metadata for PREP and result COLUMNS."
   (when-let* ((candidate (plist-get prep :candidate)))
     (let* ((aliases (plist-get prep :hidden-aliases))
-           (indices (if aliases
-                        (clutch--row-identity-hidden-indices columns aliases)
-                      (clutch--row-identity-column-indices
-                       columns (plist-get candidate :columns))))
-           (source-indices
-            (and (eq (plist-get candidate :kind) 'primary-key)
-                 (clutch--row-identity-column-indices
-                  columns (plist-get candidate :columns)))))
+           (visible (clutch--row-identity-column-indices columns (plist-get candidate :columns)))
+           (indices (if aliases (clutch--row-identity-hidden-indices columns aliases) visible)))
       (when indices
         (append
          (list :table (plist-get prep :table)
@@ -962,25 +986,33 @@ same-named projection with Clutch's hidden values."
                :source-schema (plist-get prep :source-schema)
                :source-catalog (plist-get prep :source-catalog)
                :indices indices
-               :source-indices source-indices
+               :source-indices (and (eq (plist-get candidate :kind) 'primary-key) visible)
                :hidden-aliases aliases)
          candidate)))))
 
 (defun clutch--apply-row-identity-column-metadata (columns prep)
-  "Return COLUMNS with identity and writable projection metadata from PREP."
+  "Mark hidden keys and writable origins on COLUMNS from PREP."
   (let* ((aliases (plist-get prep :hidden-aliases))
          (hidden-indices (and aliases
                               (clutch--row-identity-hidden-indices
                                columns aliases)))
          (projection-present-p (plist-member prep :writable-projection))
-         (projection (plist-get prep :writable-projection))
+         (items (plist-get prep :writable-projection))
          (visible-count (- (length columns) (length hidden-indices)))
+         (wildcard (and (consp items) (memq 'star items)))
+         (projection (if (and wildcard (<= (length items) visible-count))
+                         (append (butlast items (length wildcard))
+                                 (make-list (1+ (- visible-count (length items))) 'star)
+                                 (cdr wildcard))
+                       items))
          (projection-aligned-p
           (or (eq projection 'star)
               (and (listp projection)
                    (= (length projection) visible-count)))))
     (cl-loop for column in columns
              for idx from 0
+             for sources = projection then (cdr-safe sources)
+             for source = (if (eq projection 'star) 'star (car-safe sources))
              for copy = (copy-sequence column)
              for hidden-p = (memq idx hidden-indices)
              do (when hidden-p
@@ -991,9 +1023,11 @@ same-named projection with Clutch's hidden values."
                        copy :source-column
                        (and (not hidden-p)
                             projection-aligned-p
-                            (if (eq projection 'star)
-                                (plist-get copy :name)
-                              (nth idx projection)))))
+                            source
+                            (cond
+                             ((plist-member column :source-column) (plist-get column :source-column))
+                             ((eq source 'star) (plist-get column :name))
+                             (t source)))))
              collect copy)))
 
 ;;;; SQL pagination helpers
@@ -1232,13 +1266,20 @@ and signal `clutch-query-interrupted'."
                         (and prepare-result-p
                              (append result-context
                                      (clutch-db-query-result-context connection sql))))
+                       (base (or (plist-get result-context :base-query) sql))
+                       (filter (plist-get result-context :where-filter))
                        (row-identity-prep
                         (and prepare-result-p
                              (or (plist-get result-context :row-identity-prep)
-                                 (and (clutch-db-sql-pageable-query-p sql)
+                                 (and (clutch-db-sql-pageable-query-p base)
                                       (clutch--prepare-row-identity-query
-                                       connection sql)))))
-                       (identity-sql (or (plist-get row-identity-prep :sql) sql))
+                                       connection base)))))
+                       (prepared-sql (plist-get row-identity-prep :sql))
+                       (identity-sql (cond ((and filter prepared-sql)
+                                            (clutch-db-apply-where
+                                             connection prepared-sql filter))
+                                           (prepared-sql)
+                                           (t sql)))
                        (server-pageable
                         (and prepare-result-p
                              (if (plist-member result-context :server-pageable)

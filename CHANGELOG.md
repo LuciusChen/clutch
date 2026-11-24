@@ -28,6 +28,8 @@
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
+- Copy as INSERT and staged inserts use the underlying columns on every result page, including when an alias names another column of the table. Editing and deletion also require the row key to come from the key column itself.
+
 - Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.

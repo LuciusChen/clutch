@@ -452,10 +452,10 @@ Text cells containing JSON objects should still use the JSON editor."
         (setq-local clutch-connection conn
                     clutch--result-columns '("id" "name" "created_at" "notes")
                     clutch--result-source-table "users"
-                    clutch--result-column-defs '((:name "id" :type-category numeric)
-                                                 (:name "name" :type-category text)
-                                                 (:name "created_at" :type-category datetime)
-                                                 (:name "notes" :type-category text))
+                    clutch--result-column-defs '((:source-column "id" :type-category numeric)
+                                                 (:source-column "name" :type-category text)
+                                                 (:source-column "created_at" :type-category datetime)
+                                                 (:source-column "notes" :type-category text))
                     clutch--pending-inserts '((("name" . "alice"))))
         (clutch--set-table-metadata
          conn (clutch--result-source-key) :column-details
@@ -490,7 +490,7 @@ Text cells containing JSON objects should still use the JSON editor."
                   clutch--result-source-table "users"
                   clutch--pending-inserts nil)
       (should-not (plist-get (clutch--build-render-state)
-                             :insert-placeholders)))))
+                             :insert-columns)))))
 
 (ert-deftest clutch-test-pending-insert-placeholders-queue-metadata-and-render-empty ()
   "Staged insert rendering should keep column shape while metadata loads."
@@ -501,18 +501,16 @@ Text cells containing JSON objects should still use the JSON editor."
       (with-temp-buffer
         (setq-local clutch-connection conn
                     clutch--result-columns '("id" "name")
+                    clutch--result-column-defs '((:source-column "id") (:source-column "name"))
                     clutch--result-source-table "users"
                     clutch--pending-inserts '((("name" . "alice"))))
         (let ((render-state (clutch--build-render-state)))
-          (should (equal (plist-get render-state :insert-placeholders)
-                         '(nil nil)))
           (should (equal (clutch--pending-insert-render-rows render-state)
                          '((nil "alice"))))
           ;; The render asked for the metadata, and the next one has it.
           (should (clutch--cached-column-details conn (clutch--result-source-key)))
-          (should (equal (plist-get (clutch--build-render-state)
-                                    :insert-placeholders)
-                         (list clutch--cell-generated-placeholder nil))))))))
+          (should (equal (clutch--pending-insert-render-rows (clutch--build-render-state))
+                         (list (list clutch--cell-generated-placeholder "alice")))))))))
 
 (ert-deftest clutch-test-insert-fill-current-time-respects-column-type ()
   "The insert buffer time-filling helper should use result column metadata."
@@ -1853,29 +1851,29 @@ from closing."
 (ert-deftest clutch-test-clone-preserves-qualified-relation-and-values ()
   "Clone/import/stage/execute preserves the source schema and submitted values."
   (dolist (value '("NULL" "null" "" nil))
-    (dolist (import '(nil "payload\nreplacement\n"))
+    (dolist (import '(nil "label\nreplacement\n"))
       (ert-info ((format "value %S, import %S" value import))
         (clutch-test--with-sqlite-result (conn result)
             (list "ATTACH DATABASE ':memory:' AS other"
                   "CREATE TABLE main.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
-                  "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback')"
+                  "CREATE TABLE other.audit (id INTEGER PRIMARY KEY, payload TEXT DEFAULT 'fallback', label TEXT, \"NULL\" TEXT DEFAULT 'kept')"
                   (format "INSERT INTO other.audit (payload) VALUES (%s)"
                           (if value (format "'%s'" value) "NULL")))
-            "SELECT * FROM other.audit"
+            "SELECT id, payload AS label, NULL AS computed FROM other.audit"
           (let (insert-buf)
             (unwind-protect
                 (progn
                   (clutch--goto-cell 0 0)
                   (clutch-clone-row-to-insert)
-                  (setq insert-buf (get-buffer "*clutch-insert: audit*"))
+                  (setq insert-buf (current-buffer))
                   (with-current-buffer insert-buf
                     (when import (clutch-result-insert-import-delimited import))
                     (clutch-result-insert-stage))
                   (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                     (clutch-result-submit))
                   (should (equal (clutch-db-result-rows
-                                  (clutch-db-query conn "SELECT payload FROM other.audit ORDER BY id"))
-                                 (list (list value) (list (if import "replacement" value)))))
+                                  (clutch-db-query conn "SELECT payload, label, \"NULL\" FROM other.audit ORDER BY id"))
+                                 (list (list value nil "kept") (list (if import "replacement" value) nil "kept"))))
                   (should-not (clutch-db-result-rows
                                (clutch-db-query conn "SELECT * FROM main.audit"))))
               (when (buffer-live-p insert-buf)
@@ -2051,14 +2049,14 @@ alias, quoted, qualified or through a CTE."
                                                              (:name "name" :type "text"))))
         (clutch--result-columns '("id" "generated_body" "name"))
         (clutch--result-column-defs
-         '((:name "id") (:name "generated_body") (:name "name")))
+         '((:source-column "id") (:source-column "generated_body") (:source-column "name")))
         (clutch--row-identity
          (clutch-test--primary-row-identity "audit" '("id") '(0))))
-    (should (equal (clutch-result-insert--clone-fields-from-row-values
-                    "audit" (list 1 (make-clutch-db-value-preview
-                                     :type 'clob :length 1000 :text "preview")
-                                  "kept"))
-                   '(("name" . "kept"))))))
+    (let ((clutch--result-rows
+           (list (list 1 (make-clutch-db-value-preview :type 'clob :length 1000) "kept"))))
+      (should (equal (mapcar (lambda (field) (plist-get field :value))
+                             (clutch-result-insert--form-fields "audit" nil 0))
+                     '("" "" "kept"))))))
 
 (provide 'clutch-test-edit)
 
