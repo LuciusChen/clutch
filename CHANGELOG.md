@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- SQLite row edits use an available physical rowid even when a table declares a column named `rowid`.
+
 - Column completion and alias navigation recognize grouped single tables, quoted table names with spaces, and SQLite UPDATE conflict clauses.
 
 - Independent connections with the same label keep separate result buffers and ER diagrams.

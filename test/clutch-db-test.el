@@ -2080,15 +2080,29 @@ Filtering the category listing ran a schema-wide query per describe."
                (make-clutch-jdbc-conn :params '(:driver generic)))))
 
 (ert-deftest clutch-db-test-sqlite-rowid-identity-in-memory ()
-  "SQLite rowid tables should expose `rowid' as a row locator."
+  "Only an unshadowed rowid of the table SQLite resolves can identify a row."
   (skip-unless (sqlite-available-p))
   (clutch-db-test--with-temp-sqlite conn "clutch-sqlite-rowid-"
-    (clutch-db-query conn "CREATE TABLE demo (name TEXT)")
-    (let ((candidate (car (clutch-db-row-identity-candidates conn "demo"))))
-      (should (equal (plist-get candidate :kind) 'row-locator))
-      (should (equal (plist-get candidate :name) "rowid"))
-      (should (equal (plist-get candidate :select-expressions) '("rowid")))
-      (should (equal (plist-get candidate :where-sql) "rowid = ?")))))
+    (dolist (case '(("" . "rowid")
+                    (", RoWiD TEXT" . "_rowid_")
+                    (", ROWID TEXT, _rowid_ AS (0)" . "oid")
+                    (", ROWID TEXT, _rowid_ AS (0), oid INT" . nil)))
+      (clutch-db-query conn (format "CREATE TABLE demo (name TEXT DEFAULT 'WITHOUT ROWID'%s)" (car case)))
+      (clutch-db-query conn "INSERT INTO demo(name) VALUES ('one'), ('two')")
+      (let ((candidate (car (clutch-db-row-identity-candidates conn "demo"))))
+        (if (cdr case)
+            (progn
+              (should (equal (plist-get candidate :select-expressions) (list (cdr case))))
+              (should (equal (sqlite-select
+                              (clutch-db-sqlite-conn-handle conn)
+                              (concat "SELECT name FROM demo WHERE " (plist-get candidate :where-sql))
+                              [2])
+                             '(("two")))))
+          (should-not candidate)))
+      (clutch-db-query conn "DROP TABLE demo"))
+    (clutch-db-query conn "CREATE TABLE source (name TEXT)")
+    (clutch-db-query conn "CREATE TEMP VIEW source AS SELECT name FROM main.source")
+    (should-not (clutch-db-row-identity-candidates conn "source"))))
 
 (ert-deftest clutch-db-test-sqlite-foreign-keys-async ()
   "SQLite foreign-key metadata should remain available through async dispatch."

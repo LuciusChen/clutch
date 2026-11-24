@@ -252,33 +252,34 @@ SQLite metadata needs no network wait, so retain synchronous completion."
   t)
 
 (defun clutch-db-sqlite--table-record (conn table schema)
-  "Return (NAME SQL TYPE) for a table or view named TABLE in SCHEMA on CONN."
-  (clutch-db--translate-library-error sqlite-error
-    (car (sqlite-select
-          (clutch-db-sqlite-conn-handle conn)
-          (format "SELECT name, sql, type FROM %ssqlite_master WHERE type IN ('table','view') AND name = ? COLLATE NOCASE"
-                  (clutch-db-sqlite--schema-prefix schema))
-          (vector table)))))
+  "Return (DB NAME SQL TYPE) for TABLE on CONN.
+When SCHEMA is nil, resolve the name as SQLite would."
+  (let ((schemas
+         (if schema
+             (list (if (string-equal-ignore-case schema "main") "main" schema))
+           ;; Bare names resolve in temp, main, then attachment order.
+           (let ((dbs (clutch-db-result-rows (clutch-db-query conn "PRAGMA database_list"))))
+             (cons "temp" (remove "temp" (mapcar #'cadr dbs)))))))
+    (cl-loop for db in schemas
+             for row = (clutch-db--translate-library-error sqlite-error
+                         (car (sqlite-select
+                               (clutch-db-sqlite-conn-handle conn)
+                               (format "SELECT name, sql, type FROM %ssqlite_master WHERE type IN ('table','view') AND name = ? COLLATE NOCASE"
+                                       (clutch-db-sqlite--schema-prefix db))
+                               (vector table))))
+             when row return (cons db row))))
 
 (cl-defmethod clutch-db-find-table-entry ((conn clutch-db-sqlite-conn) token)
   "Look up the possibly qualified table TOKEN on CONN."
-  (let* ((schema (clutch-db-sql-table-schema token))
-         (name (clutch-db-sql-table-name token))
-         (schemas
-          (if schema
-              (list (if (string-equal-ignore-case schema "main") "main" schema))
-            ;; Bare names resolve in temp, main, then attachment order.
-            (let ((dbs (clutch-db-result-rows (clutch-db-query conn "PRAGMA database_list"))))
-              (cons "temp" (remove "temp" (mapcar #'cadr dbs)))))))
-    (cl-loop for db in schemas
-             for row = (clutch-db-sqlite--table-record conn name db)
-             when row return (list :name (car row) :schema db :type (upcase (nth 2 row))))))
+  (pcase (clutch-db-sqlite--table-record conn (clutch-db-sql-table-name token)
+                                          (clutch-db-sql-table-schema token))
+    (`(,db ,name ,_ ,type) (list :name name :schema db :type (upcase type)))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-db-sqlite-conn) entry)
   "Return definition text for SQLite object ENTRY on CONN."
   (when (member (upcase (or (plist-get entry :type) "")) '("TABLE" "VIEW"))
-    (cadr (clutch-db-sqlite--table-record
-           conn (plist-get entry :name) (plist-get entry :schema)))))
+    (nth 2 (clutch-db-sqlite--table-record
+            conn (plist-get entry :name) (plist-get entry :schema)))))
 
 (cl-defmethod clutch-db-table-comment ((_conn clutch-db-sqlite-conn) _table
                                        &optional _schema)
@@ -329,11 +330,16 @@ SQLite metadata needs no network wait, so retain synchronous completion."
 
 (defun clutch-db-sqlite--rowid-identity (conn table schema)
   "Return a rowid row locator candidate for TABLE in SCHEMA on CONN, or nil."
+  ;; WITHOUT ROWID tables have a primary key, checked before this fallback.
   (pcase (clutch-db-sqlite--table-record conn table schema)
-    (`(,_ ,ddl "table")
-     (unless (string-match-p "\\bWITHOUT\\s-+ROWID\\b" (upcase ddl))
-       (list :kind 'row-locator :name "rowid"
-             :select-expressions '("rowid") :where-sql "rowid = ?")))))
+    (`(,db ,_ ,_ "table")
+     (when-let* ((columns (clutch-db-sqlite--pragma-strict
+                           (clutch-db-sqlite-conn-handle conn) "table_xinfo" table db))
+                 (names (mapcar (lambda (column) (downcase (nth 1 column))) columns))
+                 (alias (cl-find-if-not (lambda (name) (member name names))
+                                        '("rowid" "_rowid_" "oid"))))
+       (list :kind 'row-locator :name alias :select-expressions (list alias)
+             :where-sql (concat alias " = ?"))))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-db-sqlite-conn) table
                                                  &optional schema _catalog)

@@ -112,7 +112,7 @@ Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source ro
 | MySQL native | Non-null unique keys; no physical row-locator fallback |
 | PostgreSQL native | Non-null unique keys, then `ctid` for ordinary heap tables |
 | XTDB native | Not needed: every XTDB table is keyed by `_id` |
-| SQLite native | Non-null unique keys, then `rowid` for tables not declared `WITHOUT ROWID` |
+| SQLite native | Non-null unique keys, then the first available rowid alias (`rowid`, `_rowid_`, `oid`) on a rowid table. A declared column hides the alias of the same name. |
 | Oracle JDBC | Non-null unique keys, then `ROWID` for confirmed base tables |
 | Other JDBC backends | Non-null unique keys only |
 
