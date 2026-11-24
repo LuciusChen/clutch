@@ -287,7 +287,7 @@ when no result window exists yet."
 
 (defun clutch-result--buffer-name ()
   "Return the result buffer name based on current connection.
-Uses the full connection key so each console gets its own result buffer."
+Sessions with the same label use the same base name."
   (if (clutch--connection-alive-p clutch-connection)
       (format "*clutch-result: %s*" (clutch--connection-key clutch-connection))
     "*clutch-result: results*"))
@@ -433,7 +433,8 @@ when the user declines."
 (defun clutch-result--check-pending-changes ()
   "Prompt to discard staged row mutations in the current connection result buffer.
 Signal `user-error' if the user declines."
-  (when-let* ((result-buf (get-buffer (clutch-result--buffer-name))))
+  (when-let* ((result-buf (clutch--connection-view-buffer
+                          clutch-connection (clutch-result--buffer-name))))
     (with-current-buffer result-buf
       (clutch-result--confirm-discard-pending
        "Discard staged changes and re-run query? " "Execution cancelled"))))
@@ -592,7 +593,7 @@ scrolled to."
 ROW-IDENTITY-PREP, SERVER-PAGEABLE, RESULT-CONTEXT, RESOLUTION-CONTEXT,
 SOURCE-BUFFER, and ELAPSED are produced by the query execution layer."
   (let* ((page-size clutch-result-max-rows)
-         (buf (get-buffer-create (clutch-result--buffer-name)))
+         (buf (clutch--connection-view-buffer connection (clutch-result--buffer-name) t))
          (same-query (with-current-buffer buf
                        (and (derived-mode-p 'clutch-result-mode)
                             (equal clutch--last-query sql))))
@@ -794,8 +795,7 @@ loaded."
 SQL is the user-visible statement, SUMMARY is the humanized message,
 MESSAGE is the raw backend message, ELAPSED is the failed duration, and HINT
 is an optional actionable hint."
-  (let* ((buf-name (clutch-result--buffer-name))
-         (buf (get-buffer-create buf-name))
+  (let* ((buf (clutch--connection-view-buffer connection (clutch-result--buffer-name) t))
          (params clutch--connection-params)
          (product clutch--conn-sql-product)
          (summary (string-trim summary))
@@ -835,25 +835,20 @@ is an optional actionable hint."
   "Display RESULT in the result buffer.
 SQL is the query text, ELAPSED the time in seconds.
 If the result has columns, shows a table; otherwise shows DML summary."
-  (let* ((buf-name (clutch-result--buffer-name))
-         (buf      (get-buffer-create buf-name))
-         (params clutch--connection-params)
-         (product clutch--conn-sql-product)
-         (columns  (clutch-db-result-columns result)))
-    (if columns
-        (clutch-result--display-select
-         (clutch-db-result-connection result) sql result elapsed
-         :source-buffer (current-buffer))
-      (setq-local clutch--last-result-buffer buf)
-      (with-current-buffer buf
-        (clutch-result-mode)
-        (setq-local clutch--last-query sql)
-        (clutch--bind-connection-context
-         (clutch-db-result-connection result)
-         params
-         product)
-        (clutch-result--display-dml result sql elapsed))
-      (clutch-result--show-buffer buf))))
+  (let ((conn (clutch-db-result-connection result)))
+    (if (clutch-db-result-columns result)
+        (clutch-result--display-select conn sql result elapsed
+                                      :source-buffer (current-buffer))
+      (let ((buf (clutch--connection-view-buffer conn (clutch-result--buffer-name) t))
+            (params clutch--connection-params)
+            (product clutch--conn-sql-product))
+        (setq-local clutch--last-result-buffer buf)
+        (with-current-buffer buf
+          (clutch-result-mode)
+          (setq-local clutch--last-query sql)
+          (clutch--bind-connection-context conn params product)
+          (clutch-result--display-dml result sql elapsed))
+        (clutch-result--show-buffer buf)))))
 
 ;;;; Cell navigation
 
