@@ -38,6 +38,8 @@
 (require 'seq)
 (require 'subr-x)
 
+(autoload 'ucs-normalize-NFKD-string "ucs-normalize")
+
 ;;;; Configuration
 
 (defcustom clutch-connect-timeout-seconds 10
