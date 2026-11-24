@@ -969,12 +969,7 @@ server's default-schema position between two dots."
                       (clutch--object-fqname entry)
                       (if suffix (concat " " suffix) "")
                       (clutch--connection-key conn))))
-    ;; Two live sessions can have the same public label (e.g. SQLite :memory:).
-    (or (cl-find-if (lambda (buffer)
-                      (and (eq (buffer-local-value 'clutch-connection buffer) conn)
-                           (string-prefix-p name (buffer-name buffer))))
-                    (buffer-list))
-        (generate-new-buffer name))))
+    (clutch--connection-view-buffer conn name t)))
 
 (defun clutch--show-object-text-buffer
     (conn entry text &optional params product title-suffix)

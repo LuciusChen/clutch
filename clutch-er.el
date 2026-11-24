@@ -1341,7 +1341,7 @@ store.  The ER view of the connection shows them."
          (relations (funcall function (clutch-er--read-relations
                                        (clutch-er--relations-file conn clutch--connection-params t)))))
     (clutch-er--write-relations file relations)
-    (when-let* ((buffer (get-buffer (clutch-er--buffer-name conn))))
+    (when-let* ((buffer (clutch--connection-view-buffer conn (clutch-er--buffer-name conn))))
       (with-current-buffer buffer
         (when clutch-er--entry
           (setq clutch-er--overview nil
@@ -1453,8 +1453,8 @@ Without ENTRY, use the table at point or ask for one."
     (unless (clutch--table-entry-p entry)
       (user-error "%s is not a table" (clutch--object-fqname entry)))
     (let* ((name (clutch-er--buffer-name conn))
-           (existing (get-buffer name))
-           (buffer (get-buffer-create name))
+           (existing (clutch--connection-view-buffer conn name))
+           (buffer (or existing (generate-new-buffer name)))
            shown)
       (unwind-protect
           (progn

@@ -216,7 +216,7 @@ connection keeps its warning that the transaction outcome is unknown."
             (clutch--set-tx-uncertain conn)
             (clutch--set-table-metadata conn table
                                         :column-details '((:name "id")))
-            (clutch-test--with-pop-to-buffer-capture shown
+            (clutch-test--with-result-buffer (" *clutch-lost-transaction*")
               (clutch--present-statement-outcome
                "SELECT 1" conn
                (list :error '(clutch-db-error "Connection closed")
@@ -224,7 +224,7 @@ connection keeps its warning that the transaction outcome is unknown."
                      :elapsed 0.1
                      :result-context '(:keep-result-on-error t)
                      :source-buffer (current-buffer)))
-              (with-current-buffer shown
+              (with-current-buffer clutch--last-result-buffer
                 (should (derived-mode-p 'clutch-result-mode))
                 (should (string-match-p
                          (concat "Hint: .*"
