@@ -65,6 +65,8 @@ the edit buffer behind it is killed with it."
       (pop-to-buffer result)
       (clutch--goto-cell 1 1)
       (clutch-result-discard-pending-at-point)
+      (clutch-result-insert-row)
+      (clutch-result-insert-cancel)
       (pop-to-buffer form)
       (clutch-result-insert-stage)
       (with-current-buffer result
@@ -391,6 +393,9 @@ Text cells containing JSON objects should still use the JSON editor."
                      (lambda (&optional kill _window)
                        (when kill
                          (kill-buffer (current-buffer))))))
+            (clutch-test--with-pop-to-buffer-capture another
+              (with-current-buffer result-buf (clutch-result-edit-cell))
+              (with-current-buffer another (clutch-result-edit-json-cancel)))
             (with-current-buffer json-buf
               (pcase case
                 ('cancel (clutch-result-edit-json-cancel))
@@ -1786,18 +1791,18 @@ from closing."
           (when (buffer-live-p insert-buf)
             (kill-buffer insert-buf))))))
   (ert-info ("edit editor saves normalized JSON")
-    (clutch-test--with-pop-to-buffer-capture json-buf
+    (save-window-excursion
       (clutch-test--with-result-edit-buffer parent-buf "{\"a\":1}"
         (setq-local clutch-result-edit--column-name "payload"
                     clutch-result-edit--column-def
                     '(:name "payload" :type-category json)
                     clutch-result-edit--column-detail
                     '(:name "payload" :type "json"))
+        (pop-to-buffer parent-buf)
         (clutch-result-edit-json-field)
-        (with-current-buffer json-buf
-          (erase-buffer)
-          (insert "{\"a\":2}")
-          (clutch-result-edit-json-finish))
+        (erase-buffer)
+        (insert "{\"a\":2}")
+        (clutch-result-edit-json-finish)
         (should (equal (with-current-buffer parent-buf (buffer-string))
                        "{\"a\":2}")))))
   (ert-info ("manual edit editor cancel returns to parent edit buffer")
@@ -2026,6 +2031,7 @@ alias, quoted, qualified or through a CTE."
           (funcall (car case))
           (clutch-result-insert--run-idle-validation insert-buf)
           (should (equal (clutch-result-insert--parse-fields) (cadr case))))
+        (kill-buffer insert-buf)
         (clutch-result-insert--open-buffer "audit" result-buf (cadr case))
         (with-current-buffer insert-buf
           (should (equal (clutch-result-insert--parse-fields) (cadr case)))
