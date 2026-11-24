@@ -740,10 +740,10 @@
   "Row-preserving SELECTs should receive hidden identity expressions."
   (cl-letf ((clutch--row-identity-cache (make-hash-table :test 'eq))
             ((symbol-function 'clutch-db-row-identity-candidates)
-             (lambda (_conn _table)
+             (lambda (_conn table)
                (list (list :kind 'primary-key
                            :name "PRIMARY"
-                           :columns '("id")))))
+                           :columns (if (equal table "customers") '("客户编号") '("id"))))))
             ((symbol-function 'clutch-db-escape-identifier)
              (lambda (_conn id) (format "\"%s\"" id))))
     (dolist (case
@@ -751,8 +751,8 @@
                 "SELECT name FROM users WHERE active = 1"
                 "SELECT name, \"id\" AS \"clutch__rid_0\" FROM users WHERE active = 1")
                ("mixed star and direct column"
-                "SELECT users.*, 金额 AS balance FROM users"
-                "SELECT users.*, 金额 AS balance, \"id\" AS \"clutch__rid_0\" FROM users")
+                "SELECT customers.*, 客户姓名 AS alias FROM customers"
+                "SELECT customers.*, 客户姓名 AS alias, \"客户编号\" AS \"clutch__rid_0\" FROM customers")
                ("leading comment"
                 "-- comment\nSELECT * FROM users;"
                 "SELECT users.*, \"id\" AS \"clutch__rid_0\" FROM users")

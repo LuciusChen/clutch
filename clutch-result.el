@@ -3190,44 +3190,29 @@ Selects JSON, XML, or binary string view based on column type and content."
 (defconst clutch--insert-placeholder-table "MY_TABLE"
   "Placeholder target table for INSERT copy/export without a known destination.")
 
-(defun clutch-result--insert-name-bindings (names target)
-  "Resolve distinct spellings in NAMES that may name one column of TARGET."
-  (when (and (cdr names) (null (clutch-db-identifier-case clutch-connection)))
-    (let* ((spellings (delete-dups (copy-sequence names)))
-           (catalog (make-hash-table :test #'equal))
-           (unknown (progn
-                      (dolist (column clutch--result-column-defs)
-                        (when (plist-get column :catalog-column)
-                          (puthash (plist-get column :source-column) t catalog)))
-                      (seq-remove (lambda (name) (gethash name catalog)) spellings))))
-      (when (and unknown (cdr spellings))
-        (when-let* ((possible (clutch-db--competing-column-names unknown spellings)))
-          (clutch-result--refuse-if-moved)
-          (clutch-db-resolve-column-names clutch-connection possible target))))))
-
 (defun clutch-result--insert-selection (indices)
   "Plan an INSERT for INDICES as a SQL prefix and (column . index) pairs."
   (let* ((conn clutch-connection)
          (table (clutch--result-source-key))
-         (origins (cl-loop for i in indices
-                           for def = (nth i clutch--result-column-defs)
-                           collect (if (plist-member def :source-column)
-                                       (plist-get def :source-column)
-                                     (nth i clutch--result-columns))))
+         (defs (mapcar (lambda (i) (nth i clutch--result-column-defs)) indices))
+         (labels (clutch--column-names-for-indices indices))
+         (origins (cl-mapcar (lambda (def label)
+                               (if (plist-member def :source-column) (plist-get def :source-column) label))
+                             defs labels))
          (known (and table (not (memq nil origins))))
          (target (if known
                      (clutch-result--insert-target conn table (or clutch--base-query clutch--last-query))
                    (clutch-db-escape-identifier conn clutch--insert-placeholder-table)))
-         (names (if known origins (clutch--column-names-for-indices indices)))
-         (bindings (and known (clutch-result--insert-name-bindings names target)))
-         (seen (make-hash-table :test #'equal))
-         (columns (cl-loop for spelling in names for i in indices
-                           for name = (or (cdr (assoc spelling bindings)) spelling)
-                           unless (and known (gethash name seen))
-                           collect (cons name i) and do (puthash name t seen)))
-         (column-list (mapconcat (lambda (col) (clutch-db-escape-identifier conn (car col)))
-                                 columns ", ")))
-    (cons (format "INSERT INTO %s (%s) VALUES " target column-list) columns)))
+         (seen (make-hash-table :test #'equal)))
+    (when (and known (cdr (delete-dups (copy-sequence origins))))
+      (clutch-result--bind-source-columns defs target))
+    (let* ((columns (cl-loop for def in defs for label in labels for i in indices
+                             for name = (if known (or (plist-get def :source-column) label) label)
+                             unless (and known (gethash name seen))
+                             collect (cons name i) and do (puthash name t seen)))
+           (column-list (mapconcat (lambda (col) (clutch-db-escape-identifier conn (car col)))
+                                   columns ", ")))
+      (cons (format "INSERT INTO %s (%s) VALUES " target column-list) columns))))
 
 (defun clutch-result--build-insert-statements-for-rows (rows col-indices &optional selection)
   "Return INSERT statements for ROWS using COL-INDICES or a prepared SELECTION."
@@ -3257,7 +3242,10 @@ to preserve the existing copy/export UPDATE behavior."
           (cl-loop for cidx in col-indices
                    unless (or (plist-get (nth cidx clutch--result-column-defs)
                                          :hidden)
-                              (memq cidx pk-source-indices))
+                              (memq cidx pk-source-indices)
+                              (and (eq (plist-get row-identity :kind) 'primary-key)
+                                   (member (plist-get (nth cidx clutch--result-column-defs) :source-column)
+                                           (plist-get row-identity :columns))))
                    collect cidx)))
     (unless set-col-indices
       (user-error "Cannot %s: no writable source columns selected" op))
@@ -3268,11 +3256,13 @@ to preserve the existing copy/export UPDATE behavior."
 OP is a short operation description used in user-facing error messages."
   (let* ((table (clutch--result-source-table-or-user-error op))
          (row-identity (clutch-result--row-identity-or-user-error table op))
+         (key (clutch--result-source-key))
+         (details (clutch-result--source-column-details key op col-indices))
          (columns (clutch-result--update-source-columns
-                   (clutch--result-source-key)
+                   key
                    (clutch-result--selected-update-col-indices
                     row-identity col-indices op)
-                   op))
+                   op details))
          statements)
     (dolist (row rows)
       (let* ((identity-vec (clutch-db-row-identity-values

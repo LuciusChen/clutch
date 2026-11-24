@@ -824,20 +824,20 @@ as its last columns."
                         (substring sql (nth 1 edit)))))))
 
 (defun clutch--projection-source-names (conn projection source-token keys)
-  "Fold source names in PROJECTION and bind possible row KEYS on CONN.
-SOURCE-TOKEN names the relation as the query reads it.  Return the folded
-projection followed by any column names confirmed by the database."
-  (if (not (consp projection)) (list projection)
+  "Fold PROJECTION on CONN and resolve missing visible KEYS on SOURCE-TOKEN.
+When hidden keys supply row identity, the caller leaves KEYS nil."
+  (if (not (consp projection)) projection
     (let* ((items (mapcar (lambda (token)
                             (if (stringp token) (clutch-db-sql-fold-identifier conn token) token))
                           projection))
-           (possible (and source-token keys (null (clutch-db-identifier-case conn))
-                          (clutch-db--competing-column-names
-                           (seq-difference (seq-filter #'stringp items) keys #'equal) keys))))
-      (if (not possible) (list items)
-        (let ((bindings (clutch-db-resolve-column-names conn (delete-dups possible) source-token)))
-          (cons (mapcar (lambda (name) (or (cdr (assoc name bindings)) name)) items)
-                (mapcar #'cdr bindings)))))))
+           (names (seq-filter #'stringp items)))
+      (if-let* (((and source-token keys (not (memq 'star items))))
+                ((null (clutch-db-identifier-case conn)))
+                ((seq-difference keys names #'equal))
+                (unknown (seq-difference names keys #'equal)))
+          (let ((bindings (clutch-db-resolve-column-names conn (delete-dups unknown) source-token)))
+            (mapcar (lambda (name) (or (cdr (assoc name bindings)) name)) items))
+        items))))
 
 (defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
@@ -914,10 +914,10 @@ key would change the current row instead of the one shown."
                 (clutch--projection-source-names
                  conn (if chain (plist-get chain :projection)
                         (clutch--writable-select-projection conn analysis-sql table))
-                 source-token (plist-get candidate :columns))
+                 source-token (unless augment-p (plist-get candidate :columns)))
               (clutch-db-error
                (setq identity-error (or identity-error err))
-               '(none))))
+               'none)))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -935,8 +935,7 @@ key would change the current row instead of the one shown."
             :source-catalog source-catalog
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
-            :writable-projection (car projection)
-            :catalog-columns (append (plist-get candidate :columns) (cdr projection))
+            :writable-projection projection
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -1005,8 +1004,9 @@ same-named projection with Clutch's hidden values."
           (or (eq projection 'star)
               (and (listp projection)
                    (= (length projection) visible-count)))))
-    (let ((spellings (and (consp items) (eq (clutch-db-identifier-case conn) 'ascii-insensitive)
-                          (make-hash-table :test #'equal))))
+    (let* ((case-rule (clutch-db-identifier-case conn))
+           (spellings (and (consp items) (eq case-rule 'ascii-insensitive)
+                           (make-hash-table :test #'equal))))
       (cl-flet ((source-name (name)
                   (if (not (and spellings name)) name
                     (let ((key (with-case-table ascii-case-table (downcase name))))
@@ -1019,20 +1019,21 @@ same-named projection with Clutch's hidden values."
                  for source = (if (eq projection 'star) 'star (car-safe sources))
                  for copy = (copy-sequence column)
                  for hidden-p = (memq idx hidden-indices)
+                 for origin = (plist-get column :origin)
+                 for physical = (and origin (not (plist-get prep :cte))
+                                     (equal (car origin) (plist-get prep :table)) (cdr origin))
+                 for name = (and (not hidden-p) projection-aligned-p source
+                                 (source-name
+                                  (cond ((plist-member column :source-column) (plist-get column :source-column))
+                                        (physical)
+                                        ((eq source 'star) (plist-get column :name))
+                                        (t source))))
                  do (when hidden-p (setq copy (plist-put copy :hidden t)))
                  when projection-present-p
-                 do (setq copy
-                          (plist-put copy :source-column
-                                     (and (not hidden-p) projection-aligned-p source
-                                          (source-name
-                                           (cond
-                                            ((plist-member column :source-column) (plist-get column :source-column))
-                                            ((eq source 'star) (plist-get column :name))
-                                            (t source))))))
-                 when (and (plist-get copy :source-column)
-                           (or (eq source 'star)
-                               (member (plist-get copy :source-column) (plist-get prep :catalog-columns))))
-                 do (setq copy (plist-put copy :catalog-column t))
+                 do (setq copy (plist-put copy :source-column name))
+                 when (and name (not case-rule) (not physical) (stringp source)
+                           (not (member name (plist-get (plist-get prep :candidate) :columns))))
+                 do (setq copy (plist-put copy :unresolved-source t))
                  collect copy)))))
 
 ;;;; SQL pagination helpers

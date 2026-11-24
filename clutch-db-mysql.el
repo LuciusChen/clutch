@@ -172,9 +172,10 @@ Its original column name, however, can be the name exposed by the CTE."
                                 :type-category (clutch-db-mysql--type-category
                                                 (plist-get col :type)
                                                 (plist-get col :character-set)))))
-              (if (equal (plist-get col :org-table) "")
-                  (plist-put column :source-column nil)
-                column)))
+              (cond ((equal (plist-get col :org-table) "") (plist-put column :source-column nil))
+                    ((and (plist-get col :org-table) (not (string-empty-p (plist-get col :org-name))))
+                     (plist-put column :origin (cons (plist-get col :org-table) (plist-get col :org-name))))
+                    (t column))))
           mysql-columns))
 
 (defconst clutch-db-mysql--max-warning-messages 100
