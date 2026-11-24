@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Column completion and alias navigation now recognize a single table grouped in parentheses.
+
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
 
 - Clutch pins JDBC agent 0.2.32. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
@@ -23,6 +25,8 @@
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
+
+- Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
 
