@@ -1040,29 +1040,35 @@ is not a writable source column."
 IDENTITY-VEC is the row identity vector, EDITS is a list of
 \(cidx . value), and ROW-IDENTITY describes the WHERE predicate.
 COLUMNS, from `clutch-result--update-source-columns', gives the source
-column of each cidx."
-  (let ((conn clutch-connection))
-    (let ((set-parts nil)
-          (set-params nil)
-          (where-spec (clutch--row-identity-where-parts
-                       conn row-identity identity-vec)))
-      (dolist (edit edits)
-        (pcase-let* ((`(,col-name . ,type) (alist-get (car edit) columns))
-                     (value (cdr edit))
-                     (escaped-column
-                      (clutch-db-escape-identifier conn col-name)))
-          (if (eq value clutch--cell-default-placeholder)
-              (push (format "%s = DEFAULT" escaped-column) set-parts)
-            (push (format "%s = ?" escaped-column) set-parts)
-            (push (clutch-db-typed-param
-                   (clutch-db-require-complete-value value) type)
-                  set-params))))
-      (cons (format "UPDATE %s SET %s WHERE %s"
-                    (or (plist-get row-identity :source-token)
-                        (clutch-db-escape-identifier conn table))
-                    (mapconcat #'identity (nreverse set-parts) ", ")
-                    (mapconcat #'identity (car where-spec) " AND "))
-            (append (nreverse set-params) (cdr where-spec))))))
+column of each cidx.  Aliases of one source column must agree."
+  (let* ((conn clutch-connection)
+         (where-spec (clutch--row-identity-where-parts conn row-identity identity-vec))
+         (seen (make-hash-table :test #'equal))
+         set-parts set-params)
+    (dolist (edit edits)
+      (pcase-let* ((`(,name . ,type) (alist-get (car edit) columns))
+                   (value (cdr edit))
+                   (previous (gethash name seen)))
+        (if previous
+            (unless (equal-including-properties value (cdr previous))
+              (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
+                          table name identity-vec
+                          (nth (car previous) clutch--result-columns)
+                          (nth (car edit) clutch--result-columns)))
+          (puthash name edit seen)
+          (let ((column (clutch-db-escape-identifier conn name)))
+            (if (eq value clutch--cell-default-placeholder)
+                (push (format "%s = DEFAULT" column) set-parts)
+              (push (format "%s = ?" column) set-parts)
+              (push (clutch-db-typed-param
+                     (clutch-db-require-complete-value value) type)
+                    set-params))))))
+    (cons (format "UPDATE %s SET %s WHERE %s"
+                  (or (plist-get row-identity :source-token)
+                      (clutch-db-escape-identifier conn table))
+                  (mapconcat #'identity (nreverse set-parts) ", ")
+                  (mapconcat #'identity (car where-spec) " AND "))
+          (append (nreverse set-params) (cdr where-spec)))))
 
 (defun clutch-result--build-update-statements ()
   "Build UPDATE statement specs from staged edits."
