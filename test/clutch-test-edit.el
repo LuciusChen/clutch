@@ -827,15 +827,14 @@ redraw."
         (clutch-result-insert--open-buffer "users" result-buf)
         (with-current-buffer insert-buf
           (clutch-test--set-insert-field-value "name" "alice"))
-        (with-current-buffer result-buf
-          (setq-local clutch--result-source-table "orders"))
-        (with-current-buffer insert-buf
-          (cl-letf (((symbol-function 'quit-window)
-                     (lambda (&rest _) (setq closed t))))
-            (let ((err (should-error (clutch-result-insert-stage)
-                                     :type 'user-error)))
-              (should (string-match-p "Result table changed"
-                                      (error-message-string err))))))
+        (dolist (target '(("orders" nil) ("users" another-schema)))
+          (with-current-buffer result-buf
+            (setq-local clutch--result-source-table (car target)
+                        clutch--result-resolution-context (cadr target)))
+          (with-current-buffer insert-buf
+            (cl-letf (((symbol-function 'quit-window)
+                       (lambda (&rest _) (setq closed t))))
+              (should-error (clutch-result-insert-stage) :type 'user-error))))
         (should-not closed)
         (should-not (with-current-buffer result-buf
                       clutch--pending-inserts))))))

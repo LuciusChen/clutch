@@ -1976,6 +1976,8 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
       (clutch--result-insert-major-mode)
       (setq-local clutch-result-insert--result-buffer result-buf
                   clutch-result-insert--table table
+                  clutch--result-resolution-context
+                  (buffer-local-value 'clutch--result-resolution-context result-buf)
                   clutch-result-insert--fields field-state
                   clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
@@ -1988,12 +1990,14 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
 Staging is also refused while a statement runs on its connection, and
 once the connection moved from where the result's query ran."
   (let ((result-buf clutch-result-insert--result-buffer)
-        (source-table clutch-result-insert--table))
+        (source-table clutch-result-insert--table)
+        (context clutch--result-resolution-context))
     (unless (buffer-live-p result-buf)
       (user-error "Result buffer no longer exists"))
     (with-current-buffer result-buf
-      (unless (equal (clutch--result-source-key) source-table)
-        (user-error "Result table changed; reopen the insert buffer"))
+      (unless (and (equal (clutch--result-source-key) source-table)
+                   (equal clutch--result-resolution-context context))
+        (user-error "Result table or schema changed; switch back or reopen the insert buffer"))
       (clutch--refuse-while-running clutch-connection)
       (clutch-result--refuse-if-moved))))
 

@@ -24,7 +24,7 @@
 
 - Eldoc no longer waits for remote column metadata on PostgreSQL, MySQL or non-Oracle JDBC connections, or for MySQL server help.
 
-- Opening a cell, insert form, or JSON editor keeps other open drafts and their save targets intact.
+- Opening a cell, insert form, or JSON editor preserves other drafts. An insert form can be staged again after returning to its original table and schema.
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
