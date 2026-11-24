@@ -218,12 +218,36 @@ the SELECT projection cannot be proven writable."
      (user-error "Cannot %s: writable source for result column %s is unknown"
                   op display-name)))))
 
-(defun clutch-result--source-column-details (table op)
-  "Return the column details of source TABLE for OP, loading them if needed."
+(defun clutch-result--bind-source-columns (columns target &optional details)
+  "Resolve unconfirmed source spellings in COLUMNS on TARGET for a write.
+Use exact names already present in DETAILS.  Ask the original relation
+about the remaining spellings together and retain its answers on this result."
+  (when-let* ((pending (seq-filter (lambda (col) (plist-get col :unresolved-source)) columns)))
+    (let* ((names (delete-dups (mapcar (lambda (col) (plist-get col :source-column)) pending)))
+           (known (append (mapcar (lambda (detail) (plist-get detail :name)) details)
+                          (cl-loop for col in columns unless (plist-get col :unresolved-source)
+                                   collect (plist-get col :source-column))))
+           (unknown (seq-difference names known #'equal))
+           (bindings (when unknown
+                       (clutch-result--refuse-if-moved)
+                       (clutch-db-resolve-column-names clutch-connection unknown target))))
+      (dolist (col pending)
+        (let* ((name (plist-get col :source-column))
+               (bound (or (cdr (assoc name bindings)) (car (member name known)))))
+          (when bound
+            (setf (plist-get col :source-column) bound
+                  (plist-get col :unresolved-source) nil)))))))
+
+(defun clutch-result--source-column-details (table op indices)
+  "Load details of source TABLE and bind the result columns at INDICES for OP."
   (clutch--ensure-connection)
   (clutch-result--refuse-if-moved)
-  (or (clutch--ensure-column-details clutch-connection table t)
-      (user-error "Cannot %s: source column metadata is unavailable" op)))
+  (let ((details (or (clutch--ensure-column-details clutch-connection table t)
+                     (user-error "Cannot %s: source column metadata is unavailable" op))))
+    (clutch-result--bind-source-columns
+     (mapcar (lambda (i) (nth i clutch--result-column-defs)) indices)
+     (clutch-result--insert-target clutch-connection table clutch--last-query) details)
+    details))
 
 (defun clutch-result--writable-source-detail (table cidx op &optional details)
   "Return canonical source-column metadata for CIDX in TABLE during OP.
@@ -231,9 +255,8 @@ TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
 wins.  Otherwise, accept a single case-insensitive match so unquoted
 identifiers can be reconciled with backend canonical case.
 Return nil when no metadata column matches, and reject ambiguous matches."
-  (clutch--source-column-detail
-   (clutch-result--writable-source-column cidx op)
-   (or details (clutch-result--source-column-details table op)) op))
+  (let ((details (or details (clutch-result--source-column-details table op (list cidx)))))
+    (clutch-db-source-column-detail (clutch-result--writable-source-column cidx op) details op)))
 
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
@@ -990,12 +1013,13 @@ the parameter list."
        param-values
        param-types))))
 
-(defun clutch-result--update-source-columns (table col-indices op)
+(defun clutch-result--update-source-columns (table col-indices op &optional details)
   "Return the source columns of TABLE to update for COL-INDICES.
 TABLE is a metadata key from `clutch--table-key'.  Each element is
 \(CIDX NAME . BACKEND-TYPE), with NAME as the table spells it.
-Signal a `user-error' for OP when a column is not a writable source column."
-  (let ((details (clutch-result--source-column-details table op))
+Use DETAILS if already loaded.  Signal a `user-error' for OP when a column
+is not a writable source column."
+  (let ((details (or details (clutch-result--source-column-details table op col-indices)))
         columns invalid)
     (dolist (cidx col-indices)
       (let ((detail (clutch-result--writable-source-detail table cidx op details)))
@@ -1936,11 +1960,15 @@ projection labels for editing and importing."
                          (user-error "No staged insert at this row"))
                    fields))
          names sources)
+    (when details
+      (clutch-result--bind-source-columns clutch--result-column-defs
+                                         (clutch-result--insert-target clutch-connection table clutch--last-query)
+                                         details))
     (cl-loop for idx in (clutch--visible-columns)
              for def = (nth idx clutch--result-column-defs)
              for label = (nth idx clutch--result-columns)
              for source = (plist-get def :source-column)
-             for detail = (and source (clutch--source-column-detail source details "insert"))
+             for detail = (and source (clutch-db-source-column-detail source details "insert"))
              for name = (or (plist-get detail :name) source)
              when (and name (not (member name sources)))
              collect

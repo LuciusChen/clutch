@@ -823,30 +823,21 @@ as its last columns."
                         (nth 2 edit)
                         (substring sql (nth 1 edit)))))))
 
-(defun clutch--projection-source-names (conn projection table keys)
-  "Resolve PROJECTION's source names on CONN when preparing the query.
-For a possible match in KEYS on a database with no fixed case rule,
-use TABLE's column metadata to distinguish another spelling of the key
-from a separate column."
-  (if (consp projection)
-      (mapcar
-       (lambda (token)
-         (if (stringp token)
-             (let* ((name (clutch-db-sql-fold-identifier conn token))
-                    (key (and (not (member name keys))
-                              (with-case-table ascii-case-table
-                                (cl-find name keys :test #'string-equal-ignore-case)))))
-               (if key
-                   (pcase (clutch-db-identifier-case conn)
-                     ('ascii-insensitive key)
-                     ('nil (or (plist-get (clutch--source-column-detail
-                                           name (clutch--ensure-column-details conn table)) :name)
-                               name))
-                     (_ name))
-                 name))
-           token))
-       projection)
-    projection))
+(defun clutch--projection-source-names (conn projection source-token keys)
+  "Fold PROJECTION on CONN and resolve missing visible KEYS on SOURCE-TOKEN.
+When hidden keys supply row identity, the caller leaves KEYS nil."
+  (if (not (consp projection)) projection
+    (let* ((items (mapcar (lambda (token)
+                            (if (stringp token) (clutch-db-sql-fold-identifier conn token) token))
+                          projection))
+           (names (seq-filter #'stringp items)))
+      (if-let* (((and source-token keys (not (memq 'star items))))
+                ((null (clutch-db-identifier-case conn)))
+                ((seq-difference keys names #'equal))
+                (unknown (seq-difference names keys #'equal)))
+          (let ((bindings (clutch-db-resolve-column-names conn (delete-dups unknown) source-token)))
+            (mapcar (lambda (name) (or (cdr (assoc name bindings)) name)) items))
+        items))))
 
 (defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
@@ -918,6 +909,15 @@ key would change the current row instead of the one shown."
                                      analysis-sql table)
                                     (not (clutch--row-identity-select-list-comment-p
                                           analysis-sql))))))
+           (projection
+            (condition-case err
+                (clutch--projection-source-names
+                 conn (if chain (plist-get chain :projection)
+                        (clutch--writable-select-projection conn analysis-sql table))
+                 source-token (unless augment-p (plist-get candidate :columns)))
+              (clutch-db-error
+               (setq identity-error (or identity-error err))
+               'none)))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -935,12 +935,7 @@ key would change the current row instead of the one shown."
             :source-catalog source-catalog
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
-            :writable-projection
-            (clutch--projection-source-names
-             conn (if chain (plist-get chain :projection)
-                    (clutch--writable-select-projection conn analysis-sql table))
-             (clutch--table-key table source-schema source-catalog)
-             (plist-get candidate :columns))
+            :writable-projection projection
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -990,8 +985,8 @@ same-named projection with Clutch's hidden values."
                :hidden-aliases aliases)
          candidate)))))
 
-(defun clutch--apply-row-identity-column-metadata (columns prep)
-  "Mark hidden keys and writable origins on COLUMNS from PREP."
+(defun clutch--apply-row-identity-column-metadata (columns prep &optional conn)
+  "Mark hidden keys and writable origins on COLUMNS from PREP for CONN."
   (let* ((aliases (plist-get prep :hidden-aliases))
          (hidden-indices (and aliases
                               (clutch--row-identity-hidden-indices
@@ -1009,26 +1004,37 @@ same-named projection with Clutch's hidden values."
           (or (eq projection 'star)
               (and (listp projection)
                    (= (length projection) visible-count)))))
-    (cl-loop for column in columns
-             for idx from 0
-             for sources = projection then (cdr-safe sources)
-             for source = (if (eq projection 'star) 'star (car-safe sources))
-             for copy = (copy-sequence column)
-             for hidden-p = (memq idx hidden-indices)
-             do (when hidden-p
-                  (setq copy (plist-put copy :hidden t)))
-             when projection-present-p
-             do (setq copy
-                      (plist-put
-                       copy :source-column
-                       (and (not hidden-p)
-                            projection-aligned-p
-                            source
-                            (cond
-                             ((plist-member column :source-column) (plist-get column :source-column))
-                             ((eq source 'star) (plist-get column :name))
-                             (t source)))))
-             collect copy)))
+    (let* ((case-rule (clutch-db-identifier-case conn))
+           (spellings (and (consp items) (eq case-rule 'ascii-insensitive)
+                           (make-hash-table :test #'equal))))
+      (cl-flet ((source-name (name)
+                  (if (not (and spellings name)) name
+                    (let ((key (with-case-table ascii-case-table (downcase name))))
+                      (or (gethash key spellings) (puthash key name spellings))))))
+        ;; Keep the catalog spelling of a key and the first spelling of other columns.
+        (when spellings (mapc #'source-name (plist-get (plist-get prep :candidate) :columns)))
+        (cl-loop for column in columns
+                 for idx from 0
+                 for sources = projection then (cdr-safe sources)
+                 for source = (if (eq projection 'star) 'star (car-safe sources))
+                 for copy = (copy-sequence column)
+                 for hidden-p = (memq idx hidden-indices)
+                 for origin = (plist-get column :origin)
+                 for physical = (and origin (not (plist-get prep :cte))
+                                     (equal (car origin) (plist-get prep :table)) (cdr origin))
+                 for name = (and (not hidden-p) projection-aligned-p source
+                                 (source-name
+                                  (cond ((plist-member column :source-column) (plist-get column :source-column))
+                                        (physical)
+                                        ((eq source 'star) (plist-get column :name))
+                                        (t source))))
+                 do (when hidden-p (setq copy (plist-put copy :hidden t)))
+                 when projection-present-p
+                 do (setq copy (plist-put copy :source-column name))
+                 when (and name (not case-rule) (not physical) (stringp source)
+                           (not (member name (plist-get (plist-get prep :candidate) :columns))))
+                 do (setq copy (plist-put copy :unresolved-source t))
+                 collect copy)))))
 
 ;;;; SQL pagination helpers
 

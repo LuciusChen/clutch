@@ -1135,10 +1135,10 @@ Return t when they name the same object, nil when they differ, and
      ((not (string-equal-ignore-case name-a name-b)) nil)
      ((and conn (eq (clutch-db-identifier-case conn) 'ascii-insensitive))
       (with-case-table ascii-case-table (string-equal-ignore-case name-a name-b)))
-     ((and (equal a name-a) (equal b name-b)) t)
      ((and conn (clutch-db-identifier-case conn))
       (equal (clutch-db-sql-fold-identifier conn a)
              (clutch-db-sql-fold-identifier conn b)))
+     ((and (equal a name-a) (equal b name-b)) t)
      ((and conn (string= name-a name-b)) t)
      (t 'ambiguous))))
 
@@ -2008,7 +2008,8 @@ when non-nil."
 (cl-defgeneric clutch-db-identifier-case (conn)
   "Return the identifier case rule for CONN.
 `upper' and `lower' fold bare identifiers only.  `ascii-insensitive'
-compares even quoted identifiers ignoring ASCII case.  Return nil when
+compares even quoted identifiers ignoring ASCII case.  The lower fold
+only changes ASCII letters.  Return nil when
 the backend has no fixed rule.")
 
 (cl-defmethod clutch-db-identifier-case ((_conn t))
@@ -2024,7 +2025,7 @@ A quoted TOKEN keeps its case, and an unquoted one folds as
         name
       (pcase (clutch-db-identifier-case conn)
         ('upper (upcase name))
-        ('lower (downcase name))
+        ('lower (with-case-table ascii-case-table (downcase name)))
         (_ name)))))
 
 (cl-defgeneric clutch-db--source-table-name (conn token)
@@ -2682,6 +2683,37 @@ Optional keys:
   :default STR-OR-NIL  :backend-type ANY
   :generated BOOL  the database fills the column on INSERT
   :read-only BOOL  the database computes the column and refuses UPDATE")
+
+(defun clutch-db-source-column-detail (name details &optional op)
+  "Find NAME in DETAILS, allowing a unique match in another case.
+Signal ambiguity for a write operation OP."
+  (let ((key (lambda (detail) (plist-get detail :name))))
+    (or (cl-find name details :key key :test #'string=)
+        (pcase (cl-remove-if-not (lambda (detail)
+                                   (string-equal-ignore-case name (funcall key detail)))
+                                 details)
+          (`(,match) match)
+          ((and (pred consp) (guard op))
+           (user-error "Cannot %s: source column %s is ambiguous in table metadata"
+                       op name))))))
+
+(defun clutch-db--column-binding-select (conn names source-token)
+  "Select identifiers NAMES directly from SQL SOURCE-TOKEN on CONN."
+  (format "SELECT %s FROM %s"
+          (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) names ", ")
+          source-token))
+
+(cl-defgeneric clutch-db-resolve-column-names (conn names source-token)
+  "Resolve competing spellings in NAMES on CONN against SQL SOURCE-TOKEN.
+Return an alist mapping each resolved spelling to its physical column name.")
+
+(cl-defmethod clutch-db-resolve-column-names ((conn t) names source-token)
+  "Match NAMES to the columns of SOURCE-TOKEN visible in CONN's session."
+  (let ((columns (clutch-db-result-columns
+                  (clutch-db-query conn (format "SELECT * FROM %s WHERE 1=0" source-token)))))
+    (cl-loop for name in names
+             for detail = (clutch-db-source-column-detail name columns)
+             when detail collect (cons name (plist-get detail :name)))))
 
 ;; Re-entrancy guard
 

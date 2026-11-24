@@ -172,9 +172,10 @@ Its original column name, however, can be the name exposed by the CTE."
                                 :type-category (clutch-db-mysql--type-category
                                                 (plist-get col :type)
                                                 (plist-get col :character-set)))))
-              (if (equal (plist-get col :org-table) "")
-                  (plist-put column :source-column nil)
-                column)))
+              (cond ((equal (plist-get col :org-table) "") (plist-put column :source-column nil))
+                    ((and (plist-get col :org-table) (not (string-empty-p (plist-get col :org-name))))
+                     (plist-put column :origin (cons (plist-get col :org-table) (plist-get col :org-name))))
+                    (t column))))
           mysql-columns))
 
 (defconst clutch-db-mysql--max-warning-messages 100
@@ -922,6 +923,15 @@ FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND "
                  :source-schema schema
                  :comment comment)))
        (mysql-result-rows result)))))
+
+(cl-defmethod clutch-db-resolve-column-names ((conn mysql-conn) names source-token)
+  "Read original field names for NAMES on SOURCE-TOKEN in CONN's session."
+  (clutch-db--translate-library-error mysql-error
+    (let* ((sql (concat (clutch-db--column-binding-select conn names source-token) " LIMIT 0"))
+           (fields (mysql-result-columns (clutch-db-mysql--metadata-query conn sql))))
+      (cl-loop for name in names for field in fields
+               for physical = (plist-get field :org-name)
+               unless (string-empty-p physical) collect (cons name physical)))))
 
 (cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
   "Return column names for TABLE on MySQL CONN."

@@ -1405,7 +1405,7 @@ COL-DEF is the column definition plist, EDITED is a staged edit cons or nil."
                for def = (car defs)
                for source = (if (plist-member def :source-column)
                                 (plist-get def :source-column) label)
-               for detail = (and source (clutch--source-column-detail source details))
+               for detail = (and source (clutch-db-source-column-detail source details))
                collect (cons (or (plist-get detail :name) source)
                              (cond ((plist-get detail :generated) clutch--cell-generated-placeholder)
                                    ((plist-get detail :default) clutch--cell-default-placeholder)))))))
