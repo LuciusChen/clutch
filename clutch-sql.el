@@ -282,6 +282,15 @@ inside string literals, comments, or nested parentheses are ignored."
       ("TABLE" . ,(concat "\\(?:IF" gap "\\(?:NOT" gap "\\)?EXISTS\\b\\)?"))))
   "Optional keywords before the table name in UPDATE and table DDL.")
 
+(defun clutch--sql-table-start (sql end keyword)
+  "Return the name position after KEYWORD ending at END in SQL."
+  (let ((start (clutch-db-sql--skip-blank sql end)))
+    (if-let* ((pattern (and keyword (cdr (assoc-string keyword clutch--sql-table-modifiers t)))))
+        (with-syntax-table clutch-db-sql--syntax-table
+          (string-match pattern sql start)
+          (clutch-db-sql--skip-blank sql (match-end 0)))
+      start)))
+
 (defun clutch--sql-from-source-positions (sql &optional targets)
   "Return (START . DEPTH) for FROM/JOIN sources, including comma lists in SQL.
 TARGETS lists other source keywords, such as UPDATE.  For object lookups
@@ -307,11 +316,7 @@ that include TABLE, also descend into parenthesized table lists."
           (puthash (match-beginning 0) (match-end 0) matches)
           (setq pos (match-end 0)))))
     (cl-flet ((source (end depth &optional keyword)
-                (let ((start (if targets (clutch-db-sql--skip-blank sql end) end)))
-                  (when-let* ((pattern (cdr (assoc keyword clutch--sql-table-modifiers))))
-                    (with-syntax-table clutch-db-sql--syntax-table
-                      (string-match pattern sql start))
-                    (setq start (clutch-db-sql--skip-blank sql (match-end 0))))
+                (let ((start (if targets (clutch--sql-table-start sql end keyword) end)))
                   (puthash depth t clauses)
                   (push (cons start depth) sources))))
       (clutch-db-sql-scan-code
@@ -455,7 +460,22 @@ wins.  Return nil when no scope around point has the source."
   "Return the table token for table SOURCE of a cached query scope."
   (if (clutch-db-sql-table-schema source)
       source
-    (clutch--normalize-statement-table-token source)))
+    (clutch-db-sql-table-name source)))
+
+(defun clutch--sql-read-name (sql start qualified)
+  "Read an identifier at START in SQL as (END . NAME).
+When QUALIFIED, read its dotted components with their original quoting."
+  (let ((pos start) end parts)
+    (while (and pos (< pos (length sql))
+                (or qualified (/= (aref sql pos) ?\[))
+                (let ((next (clutch-db-sql--token-end sql pos "[[:alnum:]_$#@]*")))
+                  (when (and next (> next pos))
+                    (setq end next))))
+      (push (substring sql pos end) parts)
+      (setq pos (and qualified (clutch-db-sql--skip-blank sql end)))
+      (setq pos (and pos (< pos (length sql)) (= (aref sql pos) ?.)
+                     (clutch-db-sql--skip-blank sql (1+ pos)))))
+    (when parts (cons end (if (cdr parts) (string-join (nreverse parts) ".") (car parts))))))
 
 (defun clutch--completion-read-source (sql masked start output-plans)
   "Read a FROM source at START in SQL, returning (ALIAS . SOURCE).
@@ -481,11 +501,11 @@ MASKED preserves positions in SQL.  OUTPUT-PLANS shares derived SELECTs."
       (while (and (< pos len) (= (aref masked pos) ?\())
         (cl-incf depth)
         (setq pos (clutch-db-sql--skip-blank masked (1+ pos))))
-      (when (and (eq pos (string-match "[[:alnum:]_$#.`\"]+" masked pos))
-                 (not (string-suffix-p "." (match-string 0 masked)))
-                 (not (and (> depth 0) (member-ignore-case (match-string 0 masked)
-                                                           '("SELECT" "VALUES" "TABLE")))))
-        (setq source (match-string 0 sql) pos (match-end 0)
+      (when-let* ((name (clutch--sql-read-name sql pos t))
+                  ((not (eq (and (< (car name) len) (aref masked (car name))) ?.)))
+                  ((not (and (> depth 0) (member-ignore-case (cdr name)
+                                                            '("SELECT" "VALUES" "TABLE"))))))
+        (setq source (cdr name) pos (car name)
               alias (clutch--sql-alias-name (clutch-db-sql-table-qualifier source)))
         (read-alias)
         (while (and (> depth 0) (< pos len) (= (aref masked pos) ?\)))
@@ -615,55 +635,33 @@ FROM-SOURCES, when supplied, reuses source positions from the statement cache."
         tables aliases)
     (while (and (< pos end)
                 (string-match
-                 (rx
-                  (or (seq (group (or (seq word-start (or "from" "join" "update" "into")
-                                           (+ (in " \t\n\r"))) ","))
-                           (* (in " \t\n\r"))
-                           (group (+ (in alnum "_$#.`\""))))
-                      (seq word-start (or (seq "truncate" (+ (in " \t\n\r")) "table")
-                                          (seq "alter" (+ (in " \t\n\r")) "table")
-                                          (seq "drop" (+ (in " \t\n\r")) "table"))
-                           (+ (in " \t\n\r"))
-                           (group (+ (in alnum "_$#.`\""))))
-                      (seq word-start "create" (+ (in " \t\n\r"))
-                           (? (seq (or "unique" "fulltext" "spatial")
-                                   (+ (in " \t\n\r"))))
-                           "index"
-                           (*? anything)
-                           word-start "on"
-                           (+ (in " \t\n\r"))
-                           (group (+ (in alnum "_$#.`\""))))))
+                 (rx (or (seq word-start (group-n 1 (or "from" "join" "update" "into")) (+ (in " \t\n\r\f")))
+                         (group-n 1 ",")
+                         (seq word-start (or "truncate" "alter" "drop") (+ (in " \t\n\r")) (group "table") word-end)
+                         (seq word-start "create" (+ (in " \t\n\r"))
+                              (? (seq (or "unique" "fulltext" "spatial") (+ (in " \t\n\r"))))
+                              "index" (*? anything) word-start "on" word-end)))
                  masked pos)
                 (< (match-beginning 0) end))
-      (if (and (equal (match-string 1 text) ",")
-               (not (gethash (1+ (match-beginning 1)) comma-sources)))
-          (setq pos (1+ (match-beginning 1)))
-        (let* ((dml-match (match-string 1 text))
-               (table-end (or (match-end 2)
-                              (match-end 3)
-                              (match-end 4)))
-               (table-token (or (match-string 2 text)
-                                (match-string 3 text)
-                                (match-string 4 text)))
-               (table (if (and qualified (clutch-db-sql-table-schema table-token))
-                          table-token
-                        (clutch--normalize-statement-table-token table-token)))
-               (alias-consumed-end table-end))
-          (setq pos table-end)
-          (when (and dml-match
-                     (string-match clutch--sql-source-alias-regexp
-                                   masked table-end)
-                     (= (match-beginning 0) table-end)
-                     (< (match-beginning 0) end))
-            (let ((alias-consumed-match-end (match-end 0))
-                  (alias-token (match-string 1 text)))
-              (when (clutch--sql-source-alias-p alias-token)
-                (setq alias-consumed-end alias-consumed-match-end)
-                (push (cons (clutch--sql-alias-name alias-token) table)
-                      aliases))))
-          (setq pos alias-consumed-end)
-          (when table (push table tables)))))
+      (let ((keyword (match-string 1 masked)) (ddl-keyword (match-string 2 masked)))
+        (setq pos (match-end 0))
+        (when-let* (((or (not (equal keyword ",")) (gethash pos comma-sources)))
+                    (start (clutch--sql-table-start masked pos (or keyword ddl-keyword)))
+                    (name (clutch--sql-read-name text start t)))
+          (let ((table (if (and qualified (clutch-db-sql-table-schema (cdr name)))
+                           (cdr name)
+                         (clutch-db-sql-table-name (cdr name)))))
+            (push table tables)
+            (setq pos (car name))
+            (when (and keyword
+                       (eq pos (string-match clutch--sql-source-alias-regexp masked pos))
+                       (< (match-beginning 1) end))
+              (let ((token (match-string 1 text)) (after (match-end 0)))
+                (when (clutch--sql-source-alias-p token)
+                  (push (cons (clutch--sql-alias-name token) table) aliases)
+                  (setq pos after))))))))
     (cons (nreverse tables) (nreverse aliases))))
+
 
 (defun clutch--query-scope-tables-and-aliases (schema)
   "Return (TABLES . ALIASES) in SCHEMA for point's query scope.
@@ -713,8 +711,7 @@ A source is a table name or a parenthesized subquery."
          masked pos nil
          (lambda (close ch depth) (and (eq ch ?\)) (= depth 1) (1+ close)))
          (clutch-db-connection-sql-dialect clutch-connection) "()")
-      (string-match "[[:alnum:]_$#.`\"]*" masked pos)
-      (and (> (match-end 0) pos) (match-end 0)))))
+      (car (clutch--sql-read-name masked pos t)))))
 
 (defun clutch--find-alias-in-range (text masked alias stmt-beg search-beg search-end)
   "Search for ALIAS definition in TEXT between SEARCH-BEG and SEARCH-END.
@@ -786,19 +783,10 @@ With QUALIFIED-FROM, start there and keep dotted names with their delimiters."
       (while (and (< pos len) (<= pos offset))
         (if-let* ((skip (clutch-db-sql-skip-literal-or-comment sql pos)))
             (setq pos skip)
-          (let ((start pos) parts end)
-            (while (and pos (< pos len)
-                        (or qualified-from (not (eq (aref sql pos) ?\[)))
-                        (setq end (clutch-db-sql--token-end sql pos "[[:alnum:]_$#@]*"))
-                        (> end pos))
-              (push (substring sql pos end) parts)
-              (setq pos (when qualified-from
-                          (let ((dot (clutch-db-sql--skip-blank sql end)))
-                            (when (and (< dot len) (= (aref sql dot) ?.))
-                              (clutch-db-sql--skip-blank sql (1+ dot)))))))
-            (when (and parts (< offset end))
-              (throw 'found (cons start (string-join (nreverse parts) "."))))
-            (setq pos (max (1+ start) (or end start)))))))))
+          (let ((name (clutch--sql-read-name sql pos qualified-from)))
+            (when (and name (< offset (car name)))
+              (throw 'found (cons pos (cdr name))))
+            (setq pos (or (car name) (1+ pos)))))))))
 
 (defun clutch--xref-symbol-at-point ()
   "Return (BEG . SYMBOL) for the SQL identifier at point, or nil."
@@ -884,13 +872,6 @@ buffer text and cached metadata differ only by case."
            :test (lambda (needle candidate)
                    (string-equal (downcase needle)
                                  (downcase candidate)))))
-
-(defun clutch--normalize-statement-table-token (token)
-  "Normalize a raw table TOKEN parsed from SQL into a bare table name.
-Handles schema-qualified names like \"HR\".\"EMPLOYEES\" or `db`.`table`."
-  (let* ((stripped (replace-regexp-in-string "[\"`]" "" token))
-         (parts (split-string stripped "\\." t)))
-    (car (last parts))))
 
 (defun clutch--statement-table-identifiers-in-sql (sql)
   "Return table identifiers referenced in SQL.
