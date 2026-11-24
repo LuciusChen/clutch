@@ -1565,6 +1565,7 @@ table with its schema."
   "Hidden locator indices and visible source PK indices should stay distinct."
   (let* ((prep (list :table "users"
                      :source-token "APP.users"
+                     :writable-projection 'star
                      :candidate (list :kind 'primary-key
                                       :name "PRIMARY"
                                       :columns '("id"))
@@ -1619,6 +1620,9 @@ table with its schema."
   (should (equal (clutch--writable-select-projection
                   "SELECT price retail_price FROM products")
                  '(nil)))
+  (should (equal (clutch--writable-select-projection
+                  "SELECT p.*, p.price AS cost FROM products p" "products")
+                 '(star "price")))
   (let* ((prep '(:hidden-aliases ("clutch__rid_0")
                  :writable-projection (nil "id")))
          (defs (clutch--apply-row-identity-column-metadata
