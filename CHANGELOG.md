@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- SQLite row edits use an available physical rowid even when a table declares a column named `rowid`.
+
 - Column completion and alias navigation recognize grouped single tables, quoted table names with spaces, and SQLite UPDATE conflict clauses.
 
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
