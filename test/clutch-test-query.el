@@ -175,20 +175,29 @@
       '("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, team TEXT)"
         "INSERT INTO people (id, name, team) VALUES (1, 'alpha', 'a'), (2, 'alpha', 'b'), (3, 'beta', 'b')")
       ;; The key is not projected, and names repeat across rows.
-      "WITH c (n, t) AS (SELECT name, team FROM people) SELECT n, t FROM c ORDER BY t, n"
+      "WITH c (n, t) AS (SELECT name, team FROM people) SELECT n, t, n AS other_name FROM c ORDER BY t, n"
     (cl-flet ((table-rows ()
                 (clutch-db-result-rows
                  (clutch-db-query
                   conn "SELECT id, name, team FROM people ORDER BY id")))
-              (edit-first-name (value)
+              (stage (column value)
                 (let ((row (car clutch--result-rows)))
                   (clutch-result--apply-edit
-                   0 0 value row (cons nil (car row))))
+                   0 column value row (cons nil (nth column row)))))
+              (submit ()
                 (cl-letf (((symbol-function 'yes-or-no-p)
                            (lambda (&rest _) t)))
                   (clutch-result-submit))))
       (should (equal clutch--result-source-table "people"))
-      (edit-first-name "gamma")
+      (stage 0 "gamma")
+      (stage 2 "other")
+      (should-error (submit) :type 'user-error)
+      (should (= (length clutch--pending-edits) 2))
+      (should (equal (cadar (table-rows)) "alpha"))
+      (stage 2 "gamma")
+      (clutch-result-copy-pending-sql)
+      (should (string-search "SET \"name\" = 'gamma' WHERE" (current-kill 0)))
+      (submit)
       (should (equal (table-rows)
                      '((1 "gamma" "a") (2 "alpha" "b") (3 "beta" "b"))))
       (clutch-test--with-minibuffer-answers '("t" "= 'b'")
@@ -197,7 +206,8 @@
       (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
                              clutch--result-rows)
                      '(("alpha" "b") ("beta" "b"))))
-      (edit-first-name "delta")
+      (stage 0 "delta")
+      (submit)
       (should (equal (table-rows)
                      '((1 "gamma" "a") (2 "delta" "b") (3 "beta" "b")))))))
 

@@ -34,6 +34,8 @@
 
 - Copy as INSERT and staged inserts use the underlying columns on every result page, including when an alias names another column of the table. Copied and exported INSERTs list each selected source column once. Editing and deletion also require the row key to come from the key column itself.
 
+- UPDATE assigns each source column once. Staging conflicting values through two aliases of the same column on one row now stops the batch and preserves both edits.
+
 - Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 
 - Reopening a connected console keeps its current mode and SQL dialect when its saved connection settings have changed.
