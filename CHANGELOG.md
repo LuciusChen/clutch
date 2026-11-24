@@ -28,7 +28,7 @@
 
 - Copying or saving staged SQL after disconnecting now reports that the result’s connection is closed.
 
-- Inserting or cloning a projected row writes to the underlying columns, including when an alias names a different column of the same table. Editing and deletion also require the row key to come from the key column itself.
+- Copy as INSERT and staged inserts use the underlying columns on every result page, including when an alias names another column of the table. Editing and deletion also require the row key to come from the key column itself.
 
 - Re-editing a staged insert keeps its target when earlier staged inserts are discarded.
 

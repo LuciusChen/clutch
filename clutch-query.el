@@ -818,12 +818,11 @@ as its last columns."
                         (nth 2 edit)
                         (substring sql (nth 1 edit)))))))
 
-(defun clutch--prepare-row-identity-query (conn sql &optional candidate table)
+(defun clutch--prepare-row-identity-query (conn sql)
   "Return a row identity preparation plist for executing SQL on CONN.
 The returned plist contains :sql, :table, :candidate, :hidden-aliases,
 :augmented, and :identity-status.  If no identity candidate is available, :sql
 is the original SQL.
-CANDIDATE and TABLE reuse row identity already established by a result buffer.
 A query that starts with a WITH clause reads its table as
 `clutch--row-identity-cte-chain' finds it, and :cte is then non-nil.  When
 that finds none, the query has no table, so a CTE's name is never looked up
@@ -833,25 +832,16 @@ key would change the current row instead of the one shown."
   (let* ((analysis-sql (clutch-db-sql-normalize sql))
          (with-p (clutch-db-sql-starts-with-keyword-p analysis-sql '("WITH")))
          (chain (and with-p (clutch--row-identity-cte-chain analysis-sql)))
-         (source-token (or (plist-get candidate :source-token)
-                           (and (not table)
-                                (if with-p
-                                    (plist-get chain :token)
-                                  (clutch-db-sql--source-table-token
-                                   analysis-sql)))))
-         (table (or table
-                    (and source-token
-                         (clutch-db--source-table-name conn source-token))))
+         (source-token (if with-p (plist-get chain :token)
+                         (clutch-db-sql--source-table-token analysis-sql)))
+         (table (and source-token (clutch-db--source-table-name conn source-token)))
          (source-schema (and source-token
                              (clutch-db--source-table-schema conn source-token)))
          (source-catalog (and source-token
                               (clutch-db--source-table-catalog conn source-token)))
          candidates
          identity-error)
-    (cond
-     (candidate
-      (setq candidates (list candidate)))
-     ((and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
+    (when (and table (not (clutch-db-sql-reads-table-history-p analysis-sql)))
       (let* ((start (float-time))
              (cached (clutch--cached-row-identity
                       conn table source-schema source-catalog)))
@@ -879,7 +869,7 @@ key would change the current row instead of the one shown."
                      (clutch-db--error-message identity-error))
            (format "Resolved %s"
                    (or (plist-get (car candidates) :name) "no candidate")))
-         (- (float-time) start)))))
+         (- (float-time) start))))
     (let* ((candidate (car candidates))
            (expressions (and candidate
                              (clutch--row-identity-select-expressions
@@ -1244,13 +1234,20 @@ and signal `clutch-query-interrupted'."
                         (and prepare-result-p
                              (append result-context
                                      (clutch-db-query-result-context connection sql))))
+                       (base (or (plist-get result-context :base-query) sql))
+                       (filter (plist-get result-context :where-filter))
                        (row-identity-prep
                         (and prepare-result-p
                              (or (plist-get result-context :row-identity-prep)
-                                 (and (clutch-db-sql-pageable-query-p sql)
+                                 (and (clutch-db-sql-pageable-query-p base)
                                       (clutch--prepare-row-identity-query
-                                       connection sql)))))
-                       (identity-sql (or (plist-get row-identity-prep :sql) sql))
+                                       connection base)))))
+                       (prepared-sql (plist-get row-identity-prep :sql))
+                       (identity-sql (cond ((and filter prepared-sql)
+                                            (clutch-db-apply-where
+                                             connection prepared-sql filter))
+                                           (prepared-sql)
+                                           (t sql)))
                        (server-pageable
                         (and prepare-result-p
                              (if (plist-member result-context :server-pageable)
