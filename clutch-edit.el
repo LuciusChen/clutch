@@ -1507,8 +1507,10 @@ Use \\[clutch-result-submit] in the result buffer to submit."
       (overlay-put ov 'face 'clutch-insert-field-error-face)
       (overlay-put ov 'after-string hint)
       (overlay-put ov 'help-echo message)
-      (overlay-put ov 'priority 100)
-      (overlay-put ov 'evaporate t)
+      ;; An empty value shares its display position with the placeholder.
+      (when (< beg end)
+        (overlay-put ov 'priority 100)
+        (overlay-put ov 'evaporate t))
       (clutch-result-insert--set-field-prop field :error-overlay ov)
       (clutch-result-insert--set-field-prop field :error-message message))))
 
@@ -1518,7 +1520,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (value (clutch-result-insert--field-value field))
          (detail (plist-get field :detail))
          (col-def (plist-get field :column-def)))
-    (unless (string-empty-p value)
+    (when (and (plist-get field :provided) (not (plist-get field :special-value)))
       (condition-case err
           (clutch-result--field-validation-message name value col-def detail)
         (user-error (error-message-string err))))))
