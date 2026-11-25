@@ -184,7 +184,7 @@ Keep displayers pure and cheap: they run on the result rendering path, though re
 
 ## Insert Buffer Keys
 
-The insert buffer is intentionally form-like: `TAB` moves between fields, while completion stays on Emacs' completion keys.
+In the insert form, `TAB` moves between fields. Use `C-h m` to see its key bindings.
 
 | Key | Action |
 |----|----|
@@ -265,6 +265,7 @@ Staging a field edit with `C-c C-c` returns to the same field in the Record view
 |-----------|-------------------------------------|
 | `s`       | Show DDL / source                   |
 | `g`       | Refresh describe buffer             |
+| `q`       | Quit the object view                |
 | `C-c C-d` | Describe object at point, or prompt |
 | `C-c C-o` | Show object actions                 |
 
@@ -568,7 +569,9 @@ Embark only exposes secondary object actions. Default actions such as `C-c C-j` 
 
 Requires the `transient` package (built-in since Emacs 28.1).
 
-Press `C-c ?` to open the transient menu. The main menu is headed by the connection it acts on. The **Objects** group contains `Jump to object`, `Describe object`, `Object actions`, `ER view` (`v`), `Switch schema/db`, and `Refresh schema`.
+Press `C-c ?` to open the transient menu. The SQL menu is headed by the connection it acts on. The **Objects** group contains `Jump to object`, `Describe object`, `Object actions`, `ER view` (`v`), `Switch schema/db`, and `Refresh schema`.
+
+In a Redis console, `C-c ? x` and `C-c C-c` both execute the current line. Semicolons are part of the Redis command text.
 
 Finite state is displayed as parenthesized choices, with the active choice highlighted. For example, the connection menu shows `Auto-commit (manual|auto)`, and the result menu shows current filter, sort, copy-refinement, and layout states.
 

@@ -885,6 +885,7 @@ The exact-name match only needs entries under the name's prefix."
         (should (eq selected-mode 'json-mode))
         (should fontified)
         (should buffer-read-only)
+        (should (eq (key-binding "q") #'quit-window))
         (should (eq (lookup-key (current-local-map) (kbd "s"))
                     #'clutch-object-show-ddl-or-source))
         (should (eq (lookup-key (current-local-map) (kbd "g"))

@@ -35,9 +35,10 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'transient)
 
 (declare-function clutch--execute-and-mark "clutch-query" (sql beg end &optional at-point))
-(declare-function clutch--install-query-keybindings "clutch-query" (map))
+(declare-function clutch--install-query-keybindings "clutch-query" (map dispatch &optional line-command))
 (declare-function clutch--query-mode-common-setup "clutch-query" (&optional mode-line-name))
 (declare-function redis-command "redis" (conn command &rest arguments))
 (declare-function redis-connect "redis" (params))
@@ -159,16 +160,28 @@ lists.  Stop before those lists can grow without bound."
       (user-error "No Redis command at point"))
     (clutch--execute-and-mark command beg end t)))
 
+(transient-define-prefix clutch-redis-dispatch ()
+  "Redis command-console menu."
+  [:description clutch--dispatch-context-description
+   :pad-keys t
+   ["Connection"
+    ("c" "Connect" clutch-connect)
+    ("q" "Query console" clutch-query-console)
+    ("S" "Prepare SSH" clutch-prepare-ssh-host)
+    ("d" "Disconnect" clutch-disconnect)]
+   ["Run"
+    ("x" "Command at point" clutch-redis-execute-command-at-point)]
+   ["Keys"
+    ("j" "Jump to key" clutch-jump)
+    ("D" "Describe key" clutch-describe-dwim)
+    ("o" "Object actions" clutch-act-dwim)
+    ("s" "Refresh keys" clutch-refresh-schema)]
+   ["Tools"
+    ("k" "Copy agent context" clutch-copy-context-for-agent)]])
+
 (defvar clutch-redis-mode-map
   (make-sparse-keymap)
   "Keymap for `clutch-redis-mode'.")
-
-(defun clutch-redis--ensure-keybindings ()
-  "Install Redis query-console key bindings."
-  (clutch--install-query-keybindings clutch-redis-mode-map)
-  (define-key clutch-redis-mode-map
-              (kbd "C-c C-c")
-              #'clutch-redis-execute-command-at-point))
 
 ;;;###autoload
 (define-derived-mode clutch-redis-mode prog-mode "clutch-redis"
@@ -176,7 +189,8 @@ lists.  Stop before those lists can grow without bound."
 \\<clutch-redis-mode-map>
 
 \\[clutch-redis-execute-command-at-point]	Execute Redis command at point."
-  (clutch-redis--ensure-keybindings)
+  (clutch--install-query-keybindings clutch-redis-mode-map #'clutch-redis-dispatch
+                                    #'clutch-redis-execute-command-at-point)
   (setq-local font-lock-defaults '(clutch-redis-font-lock-keywords))
   (setq-local comment-start "#")
   (setq-local comment-end "")

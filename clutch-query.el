@@ -109,19 +109,20 @@ When nil, console persistence falls back to `clutch--console-name'.")
 (defvar-local clutch--console-ad-hoc-params nil
   "Connection params for a query console not backed by a saved profile.")
 
-(defun clutch--install-query-keybindings (map)
-  "Install common query-console key bindings into MAP."
-  (define-key map (kbd "C-c C-c") #'clutch-execute-dwim)
-  (define-key map (kbd "C-c C-r") #'clutch-execute-region)
-  (define-key map (kbd "C-c C-b") #'clutch-execute-buffer)
+(defun clutch--install-query-keybindings (map dispatch &optional line-command)
+  "Install console keys in MAP, with DISPATCH as its menu.
+When LINE-COMMAND is given, bind it in place of statement and range execution."
+  (define-key map (kbd "C-c C-c") (or line-command #'clutch-execute-dwim))
+  (unless line-command
+    (define-key map (kbd "C-c C-r") #'clutch-execute-region)
+    (define-key map (kbd "C-c C-b") #'clutch-execute-buffer))
   (define-key map (kbd "C-c C-e") #'clutch-connect)
-  (clutch--install-transaction-keybindings map)
   (define-key map (kbd "C-c C-j") #'clutch-jump)
   (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
   (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
   (define-key map (kbd "C-c C-l") #'clutch-switch-schema)
   (define-key map (kbd "C-c C-s") #'clutch-refresh-schema)
-  (define-key map (kbd "C-c ?") #'clutch-dispatch)
+  (define-key map (kbd "C-c ?") dispatch)
   (define-key map (kbd "C-g") #'clutch-cancel-query-or-quit)
   map)
 
@@ -2348,7 +2349,8 @@ Accumulates input until a statement terminator ends it, then executes."
 (defvar clutch-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map sql-mode-map)
-    (clutch--install-query-keybindings map)
+    (clutch--install-query-keybindings map #'clutch-dispatch)
+    (clutch--install-transaction-keybindings map)
     (define-key map (kbd "C-c C-v") 'clutch-er-diagram)
     (define-key map (kbd "C-c C-z") #'undefined)
     (define-key map (kbd "C-c C-n") #'undefined)

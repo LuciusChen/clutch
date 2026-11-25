@@ -500,19 +500,11 @@ path expressions."
    ["Completion"
     ("i" "Complete identifier" clutch-mongodb-complete-at-point)]])
 
-(defun clutch-mongodb--install-query-keybindings (map)
-  "Install MongoDB query-console key bindings into MAP."
-  (clutch--install-query-keybindings map)
-  (dolist (key '("C-c C-m" "C-c C-u" "C-c C-a"))
-    (define-key map (kbd key) nil))
-  (define-key map (kbd "C-c C-p") #'clutch-mongodb-explain-query-at-point)
-  (define-key map (kbd "C-c ?") #'clutch-mongodb-dispatch)
-  map)
-
 (defvar clutch-mongodb-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map prog-mode-map)
-    (clutch-mongodb--install-query-keybindings map)
+    (clutch--install-query-keybindings map #'clutch-mongodb-dispatch)
+    (define-key map (kbd "C-c C-p") #'clutch-mongodb-explain-query-at-point)
     (define-key map (kbd "C-c TAB") #'clutch-mongodb-complete-at-point)
     (define-key map (kbd "TAB") #'clutch-mongodb-complete-or-indent)
     map)
