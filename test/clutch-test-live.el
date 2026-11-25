@@ -2191,6 +2191,9 @@ submitted updated B's table of the same name."
       (cl-labels ((table (database)
                     (concat database (if (eq clutch-test-backend 'sqlserver) ".dbo.t" ".t")))
                   (only-b ()
+                    (clutch-test--await
+                     (lambda () (and (gethash clutch-connection clutch--schema-cache)
+                                     (not (clutch-db-in-use-p clutch-connection)))))
                     (cl-find "only_b" (clutch--ensure-column-details clutch-connection "t")
                              :key (lambda (col) (plist-get col :name)) :test #'equal))
                   (value (database)
@@ -2202,16 +2205,19 @@ submitted updated B's table of the same name."
               (dolist (database (list a b))
                 (clutch-db-query admin (format "CREATE DATABASE %s" database))
                 (clutch-db-query
-                 admin (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20))"
+                 admin (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20), parent_id int)"
                                (table database)))
                 (clutch-db-query
-                 admin (format "INSERT INTO %s VALUES (1, 'orig')" (table database))))
+                 admin (format "INSERT INTO %s (id, v) VALUES (1, 'orig')" (table database))))
               (clutch-db-query admin (format "ALTER TABLE %s ADD only_b int" (table b)))
+              (clutch-db-query admin (format "ALTER TABLE %s ADD FOREIGN KEY (parent_id) REFERENCES %s(id)"
+                                           (table a) (table a)))
               (clutch-test--with-live-console params
                 (should-not (only-b))
-                (clutch-test--run-in-console "SELECT id, v FROM t")
+                (clutch-test--run-in-console "SELECT id, v, parent_id FROM t")
                 (push (get-buffer (clutch-result--buffer-name)) results)
                 (with-current-buffer (car results)
+                  (clutch-test--await (lambda () (assq 2 clutch--fk-info)))
                   (clutch-test--xtdb-edit 0 "v" "edited")
                   (rename-buffer " *retained typed USE result*" t))
                 (clutch-test--run-in-console
@@ -2223,8 +2229,11 @@ submitted updated B's table of the same name."
                     (should (equal clutch--result-rows '(("orig"))))
                     (should (eq clutch--result-resolution-context 'unknown))))
                 (should (only-b))
+                (clutch-test--run-in-console "SELECT id, v, parent_id FROM t")
+                (clutch-test--await (lambda () (clutch--foreign-keys-cached-p clutch-connection "t")))
                 (should-not (eq (car results) (cadr results)))
                 (with-current-buffer (cadr results)
+                  (should (assq 2 clutch--fk-info))
                   (should-error (clutch-test--xtdb-submit) :type 'user-error))
                 (should (equal (list (value a) (value b)) '("orig" "orig")))
                 (clutch-test--run-in-console (format "USE %s" a))
@@ -2232,7 +2241,8 @@ submitted updated B's table of the same name."
                 (should (equal (list (value a) (value b)) '("edited" "orig")))))
           (dolist (buffer results)
             (when (buffer-live-p buffer)
-              (kill-buffer buffer)))
+              (with-current-buffer buffer
+                (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))))
           (dolist (database (list a b))
             (ignore-errors
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
