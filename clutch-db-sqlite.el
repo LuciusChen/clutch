@@ -471,6 +471,7 @@ FKS is an FK alist."
             :foreign-key (cdr (assoc name fks))
             :default     (unless generated dflt-val)
             :generated   generated
+            :read-only   (> hidden 1)
             :comment     nil))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-sqlite-conn) table

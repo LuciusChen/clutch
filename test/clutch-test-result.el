@@ -2021,8 +2021,10 @@ relation added by hand starts at the same field, offered after the key."
               (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
                                      clutch--result-rows)
                              '(("n" "b" "north b")))))
-            (show "id, CODE AS region_code, COUNTRY AS region_country")
+            (show "id, CODE AS region_code, COUNTRY AS region_country, label")
             (with-current-buffer result-buf
+              (clutch--goto-cell 0 3)
+              (should-error (clutch-result-edit-cell) :type 'user-error)
               (clutch-test--with-minibuffer-answers '("notes (code) from code")
                 (clutch-record--follow-column result-buf 1 0 t))
               (clutch-test--await-queries)
