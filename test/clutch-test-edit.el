@@ -574,9 +574,7 @@ field metadata without changing parsed names."
          :source-table "shipping_incidents")
       (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
       (with-current-buffer insert-buf
-        (should (string-match-p "C-c \\. Set current time"
-                                (substring-no-properties
-                                 (clutch-result-insert--header-line))))
+        (should (equal (clutch-result-insert--current-field-name) "severity"))
         (should-not (lookup-key clutch--result-insert-major-mode-map
                                 (kbd "C-c C-a")))
         (dolist (label '("id[ ]+\\[generated\\]"
@@ -630,9 +628,6 @@ field metadata without changing parsed names."
         (clutch--goto-cell 0 0)
         (clutch-clone-row-to-insert))
       (with-current-buffer insert-buf
-        (should (string-match-p "C-c \\. Set current time"
-                                (substring-no-properties
-                                 (clutch-result-insert--header-line))))
         (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
                                 (buffer-string)))
@@ -1676,8 +1671,12 @@ from closing."
           (clutch-result-insert--open-buffer
            "shipping_incidents" result-buf fields)
           (with-current-buffer insert-buf
+            (clutch-test--goto-insert-field-value (car (last columns)))
             (let ((err (should-error (clutch-result-insert-stage)
                                      :type 'user-error)))
+              (should (string-prefix-p
+                       (format "Field %s " (clutch-result-insert--current-field-name))
+                       (error-message-string err)))
               (when expected-message
                 (should (string-match-p expected-message
                                         (error-message-string err)))))))
@@ -1722,7 +1721,7 @@ from closing."
   "JSON child editors should validate parents, save JSON, and cancel cleanly."
   (dolist (case
            '((save
-              ""
+              "{"
               "{\n  \"severity\": \"high\",\n  \"ship_blocked\": true\n}"
               clutch-result-insert-json-finish
               "{\"severity\":\"high\",\"ship_blocked\":true}")
@@ -1748,6 +1747,7 @@ from closing."
                 (clutch-test--goto-insert-field-value "postmortem")
                 (clutch-result-insert-edit-json-field))
               (with-current-buffer editor-buf
+                (when (eq label 'save) (should (equal (buffer-string) parent-value)))
                 (erase-buffer)
                 (insert editor-text)
                 (cl-letf (((symbol-function 'quit-window)
@@ -1763,32 +1763,6 @@ from closing."
                          expected)))
               (when (buffer-live-p insert-buf)
                 (kill-buffer insert-buf))))))))
-  (ert-info ("insert editor rejects invalid parent field text")
-    (clutch-test--with-pop-to-buffer-capture editor-buf
-      (clutch-test--with-insert-result-buffer result-buf
-          (:columns '("postmortem")
-           :column-defs '((:name "postmortem" :type-category json))
-           :connection (make-clutch-test-conn :table "shipping_incidents"
-                                              :columns '((:name "postmortem" :type "json"))))
-        (let (insert-buf)
-          (clutch-result-insert--open-buffer
-           "shipping_incidents" result-buf '(("postmortem" . "hello")))
-          (setq insert-buf editor-buf)
-          (setq editor-buf nil)
-          (with-current-buffer insert-buf
-            (clutch-test--goto-insert-field-value "postmortem")
-            (let ((err (should-error (clutch-result-insert-edit-json-field)
-                                     :type 'user-error)))
-              (should (string-match-p "Field postmortem expects valid JSON"
-                                      (error-message-string err)))))
-          (should-not editor-buf)
-          (with-current-buffer insert-buf
-            (should (equal
-                     (plist-get (clutch-result-insert--field-state "postmortem")
-                                :value)
-                     "hello")))
-          (when (buffer-live-p insert-buf)
-            (kill-buffer insert-buf))))))
   (ert-info ("edit editor saves normalized JSON")
     (save-window-excursion
       (clutch-test--with-result-edit-buffer parent-buf "{\"a\":1}"

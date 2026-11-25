@@ -1729,6 +1729,11 @@ next field.  Returns nil when no matching field exists."
       ('datetime (format-time-string "%F %T" ts))
       (_ nil))))
 
+(defun clutch-result-insert--required-p (detail)
+  "Return non-nil when DETAIL describes a non-null column with no default."
+  (and (plist-member detail :nullable) (not (plist-get detail :nullable))
+       (not (plist-get detail :generated)) (not (plist-get detail :default))))
+
 (defun clutch-result-insert--field-tag-list (col-name)
   "Return display tags for insert field COL-NAME."
   (let* ((detail (clutch-result-insert--column-detail col-name))
@@ -1736,29 +1741,24 @@ next field.  Returns nil when no matching field exists."
          tags)
     (when (plist-get detail :generated)
       (push "generated" tags))
-    (when-let* ((default (plist-get detail :default)))
-      (push (format "default=%s" default) tags))
+    (when-let* ((default (plist-get detail :default))
+                (text (format "%s" default)))
+      (push (propertize (concat "default=" (car (clutch--cell-visible-prefix text 24)))
+                        'help-echo text)
+            tags))
     (setq tags (append (nreverse (clutch-result--field-metadata-tags col-def detail))
                        tags))
-    (when (and detail
-               (not (plist-get detail :nullable))
-               (not (plist-get detail :generated))
-               (not (plist-get detail :default)))
+    (when (clutch-result-insert--required-p detail)
       (push "required" tags))
     (nreverse tags)))
 
 (defun clutch-result-insert--header-line ()
   "Return the insert form header line."
   (concat
-   " Insert buffer"
+   " Insert into " (clutch--table-key-label clutch-result-insert--table)
    (clutch--status-separator)
    (clutch--key-hints
-    `(("C-c C-c" "Stage insert")
-      ("C-c C-k" "Cancel")
-      ("C-c C-n" "Set NULL")
-      ("C-c C-e" "Empty string")
-      ("C-c C-d" "Use default")
-      ("C-c ." "Set current time")))))
+    '(("C-c C-c" "Stage") ("C-c C-k" "Cancel")))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."
@@ -1770,15 +1770,11 @@ next field.  Returns nil when no matching field exists."
               (bounds (clutch-result-insert--field-value-bounds field)))
     (when (< (point) (car bounds))
       (goto-char (car bounds)))
-    (let ((line-start (save-excursion
-                        (goto-char (car bounds))
-                        (line-beginning-position)))
-          (prefix-end (save-excursion
-                        (goto-char (car bounds))
-                        (- (point) 2)))
-          (line-end (save-excursion
-                      (goto-char (cdr bounds))
-                      (line-end-position))))
+    (let* ((line-start (save-excursion
+                         (goto-char (car bounds))
+                         (line-beginning-position)))
+           (prefix-end (+ line-start (length (plist-get field :name))))
+           (line-end (cdr bounds)))
       (unless (overlayp clutch-result-insert--active-field-overlay)
         (setq-local clutch-result-insert--active-field-overlay
                     (make-overlay line-start line-end nil t t))
@@ -1867,22 +1863,19 @@ If nothing handles the completion, fall back to `completing-read'."
   (interactive)
   (let* ((field (clutch-result-insert--current-field-or-error))
          (field-name (plist-get field :name))
-         (raw (string-trim (clutch-result-insert--field-value field)))
+         (raw (clutch-result-insert--field-value field))
          (parent-buf (current-buffer)))
     (unless (clutch-result-insert--json-field-p field)
       (user-error "Field %s is not a JSON column" field-name))
-    (let ((value (clutch-result--json-normalize-string raw field-name)))
-      (let ((buf (clutch--open-json-sub-editor
-                  (format "*clutch-insert-json: %s.%s*"
-                          (clutch--table-key-name clutch-result-insert--table)
-                          field-name)
-                  value field-name
-                  #'clutch-result-insert-json-finish
-                  #'clutch-result-insert-json-cancel)))
-        (with-current-buffer buf
-          (setq-local clutch-result-insert-json--parent-buffer parent-buf
-                      clutch-result-insert-json--field-name field-name))
-        buf))))
+    (let ((buf (clutch--open-json-sub-editor
+                (format "*clutch-insert-json: %s.%s*"
+                        (clutch--table-key-name clutch-result-insert--table) field-name)
+                raw field-name
+                #'clutch-result-insert-json-finish #'clutch-result-insert-json-cancel)))
+      (with-current-buffer buf
+        (setq-local clutch-result-insert-json--parent-buffer parent-buf
+                    clutch-result-insert-json--field-name field-name))
+      buf)))
 
 ;;;###autoload
 (defun clutch-result-insert-json-finish ()
@@ -1912,8 +1905,8 @@ If nothing handles the completion, fall back to `completing-read'."
    clutch-result-insert-json--parent-buffer
    #'clutch-result-insert--normalize-point))
 
-(defun clutch-result-insert--populate-buffer ()
-  "Render the current canonical insert field state."
+(defun clutch-result-insert--populate-buffer (&optional new)
+  "Render the insert fields.  For a NEW row, begin at the first required field."
   (let ((label-width
          (clutch-result-insert--field-label-width
           (clutch-result-insert--all-column-names))))
@@ -1936,9 +1929,14 @@ If nothing handles the completion, fall back to `completing-read'."
             (setf (plist-get field :value-marker) value-marker)
             (clutch-result-insert--refresh-field-placeholder field))))))
   (clutch-result-insert--refresh-header-line)
-  (goto-char (point-min))
-  (goto-char (or (cdr (clutch-result-insert--current-field-value-bounds))
-                 (point-min)))
+  (let ((first (when new
+                 (or (seq-find (lambda (f)
+                                 (clutch-result-insert--required-p (plist-get f :detail)))
+                               clutch-result-insert--fields)
+                     (seq-find (lambda (f) (not (plist-get (plist-get f :detail) :generated)))
+                               clutch-result-insert--fields)))))
+    (goto-char (cdr (clutch-result-insert--field-value-bounds
+                     (or first (car clutch-result-insert--fields))))))
   (clutch-result-insert--normalize-point))
 
 (defun clutch-result-insert--clone-copy-column-p (detail cidx)
@@ -2016,7 +2014,7 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
                   clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
-      (clutch-result-insert--populate-buffer))
+      (clutch-result-insert--populate-buffer (not (or fields reedit clone-index))))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--ensure-live-result-context ()
@@ -2226,10 +2224,10 @@ immediately."
          (mapcar #'clutch-result-insert--validated-source-fields field-rows))
         (clutch-result-insert--clear-fields)
         (clutch-result-insert--populate-buffer)
-        (message "%s rows staged from %s import — C-c C-c to submit"
+        (message "%s rows staged from %s import — C-c C-c to submit%s"
                  (clutch--message-count row-count)
-                 (clutch--message-keyword
-                  (clutch-result-insert--delimiter-name delim))))))))
+                 (clutch--message-keyword (clutch-result-insert--delimiter-name delim))
+                 (clutch-result-insert--omission-hint field-rows)))))))
 
 (defun clutch-result-insert--parse-fields ()
   "Parse the insert buffer into an alist of (COLUMN . VALUE).
@@ -2341,8 +2339,22 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
   "Validate form FIELDS and return values keyed by their target columns."
   (cl-loop for (label . value) in fields
            for field = (clutch-result-insert--field-state label)
-           do (clutch-result-insert--validate-field label value)
+           do (condition-case err
+                  (clutch-result-insert--validate-field label value)
+                (user-error
+                 (goto-char (plist-get field :value-marker))
+                 (clutch-result-insert--normalize-point)
+                 (signal (car err) (cdr err))))
            collect (cons (plist-get field :source-column) value)))
+
+(defun clutch-result-insert--omission-hint (rows)
+  "Describe required form fields omitted by any of the label-keyed ROWS."
+  (let ((names (cl-loop for field in clutch-result-insert--fields
+                        for name = (plist-get field :name)
+                        when (and (clutch-result-insert--required-p (plist-get field :detail))
+                                  (seq-some (lambda (row) (not (assoc name row))) rows))
+                        collect name)))
+    (if names (concat " — required fields omitted: " (string-join names ", ")) "")))
 
 (defun clutch-result--insert-target (conn key sql)
   "Return how an INSERT names the table of metadata KEY on CONN.
@@ -2385,6 +2397,7 @@ table as `clutch-result--insert-target' does."
 Use \\[clutch-result-submit] in the result buffer to submit."
   (interactive)
   (let* ((fields (clutch-result-insert--parse-fields))
+         (hint (clutch-result-insert--omission-hint (list fields)))
          (result-buf clutch-result-insert--result-buffer)
          (entry clutch-result-insert--pending-entry))
     (unless fields (user-error "No values entered"))
@@ -2396,13 +2409,13 @@ Use \\[clutch-result-submit] in the result buffer to submit."
                            (user-error "Staged insert no longer exists"))))
             (setcar (nthcdr index clutch--pending-inserts) fields)
             (clutch--replace-row-at-index (+ (length (clutch--result-display-rows)) index))
-            (message "Staged insert updated — C-c C-c to submit"))
+            (message "Staged insert updated — C-c C-c to submit%s" hint))
         (let ((index (length clutch--pending-inserts)))
           (setq clutch--pending-inserts (append clutch--pending-inserts (list fields)))
           (clutch--append-pending-insert-row index))
-        (message "%s insertion%s staged — C-c C-c to submit"
+        (message "%s insertion%s staged — C-c C-c to submit%s"
                  (clutch--message-count (length clutch--pending-inserts))
-                 (if (= (length clutch--pending-inserts) 1) "" "s")))
+                 (if (= (length clutch--pending-inserts) 1) "" "s") hint))
       (clutch--refresh-footer-line)
       (force-mode-line-update))
     (quit-window 'kill)))

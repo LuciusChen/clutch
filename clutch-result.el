@@ -1693,6 +1693,9 @@ rect's selected indices — O(buffer)."
                         (clutch-refine--make-overlay
                          beg (prop-match-end match) 'secondary-selection 0))))))))
 
+(defconst clutch-refine--excluded-face '(:inherit (shadow default) :strike-through t)
+  "Inherit the normal background over the rectangle's selection highlight.")
+
 (defun clutch-refine--add-row-exclusion (ridx)
   "Add exclusion overlays for row RIDX within the rect's columns.
 Finds the row's line first, then scans only that line — O(buffer-to-row + line)."
@@ -1711,7 +1714,7 @@ Finds the row's line first, then scans only that line — O(buffer-to-row + line
                                          p 'clutch-col-idx nil eol)
                                         eol)))
                             (clutch-refine--make-overlay
-                             p end '(:inherit shadow :strike-through t) 1
+                             p end clutch-refine--excluded-face 1
                              'clutch-refine-row ridx)
                             (setq p end))
                         (setq p (1+ p)))))))))
@@ -1731,7 +1734,7 @@ Scans buffer once for this column — O(buffer)."
     (goto-char (point-min))
     (when-let* ((match (text-property-search-forward 'clutch-header-col cidx #'eql)))
       (clutch-refine--make-overlay (prop-match-beginning match) (prop-match-end match)
-                                   '(:inherit shadow :strike-through t) 1
+                                   clutch-refine--excluded-face 1
                                    'clutch-refine-col cidx))
     (goto-char (point-min))
     (cl-loop for match = (text-property-search-forward 'clutch-col-idx cidx #'eql)
@@ -1741,7 +1744,7 @@ Scans buffer once for this column — O(buffer)."
                   (when (memq (get-text-property beg 'clutch-row-idx)
                               (car clutch--refine-rect))
                     (clutch-refine--make-overlay beg end
-                                                 '(:inherit shadow :strike-through t) 1
+                                                 clutch-refine--excluded-face 1
                                                  'clutch-refine-col cidx))))))
 
 (defun clutch-refine--remove-col-exclusion (cidx)
@@ -1847,16 +1850,10 @@ RECT is (ROW-INDICES . COL-INDICES)."
               clutch--refine-saved-mode-line mode-line-format
               mode-line-format
               (concat
-               (propertize " " 'display '(space :align-to 0))
-               (propertize "REFINE  " 'face 'font-lock-warning-face)
-               (propertize "m" 'face 'font-lock-keyword-face)
-               (propertize " row   " 'face 'font-lock-comment-face)
-               (propertize "x" 'face 'font-lock-keyword-face)
-               (propertize " col   " 'face 'font-lock-comment-face)
-               (propertize "RET" 'face 'font-lock-keyword-face)
-               (propertize " confirm   " 'face 'font-lock-comment-face)
-               (propertize "C-g" 'face 'font-lock-keyword-face)
-               (propertize " cancel" 'face 'font-lock-comment-face)))
+               (propertize " REFINE  " 'face 'font-lock-warning-face)
+               (clutch--key-hints '(("m" "row") ("x" "col")
+                                    ("RET" "confirm") ("C-g" "cancel"))
+                                  'mode-line)))
   (clutch-refine-mode 1)
   (clutch-refine--init-overlays))
 
