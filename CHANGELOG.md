@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Column info and Record foreign keys follow the source column when a query gives it an alias. Computed fields no longer inherit details from a table column with the same name.
+- Column info and Record foreign keys follow the source column when a query gives it an alias. Computed fields no longer inherit details from a table column with the same name. SQL Server result metadata follows the current database after `USE`.
 
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 

@@ -1091,6 +1091,14 @@ Returns a `clutch-jdbc-conn'."
                                (cddr err)))))
             (unless switched
               (clutch-db-disconnect conn)))))
+      (when (clutch-jdbc--sqlserver-conn-p conn)
+        (condition-case err
+            (if-let* ((catalog (plist-get conn-params :catalog)))
+                (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn catalog)))
+              (clutch-jdbc--read-sqlserver-catalog conn))
+          (clutch-db-error
+           (clutch-db-disconnect conn)
+           (signal (car err) (cdr err)))))
       conn)))
 
 ;;;; Register backend
@@ -1205,6 +1213,11 @@ as is, or 0, meaning none, when CONN has no positive limit."
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
   (eq (clutch-jdbc--conn-driver conn) 'clickhouse))
+
+(defun clutch-jdbc--sqlserver-conn-p (conn)
+  "Return non-nil for a SQL Server connection CONN, including a custom URL."
+  (or (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
+      (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
 
 (defun clutch-jdbc--mongodb-conn-p (conn)
   "Return non-nil when CONN is any MongoDB JDBC connection."
@@ -1780,13 +1793,19 @@ Keep CONN busy through any cursor fetches."
              conn op (clutch-jdbc--execute-params conn payload t) #'receive))))
   nil)
 
+(defun clutch-jdbc--read-sqlserver-catalog (conn)
+  "Record the database of SQL Server CONN for result identity and metadata."
+  (let ((catalog (caar (clutch-db-result-rows (clutch-db-query conn "SELECT DB_NAME()")))))
+    (setf (clutch-jdbc-conn-params conn)
+          (plist-put (clutch-jdbc-conn-params conn) :catalog catalog))))
+
 (defun clutch-jdbc--namespace-statement-p (conn sql)
   "Return non-nil when SQL may move JDBC CONN into another schema.
-Oracle's ALTER SESSION and DuckDB's USE, SET and RESET do; the server
-says which schema they set."
+The server reports the effective namespace after these statements."
   (pcase (clutch-db-sql-leading-keyword sql)
     ("ALTER" (clutch-jdbc--oracle-conn-p conn))
-    ((or "USE" "SET" "RESET") (clutch-jdbc--duckdb-conn-p conn))))
+    ("USE" (or (clutch-jdbc--duckdb-conn-p conn) (clutch-jdbc--sqlserver-conn-p conn)))
+    ((or "SET" "RESET") (clutch-jdbc--duckdb-conn-p conn))))
 
 (defun clutch-jdbc--follow-schema (conn sql)
   "Follow JDBC CONN into the schema SQL may have set.
@@ -1796,14 +1815,16 @@ Failing to follow is only reported: SQL has run, and its outcome must
 still arrive."
   (when (clutch-jdbc--namespace-statement-p conn sql)
     (condition-case err
-        (if (clutch-jdbc--duckdb-conn-p conn)
-            (clutch-jdbc--refresh-duckdb-namespace conn)
+        (cond
+         ((clutch-jdbc--sqlserver-conn-p conn) (clutch-jdbc--read-sqlserver-catalog conn))
+         ((clutch-jdbc--duckdb-conn-p conn) (clutch-jdbc--refresh-duckdb-namespace conn))
+         (t
           (let ((schema (caar (clutch-db-result-rows
                                (clutch-db-query
                                 conn
                                 "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))))
             (unless (equal schema (clutch-jdbc--conn-schema conn))
-              (clutch-jdbc--use-oracle-schema conn schema))))
+              (clutch-jdbc--use-oracle-schema conn schema)))))
       (clutch-db-error
        (message "Could not follow the current schema: %s" (cadr err))))))
 
@@ -1986,8 +2007,7 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
 
 (cl-defmethod clutch-db-resolve-column-names ((conn clutch-jdbc-conn) names source-token)
   "Ask SQL Server how NAMES bind on SOURCE-TOKEN in CONN's catalog collation."
-  (if (not (or (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
-               (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
+  (if (not (clutch-jdbc--sqlserver-conn-p conn))
       (cl-call-next-method)
     ;; Browse mode 2 reports a view's own column names, also through a synonym.
     (let* ((select (clutch-db--column-binding-select conn names source-token))
@@ -2002,7 +2022,12 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
     (clutch-jdbc--rpc-async
      "describe-source-columns"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
-       (projection . ,(clutch-db--column-binding-select conn names source-token)))
+       ;; USE belongs to the batch being described.  It never runs on the
+       ;; metadata session, whose login database may differ from the primary's.
+       (projection . ,(concat
+                       (when-let* ((catalog (clutch-jdbc--conn-catalog conn)))
+                         (format "USE %s; " (clutch-db-escape-identifier conn catalog)))
+                       (clutch-db--column-binding-select conn names source-token))))
      (lambda (result) (funcall callback (clutch-db--column-bindings names (plist-get result :columns))))
      nil nil conn)))
 
@@ -2263,8 +2288,7 @@ Oracle's agent metadata queries use exact names; the SQL Server and DuckDB
 JDBC drivers use backslash-escaped LIKE patterns."
   (if (and name
            (or (clutch-jdbc--duckdb-conn-p conn)
-               (eq (clutch-jdbc--conn-driver conn) 'sqlserver)
-               (clutch-jdbc--url-prefix-p conn "jdbc:sqlserver:")))
+               (clutch-jdbc--sqlserver-conn-p conn)))
       (string-replace "%" "\\%"
                       (string-replace "_" "\\_"
                                       (string-replace "\\" "\\\\" name)))
@@ -2432,6 +2456,8 @@ such as main, in another catalog."
 PARAMS that already lead to it stay as they are, and so do DuckDB PARAMS
 when a reconnect could not return to it."
   (cond
+   ((clutch-jdbc--sqlserver-conn-p conn)
+    (plist-put (copy-sequence params) :catalog (clutch-jdbc--conn-catalog conn)))
    ((clutch-jdbc--duckdb-conn-p conn)
     (let ((catalog (clutch-jdbc--conn-catalog conn))
           (schema (clutch-jdbc--conn-schema conn)))
@@ -3072,7 +3098,8 @@ Only PostgreSQL and MySQL URLs have plans."
 (cl-defmethod clutch-db-database ((conn clutch-jdbc-conn))
   "Return the database for JDBC CONN."
   (let ((params (clutch-jdbc-conn-params conn)))
-    (or (plist-get params :database)
+    (or (and (clutch-jdbc--sqlserver-conn-p conn) (plist-get params :catalog))
+        (plist-get params :database)
         (if (clutch-jdbc--clickhouse-conn-p conn)
             (clutch-jdbc--clickhouse-url-database (plist-get params :url))
           (plist-get (clutch-jdbc--url-metadata (plist-get params :url))

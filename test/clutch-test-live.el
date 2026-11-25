@@ -2191,43 +2191,56 @@ Running the query again shows B's rows, which may then be edited."
             (ignore-errors
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
 
-(ert-deftest clutch-test-live-mysql-old-result-refuses-writes-after-a-typed-use ()
-  "A MySQL result left behind by a typed USE should refuse to submit.
+(ert-deftest clutch-test-live-old-result-refuses-writes-after-a-typed-use ()
+  "A result left behind by a typed USE should refuse to submit.
 Result buffers are named by database, so after `USE b' the result of
 database A stays in its own buffer, and an edit staged there and
 submitted updated B's table of the same name."
   :tags '(:clutch-live)
-  (unless (eq clutch-test-backend 'mysql)
-    (ert-skip "This regression covers MySQL's current database"))
+  (unless (memq clutch-test-backend '(mysql sqlserver))
+    (ert-skip "This regression covers MySQL and SQL Server USE"))
   (clutch-test--with-conn admin
     (let* ((a (format "clutch_typed_a_%d" (emacs-pid)))
            (b (format "clutch_typed_b_%d" (emacs-pid)))
-           (params (append (list :backend 'mysql :database a)
+           (params (append (list :backend clutch-test-backend :database a)
                            (clutch-test--live-connect-params)))
            results)
-      (cl-flet ((value (database)
-                  (caar (clutch-db-result-rows
-                         (clutch-db-query
-                          admin (format "SELECT v FROM %s.t WHERE id = 1" database))))))
+      (cl-labels ((table (database)
+                    (concat database (if (eq clutch-test-backend 'sqlserver) ".dbo.t" ".t")))
+                  (only-b ()
+                    (cl-find "only_b" (clutch--ensure-column-details clutch-connection "t")
+                             :key (lambda (col) (plist-get col :name)) :test #'equal))
+                  (value (database)
+                    (caar (clutch-db-result-rows
+                           (clutch-db-query
+                            admin (format "SELECT v FROM %s WHERE id = 1" (table database)))))))
         (unwind-protect
             (progn
               (dolist (database (list a b))
                 (clutch-db-query admin (format "CREATE DATABASE %s" database))
                 (clutch-db-query
-                 admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(20))"
-                               database))
+                 admin (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20))"
+                               (table database)))
                 (clutch-db-query
-                 admin (format "INSERT INTO %s.t VALUES (1, 'orig')" database)))
+                 admin (format "INSERT INTO %s VALUES (1, 'orig')" (table database))))
+              (clutch-db-query admin (format "ALTER TABLE %s ADD only_b int" (table b)))
               (clutch-test--with-live-console params
+                (should-not (only-b))
                 (clutch-test--run-in-console "SELECT id, v FROM t")
                 (push (get-buffer (clutch-result--buffer-name)) results)
+                (with-current-buffer (car results)
+                  (clutch-test--xtdb-edit 0 "v" "edited")
+                  (rename-buffer " *retained typed USE result*" t))
                 (clutch-test--run-in-console (format "USE %s" b))
                 (push (get-buffer (clutch-result--buffer-name)) results)
+                (should (only-b))
                 (should-not (eq (car results) (cadr results)))
                 (with-current-buffer (cadr results)
-                  (should-error (clutch-test--xtdb-edit 0 "v" "edited")
-                                :type 'user-error))
-                (should (equal (list (value a) (value b)) '("orig" "orig")))))
+                  (should-error (clutch-test--xtdb-submit) :type 'user-error))
+                (should (equal (list (value a) (value b)) '("orig" "orig")))
+                (clutch-test--run-in-console (format "USE %s" a))
+                (with-current-buffer (cadr results) (clutch-test--xtdb-submit))
+                (should (equal (list (value a) (value b)) '("edited" "orig")))))
           (dolist (buffer results)
             (when (buffer-live-p buffer)
               (kill-buffer buffer)))
