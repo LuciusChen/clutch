@@ -6316,9 +6316,9 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (cond
-                    ((equal sql "SELECT current_schemas(true)")
+                    ((equal sql "SELECT current_schema(), current_schemas(true)")
                      (cl-incf asked)
-                     (clutch-db-test--make-pg-result :rows `((,path))))
+                     (clutch-db-test--make-pg-result :rows `(("s1" ,path))))
                     ((string-match-p "TO s1, s3" sql)
                      (setq path "{pg_catalog,s1,s3}")
                      (clutch-db-test--make-pg-result :command-tag "SET"))
@@ -6326,10 +6326,10 @@ again after SQL that may change it, a rollback included."
                      (setq path "{pg_catalog,s1,s2}")
                      (clutch-db-test--make-pg-result :command-tag "ROLLBACK"))
                     (t (clutch-db-test--make-pg-result))))))
+        (should (equal (clutch-db-current-schema conn) "s1"))
         (should (equal (clutch-db-resolution-context conn)
                        '("app" "{pg_catalog,s1,s2}")))
-        (should (equal (clutch-db-resolution-context conn)
-                       '("app" "{pg_catalog,s1,s2}")))
+        (should (equal (alist-get 'search-path (clutch-db-metadata-scope conn)) path))
         (should (= asked 1))
         (clutch-db-query conn "SET search_path TO s1, s3")
         (should (equal (clutch-db-resolution-context conn)
@@ -6356,9 +6356,8 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (cond
-                    ((equal sql "SELECT current_schema()")
-                     (clutch-db-test--make-pg-result
-                      :rows `((,pgsql-null))))
+                    ((equal sql "SELECT current_schema(), current_schemas(true)")
+                     (clutch-db-test--make-pg-result :rows `((,pgsql-null ["pg_catalog"]))))
                     ((string-match-p "SELECT obj_description" sql)
                      (clutch-db-test--make-pg-result
                       :rows `((,pgsql-null))))
@@ -6423,12 +6422,12 @@ SET from being followed.  XTDB has no search_path to switch."
           (shown 0))
       (cl-flet ((server (sql)
                   (cond
-                   ((equal sql "SELECT current_schema()")
+                   ((equal sql "SELECT current_schema(), current_schemas(true)")
                     (cl-incf asked)
                     (clutch-db-test--make-pg-result
                      :rows `((,(if (equal path "nowhere")
                                    pgsql-null
-                                 (car (split-string path ", ")))))))
+                                 (car (split-string path ", "))) ,path))))
                    ((equal sql "SHOW search_path")
                     (cl-incf shown)
                     (clutch-db-test--make-pg-result :rows `((,path))))
@@ -6572,8 +6571,8 @@ as the adapter found no transaction to end and kept its cached path."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (clutch-db-test--make-pg-result
-                    :rows (and (equal sql "SELECT current_schema()")
-                               '(("public"))))))
+                    :rows (and (equal sql "SELECT current_schema(), current_schemas(true)")
+                               '(("public" ["pg_catalog" "public"]))))))
                 ((symbol-function 'pgsql-transaction-status)
                  (lambda (_client) 'idle)))
         (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit

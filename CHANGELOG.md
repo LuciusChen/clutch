@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Record view shows and follows a foreign key when the query gives its column an alias. SQL Server result metadata follows the current database after `USE`.
+- Record view shows and follows a foreign key when the query gives its column an alias. Result metadata follows the current database after SQL Server `USE` and the full PostgreSQL search path after `SET search_path`.
 
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 
