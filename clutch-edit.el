@@ -222,7 +222,7 @@ the SELECT projection cannot be proven writable."
                   op display-name)))))
 
 (defun clutch-result--bind-source-columns (columns target &optional details)
-  "Resolve unconfirmed source spellings in COLUMNS on TARGET for a write.
+  "Resolve unconfirmed source spellings in COLUMNS on TARGET.
 Use exact names already present in DETAILS.  Ask the original relation
 about the remaining spellings together and retain its answers on this result."
   (when-let* ((pending (seq-filter (lambda (col) (plist-get col :unresolved-source)) columns)))

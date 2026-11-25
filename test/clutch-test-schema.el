@@ -612,13 +612,23 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 (ert-deftest clutch-test-result-column-details-contract ()
   "Detail resolution should map result columns by name and skip missing tables."
   (clutch-test--with-isolated-metadata-caches
-   (let ((details '((:name "ID") (:name "Name") (:name "NAME"))))
-     (clutch--set-table-metadata 'dummy-conn "users" :column-details details)
-     (should (equal (clutch--result-column-details
-                     'dummy-conn "users" '("id" "Name" "NAME" "name"))
-                    (append details '(nil))))))
+   (let* ((clutch-connection 'dummy-conn)
+          (clutch--row-identity '(:source-token "users"))
+          (clutch--result-columns '("id" "Name" "NAME" "name" "alias"))
+          (clutch--result-column-defs (append (make-list 4 nil)
+                                              (list (list :source-column "cafe" :unresolved-source t))))
+          (details '((:name "ID") (:name "Name") (:name "NAME") (:name "café"))))
+     (clutch--set-table-metadata clutch-connection "users" :column-details details)
+     (should (equal (clutch--result-column-details clutch-connection "users")
+                    (append (butlast details) '(nil nil))))
+     (cl-letf (((symbol-function 'clutch-db-resolve-column-names)
+                (lambda (_conn names _table)
+                  (should (equal names '("cafe")))
+                  '(("cafe" . "café")))))
+       (should (equal (nth 4 (clutch--result-column-details clutch-connection "users" 4))
+                      (car (last details)))))))
   (should-not (clutch--result-column-details
-               'dummy nil '("col1"))))
+               'dummy nil)))
 
 (provide 'clutch-test-schema)
 

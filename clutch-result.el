@@ -235,23 +235,29 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
              for source = (if (plist-member def :source-column) (plist-get def :source-column) label)
              collect (or (cdr (assoc source bindings)) source))))
 
-(defun clutch--result-column-details (conn table source-names &optional load)
-  "Return detail plists aligned with SOURCE-NAMES, with nil for expressions.
-Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
-missing table metadata."
-  (when-let* ((details (and table
-                            (or (clutch--cached-column-details conn table)
-                                (and load
-                                     (clutch--ensure-column-details conn table))))))
-    (let ((by-name (make-hash-table :test 'equal)))
+(defun clutch--result-column-details (conn table &optional index)
+  "Return cached CONN/TABLE details in result order, with nil for expressions.
+For a requested INDEX, load its metadata and resolve its source spelling."
+  (when-let* ((details (and table (or (clutch--cached-column-details conn table)
+                                      (and index (clutch--ensure-column-details conn table))))))
+    (when-let* ((col (and index (nth index clutch--result-column-defs)))
+                ((plist-get col :unresolved-source))
+                ((not (assoc (plist-get col :source-column)
+                             (plist-get clutch--result-query-prep :catalog-columns)))))
+      (clutch-result--bind-source-columns
+       (list col) (clutch-result--insert-target conn table clutch--last-query) details))
+    (let ((by-name (make-hash-table :test 'equal))
+          (defs clutch--result-column-defs))
       (dolist (detail details)
         (push detail (gethash (downcase (plist-get detail :name)) by-name)))
-      (mapcar (lambda (name)
-                (let ((matches (and name (gethash (downcase name) by-name))))
-                  (if (cdr matches)
-                      (clutch-db-source-column-detail name matches)
-                    (car matches))))
-              source-names))))
+      (cl-loop for name in (clutch--result-source-column-names) for def = (pop defs)
+               for matches = (and name (gethash (downcase name) by-name))
+               for detail = (if (cdr matches) (clutch-db-source-column-detail name matches)
+                              (car matches))
+               ;; A database-dependent spelling needs an exact catalog match.
+               collect (and (or (not (plist-get def :unresolved-source))
+                                (equal name (plist-get detail :name)))
+                            detail)))))
 
 (defun clutch--update-fk-info (conn table refresh)
   "Show CONN's cached foreign keys for TABLE, redrawing the grid if REFRESH."
@@ -308,7 +314,7 @@ TABLE is a metadata key from `clutch--table-key'."
           ('column-details
            (setq-local clutch--result-column-details
                        (clutch--result-column-details
-                        clutch-connection table (clutch--result-source-column-names)))
+                        clutch-connection table))
            (when clutch--pending-inserts
              (clutch--refresh-display)))
           ('foreign-keys (clutch--load-fk-info t)))))))
@@ -4151,13 +4157,12 @@ When details are not yet cached, attempts to load them from the database."
                    (get-text-property (point) 'clutch-header-col))))
     (unless cidx
       (user-error "No column at point"))
-    ;; Try to populate details on demand if missing.
-    (unless clutch--result-column-details
-      (when-let* ((table (clutch--result-source-key)))
+    (unless (nth cidx clutch--result-column-details)
+      (when-let* ((table (clutch--result-source-key))
+                  ((nth cidx (clutch--result-source-column-names))))
         (clutch-result--require-connection)
         (setq-local clutch--result-column-details
-                    (clutch--result-column-details
-                     clutch-connection table (clutch--result-source-column-names) t))))
+                    (clutch--result-column-details clutch-connection table cidx))))
     (if-let* ((info (clutch--column-info-string cidx)))
         (message "%s" (clutch--column-info-message-string info))
       (message "%s (no detail info)" (nth cidx clutch--result-columns)))))
