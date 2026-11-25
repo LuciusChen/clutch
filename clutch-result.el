@@ -252,29 +252,20 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
                             (if (plist-member def :source-column) (plist-get def :source-column) label))
              collect (if bindings (gethash source bindings source) source))))
 
-(defun clutch--result-column-details (conn table &optional index)
-  "Return cached CONN/TABLE details in result order, with nil for expressions.
-For a requested INDEX, load its metadata and resolve its source spelling."
-  (when-let* ((details (and table (or (clutch--cached-column-details conn table)
-                                      (and index (clutch--ensure-column-details conn table))))))
-    (when-let* ((col (and index (nth index clutch--result-column-defs)))
-                ((plist-get col :unresolved-source))
-                ((not (assoc (plist-get col :source-column)
-                             (plist-get clutch--result-query-prep :catalog-columns)))))
-      (clutch-result--bind-source-columns
-       (list col) (clutch-result--insert-target conn table clutch--last-query) details))
+(defun clutch--result-column-details (conn table)
+  "Return cached CONN/TABLE details in result order, with nil for expressions."
+  (when-let* ((details (clutch--cached-column-details conn table)))
     (let ((by-name (make-hash-table :test 'equal))
           (defs clutch--result-column-defs))
       (dolist (detail details)
-        (push detail (gethash (downcase (plist-get detail :name)) by-name)))
+        (let ((name (plist-get detail :name)))
+          (push (cons name detail) (gethash (downcase name) by-name))))
       (cl-loop for name in (clutch--result-source-column-names) for def = (pop defs)
                for matches = (and name (gethash (downcase name) by-name))
-               for detail = (if (cdr matches) (clutch-db-source-column-detail name matches)
-                              (car matches))
-               ;; A database-dependent spelling needs an exact catalog match.
-               collect (and (or (not (plist-get def :unresolved-source))
-                                (equal name (plist-get detail :name)))
-                            detail)))))
+               collect (or (cdr (clutch-db-assoc-column conn name matches))
+                           ;; Older result definitions have only a display label.
+                           (and (not (plist-member def :source-column))
+                                (not (cdr matches)) (cdar matches)))))))
 
 (defun clutch--update-fk-info (conn table refresh)
   "Show CONN's cached foreign keys for TABLE, redrawing the grid if REFRESH."
@@ -4185,24 +4176,51 @@ The column is centered in the window unless KEEP-VIEW is non-nil."
       (clutch-result--goto-col-idx cidx)
     (user-error "No visible result columns")))
 
+(defun clutch-result--show-column-info (index)
+  "Show the loaded details for result column INDEX."
+  (if-let* ((info (clutch--column-info-string index)))
+      (message "%s" (clutch--column-info-message-string info))
+    (message "%s (no detail info)" (nth index clutch--result-columns))))
+
 ;;;###autoload
 (defun clutch-result-column-info ()
-  "Show type information for the column at point.
-When details are not yet cached, attempts to load them from the database."
+  "Show type information for the column at point."
   (interactive)
-  (let* ((cidx (or (get-text-property (point) 'clutch-col-idx)
-                   (get-text-property (point) 'clutch-header-col))))
-    (unless cidx
-      (user-error "No column at point"))
-    (unless (nth cidx clutch--result-column-details)
-      (when-let* ((table (clutch--result-source-key))
-                  ((nth cidx (clutch--result-source-column-names))))
-        (clutch-result--require-connection)
-        (setq-local clutch--result-column-details
-                    (clutch--result-column-details clutch-connection table cidx))))
-    (if-let* ((info (clutch--column-info-string cidx)))
-        (message "%s" (clutch--column-info-message-string info))
-      (message "%s (no detail info)" (nth cidx clutch--result-columns)))))
+  (let* ((index (or (get-text-property (point) 'clutch-col-idx)
+                    (get-text-property (point) 'clutch-header-col)
+                    (user-error "No column at point")))
+         (table (clutch--result-source-key))
+         (col (nth index clutch--result-column-defs))
+         names)
+    (when (and table (not (nth index clutch--result-column-details))
+               (or (plist-get clutch--result-query-prep :mixed-star)
+                   (nth index (clutch--result-source-column-names))))
+      (clutch-result--require-connection)
+      (clutch--ensure-column-details clutch-connection table)
+      (setq-local clutch--result-column-details (clutch--result-column-details clutch-connection table))
+      (unless (nth index clutch--result-column-details)
+        (setq names (clutch--unknown-result-column-names
+                     (clutch--table-metadata clutch-connection table) (list col)))))
+    (if (not names)
+        (clutch-result--show-column-info index)
+      (let ((position (point)))
+        (cond
+         ((clutch--resolve-result-column-names
+           clutch-connection table names
+           (lambda ()
+             (setq-local clutch--result-column-details (clutch--result-column-details clutch-connection table))
+             (when (and (eq (current-buffer) (window-buffer (selected-window))) (= (point) position))
+               (clutch-result--show-column-info index))))
+          (message "Looking up %s…" (nth index clutch--result-columns)))
+         ;; Older agents can verify a spelling only on the primary connection.
+         ((clutch-db-in-use-p clutch-connection)
+          (message "Connection busy; try column info when the query finishes"))
+         (t
+          (clutch-result--bind-source-columns
+           (list col) (clutch-result--insert-target clutch-connection table clutch--last-query)
+           (clutch--cached-column-details clutch-connection table))
+          (setq-local clutch--result-column-details (clutch--result-column-details clutch-connection table))
+          (clutch-result--show-column-info index)))))))
 
 ;;;###autoload
 (defun clutch-result-goto-column ()

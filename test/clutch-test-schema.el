@@ -265,16 +265,16 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 (ert-deftest clutch-test-result-column-info-works-on-cell-padding ()
   "Column info on cell padding follows the source field through an alias."
   (clutch-test--with-sqlite-result (conn result)
-      '("CREATE TABLE m (gross INTEGER NOT NULL, net TEXT)"
+      '("CREATE TABLE m (ÄBC INTEGER NOT NULL, äbc TEXT)"
         "INSERT INTO m VALUES (42, 'abc')")
-      "SELECT gross AS net, upper(net) AS gross FROM m"
+      "SELECT Äbc AS äbc, upper(äbc) AS ÄBC FROM m"
     (clutch--goto-cell 0 0)
     (should (eq (char-after) ?\s))
     (let ((info (clutch-result-column-info)))
       (should (string-match-p "Type: INTEGER" info))
       (should (string-match-p "Nullable: NO" info)))
     (clutch--goto-cell 0 1)
-    (should (equal (clutch-result-column-info) "gross (no detail info)"))))
+    (should (equal (clutch-result-column-info) "ÄBC (no detail info)"))))
 
 (ert-deftest clutch-test-metadata-sync-failures-are-memoized ()
   "Repeated sync metadata failures should not reissue the same failing RPC."
@@ -612,21 +612,25 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 (ert-deftest clutch-test-result-column-details-contract ()
   "Detail resolution should map result columns by name and skip missing tables."
   (clutch-test--with-isolated-metadata-caches
-   (let* ((clutch-connection 'dummy-conn)
-          (clutch--row-identity '(:source-token "users"))
-          (clutch--result-columns '("id" "Name" "NAME" "name" "alias"))
-          (clutch--result-column-defs (append (make-list 4 nil)
-                                              (list (list :source-column "cafe" :unresolved-source t))))
-          (details '((:name "ID") (:name "Name") (:name "NAME") (:name "café"))))
-     (clutch--set-table-metadata clutch-connection "users" :column-details details)
-     (should (equal (clutch--result-column-details clutch-connection "users")
-                    (append (butlast details) '(nil nil))))
-     (cl-letf (((symbol-function 'clutch-db-resolve-column-names)
-                (lambda (_conn names _table)
-                  (should (equal names '("cafe")))
-                  '(("cafe" . "café")))))
-       (should (equal (nth 4 (clutch--result-column-details clutch-connection "users" 4))
-                      (car (last details)))))))
+   (with-temp-buffer
+     (let* ((clutch-connection (make-clutch-test-conn))
+            (clutch--result-source-table "users")
+            (clutch--row-identity '(:source-token "users"))
+            (clutch--result-columns '("id" "Name" "NAME" "name" "alias"))
+            (clutch--result-column-defs (append (make-list 4 nil)
+                                                '((:source-column "cafe" :unresolved-source t))))
+            (details '((:name "ID") (:name "Name") (:name "NAME") (:name "café" :type "int")))
+            reply)
+       (clutch--set-table-metadata clutch-connection "users" :column-details details)
+       (should (equal (clutch--result-column-details clutch-connection "users")
+                      (append (butlast details) '(nil nil))))
+       (insert (propertize "alias" 'clutch-col-idx 4))
+       (goto-char (point-min))
+       (cl-letf (((symbol-function 'clutch-db-resolve-column-names-async)
+                  (lambda (_conn names _target cb) (should (equal names '("cafe"))) (setq reply cb))))
+         (clutch-result-column-info)
+         (funcall reply '(("cafe" . "café")))
+         (should (string-match-p "Type: int" (clutch-result-column-info)))))))
   (should-not (clutch--result-column-details
                'dummy nil)))
 
