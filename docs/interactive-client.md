@@ -202,15 +202,15 @@ The insert buffer is intentionally form-like: `TAB` moves between fields, while 
 
 ## Insert Buffer Values
 
-An untouched blank insert field is omitted, allowing the database to supply its default. Typing `NULL` inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
+An untouched blank insert field is omitted, allowing a default or trigger to supply its value. Staging lists any omitted required fields. Typing `NULL` inserts the literal text. Cloned rows and reopened staged inserts preserve the distinction between empty strings and SQL NULL. The state markers are visual overlays, not text sent to the database.
 
 INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
-Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. The active field line is highlighted. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
+Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. New forms start at the first required field, or the first non-generated field when none is required. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
 
 Pasting into a field preserves line breaks through staging and reopening. `C-c C-y` imports delimited text directly into the form. A single imported row prefills the current insert buffer; multiple imported rows become staged inserts immediately. Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
 
-JSON fields still support direct editing in the insert buffer, but `C-c '` opens an on-demand child editor for more comfortable multi-line editing. Saving that child editor writes compact JSON back into the insert form, so the primary flow remains result buffer -\> insert buffer. Opening and cancelling the child editor leaves the parent field's value and NULL/default/empty state unchanged.
+Use `C-c '` on a JSON field to open its draft in a child editor, even while the JSON is incomplete. Saving that child editor writes compact JSON back into the insert form, so the primary flow remains result buffer -\> insert buffer. Opening and cancelling the child editor leaves the parent field's value and NULL/default/empty state unchanged.
 
 ![Insert buffer with aligned labels, inline metadata tags, and the value column focused.](screenshots/insert-buffer-basic.png)
 

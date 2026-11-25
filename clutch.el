@@ -151,11 +151,7 @@
   :group 'clutch)
 
 (defface clutch-modified-face
-  '((((class color) (background light))
-     :inherit warning :background "#fff3cd")
-    (((class color) (background dark))
-     :inherit warning :background "#3d2b00")
-    (t :inherit warning))
+  '((t :inherit warning))
   "Face for staged-edit cell values."
   :group 'clutch)
 
@@ -209,20 +205,12 @@ Underlined to indicate clickable (RET to follow)."
   nil nil 'center)
 
 (defface clutch-pending-delete-face
-  '((((class color) (background light))
-     :inherit error :background "#fde8e8" :strike-through t)
-    (((class color) (background dark))
-     :inherit error :background "#3b1212" :strike-through t)
-    (t :inherit error :strike-through t))
+  '((t :inherit error :strike-through t))
   "Face for rows staged for deletion."
   :group 'clutch)
 
 (defface clutch-pending-insert-face
-  '((((class color) (background light))
-     :inherit success :background "#e6f4ea")
-    (((class color) (background dark))
-     :inherit success :background "#1a3320")
-    (t :inherit success))
+  '((t :inherit success))
   "Face for rows staged for insertion."
   :group 'clutch)
 

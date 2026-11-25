@@ -1980,7 +1980,7 @@ Point left behind made the next cell command scroll back to it."
           (with-current-buffer buf
             (erase-buffer)
             (clutch-test--init-result-state
-             (list :columns '("name")
+             (list :columns '("n")
                    :column-defs '(nil)
                    :rows '(("aa"))
                    :page-total-rows 1
@@ -1994,9 +1994,6 @@ Point left behind made the next cell command scroll back to it."
                        (lambda (string)
                          (+ (* (string-width string) (default-font-width))
                             (if (string-search "中" string) 10 0))))
-                      ((symbol-function 'clutch--header-label)
-                       (lambda (name _cidx)
-                         name))
                       ((symbol-function 'clutch--refresh-footer-line) #'ignore))
               (clutch--refresh-display)
               (should (equal clutch--column-pixel-widths [80])))))
@@ -2049,7 +2046,7 @@ Point left behind made the next cell command scroll back to it."
   (with-temp-buffer
     (clutch-test--init-result-state
      (list :connection nil
-           :columns '("name")
+           :columns '("n")
            :rows '(("aa"))
            :result-max-rows clutch-result-max-rows
            :column-widths [4]))
@@ -2060,9 +2057,6 @@ Point left behind made the next cell command scroll back to it."
                (lambda () 10))
               ((symbol-function 'string-pixel-width)
                #'clutch-test--fake-pixel-width)
-              ((symbol-function 'clutch--header-label)
-               (lambda (name _cidx)
-                 name))
               ((symbol-function 'clutch--refresh-footer-line) #'ignore))
       (clutch--render-result)
       (should (equal clutch--column-pixel-widths [40]))
@@ -2172,7 +2166,7 @@ Point left behind made the next cell command scroll back to it."
          (result-win (split-window-right))
          (result-name "*clutch-window-display-result*")
          (result (make-clutch-db-result
-                  :columns '((:name "name" :type-category text))
+                  :columns '((:name "n" :type-category text))
                   :rows '(("aa")))))
     (unwind-protect
         (cl-letf (((symbol-function 'clutch-result--buffer-name)
@@ -2191,9 +2185,6 @@ Point left behind made the next cell command scroll back to it."
                    (lambda (string)
                      (+ (* (string-width string) (default-font-width))
                         (if (string-search "中" string) 10 0))))
-                  ((symbol-function 'clutch--header-label)
-                   (lambda (name _cidx)
-                     name))
                   ((symbol-function 'clutch--refresh-footer-line) #'ignore))
           (with-temp-buffer
             (select-window source-win)
@@ -3114,7 +3105,7 @@ still removes the header from the buffer it started in."
                    #'clutch-test--fake-pixel-width)
                   ((symbol-function 'clutch--icon)
                    (lambda (&rest _args) wide-icon)))
-          (let ((indicator (clutch--header-sort-indicator "score" 0)))
+          (let ((indicator (clutch--header-sort-indicator nil)))
             (setq-local clutch--header-line-string (concat indicator "x")
                         clutch--column-pixel-widths [30])
             (setq cropped (clutch--header-line-with-hscroll))
@@ -3298,21 +3289,15 @@ header string and column pixel widths, then reused."
                 clutch--sort-column "score"
                 clutch--sort-descending nil
                 clutch--local-sort-column-index 1)
-    (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal))
-          calls)
+    (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal)))
       (cl-letf (((symbol-function 'clutch--icon)
-                 (lambda (spec fallback &rest _args)
-                   (push (list spec fallback) calls)
-                   fallback)))
+                 (lambda (_spec fallback &rest _args) fallback)))
         (should (equal (substring-no-properties
                         (clutch--header-cell-label 0 10))
-                       "score ↕"))
+                       "score"))
         (should (equal (substring-no-properties
                         (clutch--header-cell-label 1 10))
-                       "score ↑"))
-        ;; Both cells consulted the icon channel; which glyph set backs
-        ;; it is cosmetic identity the fallbacks above already pin.
-        (should (= (length calls) 2))))
+                       "score ↑"))))
     (let ((clutch--header-sort-indicator-cache (make-hash-table :test 'equal)))
       (cl-letf (((symbol-function 'clutch--icon)
                  (lambda (_spec _fallback &rest _args) "I")))
@@ -3334,13 +3319,13 @@ header string and column pixel widths, then reused."
                  (let ((icons (list narrow-icon wide-icon)))
                    (lambda (&rest _args)
                      (pop icons)))))
-        (let ((narrow (clutch--header-sort-indicator "score" 1)))
+        (let ((narrow (clutch--header-sort-indicator nil)))
           (should (= (string-width narrow) 1))
           (should (equal (get-text-property 1 'display narrow)
                          '(space :width (2))))
           (should-not (get-display-property 1 'min-width narrow)))
         (clrhash clutch--header-sort-indicator-cache)
-        (let ((wide (clutch--header-sort-indicator "score" 1)))
+        (let ((wide (clutch--header-sort-indicator nil)))
           (should (= (string-width wide) 3))
           (should (equal (get-text-property 1 'display wide)
                          '(space :width (5))))
