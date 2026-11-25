@@ -272,7 +272,7 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (clutch-db-query conn (format "INSERT INTO %s VALUES (11,1,2)" parent))
               (clutch-db-query conn (format "INSERT INTO %s VALUES (7,11,1,2)" child))
               (with-current-buffer source
-                (insert (format "SELECT P AS parent_alias, id FROM %s" child))
+                (insert (format "SELECT P AS parent_alias, *, id + 1 AS extra FROM %s" child))
                 (clutch-execute-buffer))
               (clutch-test--await-queries)
               (setq rows-buffer (buffer-local-value 'clutch--last-result-buffer source))
