@@ -156,8 +156,7 @@
             (if-let* ((absent (plist-get case :absent)))
                 (should-not (plist-member result absent))
               (should (equal result (plist-get case :expected))))
-            (when (plist-get case :expect-asked)
-              (should asked))))))))
+            (should (eq asked (plist-get case :expect-asked)))))))))
 
 (ert-deftest clutch-test-prepare-connection-params-rejects-removed-tramp-key ()
   "The removed :tramp key should fail instead of being ignored."

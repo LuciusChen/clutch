@@ -134,11 +134,7 @@ container_summary() {
 }
 
 run_container() {
-  if [[ "$container_runtime" == "podman" ]]; then
-    ctr run --replace --rm -d "$@"
-  else
-    ctr run --rm -d "$@"
-  fi
+  ctr run --rm -d "$@"
 }
 
 start_pg() {
@@ -173,13 +169,11 @@ start_mysql() {
 
 start_mongo() {
   if container_running_p "$mongo_name"; then
-    if ctr inspect --format '{{json .Config.Labels}}' "$mongo_name" 2>/dev/null \
-        | grep -Fq '"io.clutch.test.enable-test-commands":"true"'; then
-      log "Reusing MongoDB container $mongo_name"
-      return
-    fi
-    log "Replacing MongoDB container $mongo_name without test commands"
-    ctr rm -f -v "$mongo_name" >/dev/null
+    ctr inspect --format '{{index .Config.Labels "io.clutch.test.enable-test-commands"}}' "$mongo_name" \
+      | grep -Fxq true \
+      || die "Cannot verify test commands for $mongo_name. Choose another test container name and port."
+    log "Reusing MongoDB container $mongo_name"
+    return
   fi
   log "Starting MongoDB container $mongo_name on 127.0.0.1:$mongo_port"
   run_container \

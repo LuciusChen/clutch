@@ -15,6 +15,11 @@
 (require 'clutch-backend)
 (require 'clutch-schema)
 
+(defcustom clutch-result-max-rows 500
+  "Maximum number of rows to display in result tables."
+  :type 'natnum
+  :group 'clutch)
+
 (defcustom clutch-column-width-max 30
   "Maximum display width for a single column in the result table."
   :type 'natnum
@@ -125,7 +130,6 @@ the header cell was rendered.")
 (defvar clutch--result-column-details)
 (defvar clutch--where-filter)
 (defvar clutch-connection)
-(defvar clutch-result-max-rows)
 
 (defconst clutch--null-cell-display-text "<null>"
   "Display text for database NULL values in result cells.")
@@ -2255,10 +2259,9 @@ RENDER-STATE contains render lookup tables for staged UI state."
                          row iidx ridx visible-cols widths nw render-state
                          column-specs)))))
 
-(defun clutch--searchable-header-column (&optional position)
-  "Return the header column at POSITION, or nil outside the buffer header.
-POSITION defaults to point.  Accept the end of a name as isearch's match end."
-  (let ((position (or position (point))))
+(defun clutch--searchable-header-column ()
+  "Return the header column at point, including the end of an isearch match."
+  (let ((position (point)))
     (when (and clutch--buffer-header-end
                (< position clutch--buffer-header-end))
       (or (get-text-property position 'clutch-header-col)
@@ -2970,7 +2973,7 @@ Preserve cursor position, top visible row, and horizontal scroll."
             (with-current-buffer buf
               (clutch--schedule-column-width-refresh))))))))
 
-(defun clutch--disable-window-size-hook-if-unused (&optional ignore-buffer)
+(defun clutch--disable-window-size-hook-if-unused (ignore-buffer)
   "Remove the `window-size' hook when no result buffers remain.
 IGNORE-BUFFER does not count as a remaining result buffer."
   (unless (cl-some (lambda (buf)

@@ -18,6 +18,10 @@
 
 (ert-deftest clutch-architecture-reader-cases ()
   "Exercise dependency and source-reference reader cases."
+  (let ((file (make-temp-file "clutch-architecture-" nil ".el" "(valid)\n(truncated")))
+    (unwind-protect
+        (should-error (clutch--architecture-read-forms file))
+      (delete-file file)))
   (dolist (case '((nested ((progn (require 'clutch-query))) ("clutch-query"))
                   (quoted ('(require 'clutch-query)) nil)
                   (transient (["x" "Run" clutch-execute-dwim]) (clutch-execute-dwim))
@@ -240,8 +244,7 @@
                                       (clutch--architecture-read-forms file))
                          collect (list module (car form) (cadr form)))))
         (owners
-         '(("clutch" defcustom nil clutch-result-max-rows)
-           ("clutch-backend" defcustom t clutch-connect-timeout-seconds
+         '(("clutch-backend" defcustom t clutch-connect-timeout-seconds
             clutch-read-idle-timeout-seconds clutch-query-timeout-seconds
             clutch-jdbc-rpc-timeout-seconds)
            ("clutch-connection" defcustom nil clutch-connection-alist
@@ -264,7 +267,7 @@
             clutch-agent-context-max-cell-width clutch-column-width-step
             clutch-csv-export-default-coding-system)
            ("clutch-result" defvar-local t clutch--base-query)
-           ("clutch-ui" defcustom t clutch-column-width-max
+           ("clutch-ui" defcustom t clutch-result-max-rows clutch-column-width-max
             clutch-column-padding)
            ("clutch-diagnostics" defcustom t clutch-debug-event-limit)
            ("clutch-diagnostics" define-minor-mode nil clutch-debug-mode))))
@@ -335,7 +338,7 @@
   (require 'clutch-object)
   (require 'clutch-result)
   (should-not (featurep 'clutch))
-  (should (= clutch-result-max-rows 500))
+  (should (custom-variable-p 'clutch-result-max-rows))
   (should (custom-variable-p 'clutch-sql-product))
   (dolist (symbol '(clutch-mode clutch-repl clutch-dispatch
                     clutch-switch-schema))
