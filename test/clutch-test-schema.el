@@ -624,7 +624,12 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
        (clutch--set-table-metadata clutch-connection "users" :column-details details)
        (should (equal (clutch--result-column-details clutch-connection "users")
                       (append (butlast details) '(nil nil))))
-       (insert (propertize "alias" 'clutch-col-idx 4))
+       ;; A mixed star still needs the database spelling of its explicit alias.
+       (setq clutch--result-query-prep '(:mixed-star (star nil "cafe"))
+             clutch--result-columns '("ID" "Name" "NAME" "café" "extra" "alias")
+             clutch--result-column-defs
+             (mapcar (lambda (label) (list :name label :source-column nil)) clutch--result-columns))
+       (insert (propertize "alias" 'clutch-col-idx 5))
        (goto-char (point-min))
        (cl-letf (((symbol-function 'clutch-db-resolve-column-names-async)
                   (lambda (_conn names _target cb) (should (equal names '("cafe"))) (setq reply cb))))

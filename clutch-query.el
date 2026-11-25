@@ -985,6 +985,14 @@ same-named projection with Clutch's hidden values."
                :hidden-aliases aliases)
          candidate)))))
 
+(defun clutch--expand-projection-star (items count)
+  "Expand the single table star in projection ITEMS to fit COUNT fields."
+  (let ((star (and (consp items) (memq 'star items))))
+    (if (and star (<= (length items) count))
+        (append (butlast items (length star)) (make-list (1+ (- count (length items))) 'star)
+                (cdr star))
+      items)))
+
 (defun clutch--apply-row-identity-column-metadata (columns prep &optional conn)
   "Mark hidden keys and writable origins on COLUMNS from PREP for CONN."
   (let* ((aliases (plist-get prep :hidden-aliases))
@@ -994,12 +1002,7 @@ same-named projection with Clutch's hidden values."
          (projection-present-p (plist-member prep :writable-projection))
          (items (plist-get prep :writable-projection))
          (visible-count (- (length columns) (length hidden-indices)))
-         (wildcard (and (consp items) (memq 'star items)))
-         (projection (if (and wildcard (<= (length items) visible-count))
-                         (append (butlast items (length wildcard))
-                                 (make-list (1+ (- visible-count (length items))) 'star)
-                                 (cdr wildcard))
-                       items))
+         (projection (clutch--expand-projection-star items visible-count))
          (projection-aligned-p
           (or (eq projection 'star)
               (and (listp projection)

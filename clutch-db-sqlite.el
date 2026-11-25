@@ -235,20 +235,23 @@ WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")))
   (mapcar (lambda (name) (list :name name :schema "main" :type "TABLE"))
           (clutch-db-list-tables conn)))
 
+(defun clutch-db-sqlite--visible-columns (conn table &optional schema)
+  "Return the columns of TABLE in SCHEMA that SELECT * includes on CONN."
+  ;; table_xinfo includes generated columns (2 and 3) and virtual-table
+  ;; hidden columns (1).  Only the latter are absent from the star.
+  (cl-remove 1 (clutch-db-sqlite--pragma-strict
+                (clutch-db-sqlite-conn-handle conn) "table_xinfo" table schema)
+             :key (lambda (row) (nth 6 row))))
+
 (cl-defmethod clutch-db-list-columns ((conn clutch-db-sqlite-conn) table)
-  "Return column names for TABLE on SQLite CONN."
-  (clutch-db--translate-library-error sqlite-error
-    (let* ((handle (clutch-db-sqlite-conn-handle conn))
-           (rows (clutch-db-sqlite--pragma-strict handle "table_info" table)))
-      (mapcar (lambda (row) (nth 1 row)) rows))))
+  "Return column names for TABLE on CONN."
+  (mapcar #'cadr (clutch-db-sqlite--visible-columns conn table)))
 
 (cl-defmethod clutch-db-list-columns-async
     ((conn clutch-db-sqlite-conn) table callback &optional _errback schema _catalog)
   "Read TABLE columns in SCHEMA on local CONN, calling CALLBACK immediately.
 SQLite metadata needs no network wait, so retain synchronous completion."
-  (let ((rows (clutch-db-sqlite--pragma-strict
-               (clutch-db-sqlite-conn-handle conn) "table_info" table schema)))
-    (funcall callback (mapcar (lambda (row) (nth 1 row)) rows)))
+  (funcall callback (mapcar #'cadr (clutch-db-sqlite--visible-columns conn table schema)))
   t)
 
 (defun clutch-db-sqlite--table-record (conn table schema)
@@ -456,32 +459,27 @@ Its rows are (ID PARENT NOTUSED DETAIL), a parent before its children."
     (list :unit nil :roots (nreverse roots))))
 
 (defun clutch-db-sqlite--column-detail (row fks)
-  "Convert a table_info ROW to a clutch-db column plist.
+  "Convert a table_xinfo ROW to a clutch-db column plist.
 FKS is an FK alist."
-  ;; Row: (cid name type notnull dflt_value pk)
-  (pcase-let ((`(,_cid ,name ,type ,notnull ,dflt-val ,pk) row))
+  (pcase-let ((`(,_cid ,name ,type ,notnull ,dflt-val ,pk ,hidden) row))
     (let* ((type-name (downcase (or type "text")))
-           (generated (and (> pk 0)
-                           (string= type-name "integer"))))
+           (generated (or (> hidden 1) (and (> pk 0) (string= type-name "integer")))))
       (list :name        name
             :type        type-name
             :nullable    (= notnull 0)
             :primary-key (> pk 0)
             :foreign-key (cdr (assoc name fks))
             :default     (unless generated dflt-val)
-            :generated   (and generated t)
+            :generated   generated
             :comment     nil))))
 
 (cl-defmethod clutch-db-column-details ((conn clutch-db-sqlite-conn) table
                                         &optional schema _catalog)
   "Return detailed column info for TABLE in SCHEMA on SQLite CONN."
-  (let* ((handle  (clutch-db-sqlite-conn-handle conn))
-         (rows    (clutch-db-sqlite--pragma-strict
-                   handle "table_info" table schema))
-         (fks     (clutch-db-sqlite--fk-alist handle table schema)))
-    (mapcar (lambda (row)
-              (clutch-db-sqlite--column-detail row fks))
-            rows)))
+  (let* ((handle (clutch-db-sqlite-conn-handle conn))
+         (rows (clutch-db-sqlite--visible-columns conn table schema))
+         (fks (clutch-db-sqlite--fk-alist handle table schema)))
+    (mapcar (lambda (row) (clutch-db-sqlite--column-detail row fks)) rows)))
 
 ;;;; Re-entrancy guard
 

@@ -1980,13 +1980,13 @@ relation added by hand starts at the same field, offered after the key."
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
         (clutch-er-relations-directory (make-temp-file "clutch-er-" t))
         result-buf record-buf)
-    (cl-flet ((show-shops (projection)
+    (cl-flet ((show (projection &optional table)
                 (with-temp-buffer
                   (clutch-mode)
                   (setq-local clutch-connection conn)
                   (let ((source (current-buffer)))
                     (clutch-test--execute-and-present
-                     (format "SELECT %s FROM shops" projection) conn)
+                     (format "SELECT %s FROM %s" projection (or table "shops")) conn)
                     (setq result-buf
                           (buffer-local-value 'clutch--last-result-buffer
                                               source))))
@@ -1997,17 +1997,17 @@ relation added by hand starts at the same field, offered after the key."
                            "INSERT INTO regions VALUES ('n', 'a', 'north a'), ('n', 'b', 'north b')"
                            "CREATE TABLE notes (code TEXT PRIMARY KEY, body TEXT)"
                            "INSERT INTO notes VALUES ('n', 'note n')"
-                           "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, FOREIGN KEY (code, country) REFERENCES regions)"
+                           "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, label TEXT GENERATED ALWAYS AS (upper(code)) STORED, FOREIGN KEY (code, country) REFERENCES regions)"
                            "INSERT INTO shops VALUES (1, 'n', 'b')"))
               (clutch-db-query conn sql))
             (clutch-er--write-relations
              (clutch-er--relations-file conn nil)
              '(((from . ((table . "shops"))) (to . ((table . "notes")))
                 (columns . [["code" "code"]]))))
-            (show-shops "*, upper(code) AS extra")
+            (show "*, upper(code) AS extra")
             (with-current-buffer result-buf
               (should (assq 1 clutch--fk-info))
-              (should-not (assq 3 clutch--fk-info))
+              (should-not (assq 4 clutch--fk-info))
               (clutch--goto-cell 0 1)
               (save-window-excursion
                 (clutch-result-open-record)
@@ -2021,13 +2021,23 @@ relation added by hand starts at the same field, offered after the key."
               (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
                                      clutch--result-rows)
                              '(("n" "b" "north b")))))
-            (show-shops "id, CODE AS region_code, COUNTRY AS region_country")
+            (show "id, CODE AS region_code, COUNTRY AS region_country")
             (with-current-buffer result-buf
               (clutch-test--with-minibuffer-answers '("notes (code) from code")
                 (clutch-record--follow-column result-buf 1 0 t))
               (clutch-test--await-queries)
               (should (equal clutch--last-query
-                             "SELECT * FROM \"notes\" WHERE \"code\" = 'n'"))))
+                             "SELECT * FROM \"notes\" WHERE \"code\" = 'n'")))
+            ;; A stored relation can be the only relation on a cold table.
+            (clutch-er--write-relations
+             (clutch-er--relations-file conn nil)
+             '(((from . ((table . "notes"))) (to . ((table . "shops")))
+                (columns . [["code" "code"]]))))
+            (show "*, length(body) AS size" "notes")
+            (with-current-buffer result-buf
+              (clutch-record--follow-column result-buf 0 0)
+              (clutch-test--await-queries)
+              (should (equal (caar clutch--result-rows) 1))))
         (when (buffer-live-p record-buf)
           (kill-buffer record-buf))
         (when (buffer-live-p result-buf)
