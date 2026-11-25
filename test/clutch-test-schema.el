@@ -629,10 +629,16 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
        ;; SELECT * omits a catalog column; the alias uses the database collation.
        (clutch--set-table-metadata clutch-connection "users" :column-details
                                    (append details '((:name "period_end"))))
-       (setq clutch--result-query-prep '(:mixed-star (star nil "cafe"))
+       (setq clutch--result-query-prep '(:table "users" :mixed-star (star nil "cafe") :writable-projection nil)
              clutch--result-columns '("ID" "Name" "NAME" "café" "extra" "alias")
              clutch--result-column-defs
-             (mapcar (lambda (label) (list :name label :source-column nil)) clutch--result-columns))
+             ;; A view can report its base table as the origin of a field.
+             (clutch--apply-row-identity-column-metadata
+              (mapcar (lambda (label)
+                        (if (equal label "extra") '(:name "extra" :source-column nil)
+                          (list :name label :origin (cons "base" label))))
+                      clutch--result-columns)
+              clutch--result-query-prep))
        (clutch--set-table-metadata clutch-connection "users" :foreign-keys
                                    '(("café" :ref-table "parent" :ref-column "id")))
        (insert (propertize "alias" 'clutch-col-idx 5))

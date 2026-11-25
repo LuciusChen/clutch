@@ -223,20 +223,26 @@ the SELECT projection cannot be proven writable."
 
 (defun clutch-result--bind-source-columns (columns target &optional details)
   "Resolve unconfirmed source spellings in COLUMNS on TARGET.
-Use exact names already present in DETAILS.  Ask the original relation
-about the remaining spellings together and retain its answers on this result."
+Use exact names in DETAILS and catalog spellings verified for this table.
+Ask the original relation about remaining names together."
   (when-let* ((pending (seq-filter (lambda (col) (plist-get col :unresolved-source)) columns)))
     (let* ((names (delete-dups (mapcar (lambda (col) (plist-get col :source-column)) pending)))
            (known (append (mapcar (lambda (detail) (plist-get detail :name)) details)
                           (cl-loop for col in columns unless (plist-get col :unresolved-source)
                                    collect (plist-get col :source-column))))
            (unknown (seq-difference names known #'equal))
+           (catalog (plist-get (clutch--table-metadata clutch-connection (clutch--result-source-key))
+                               :catalog-columns))
            (bindings (when unknown
                        (clutch-result--refuse-if-moved)
-                       (clutch-db-resolve-column-names clutch-connection unknown target))))
+                       (when catalog
+                         (setq unknown (seq-remove (lambda (name) (gethash name catalog)) unknown)))
+                       (when unknown
+                         (clutch-db-resolve-column-names clutch-connection unknown target)))))
       (dolist (col pending)
         (let* ((name (plist-get col :source-column))
-               (bound (or (cdr (assoc name bindings)) (car (member name known)))))
+               (bound (or (cdr (assoc name bindings)) (car (member name known))
+                          (and catalog (gethash name catalog)))))
           (when bound
             (setf (plist-get col :source-column) bound
                   (plist-get col :unresolved-source) nil)))))))
