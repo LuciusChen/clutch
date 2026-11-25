@@ -5835,7 +5835,7 @@ Listing them should send no catalog query."
         (should (equal (nth 0 row)
                        '(:year 2024 :month 6 :day 1)))
         (should (equal (nth 1 row)
-                       '(:hours 9 :minutes 10 :seconds 11 :negative nil)))
+                       '(:hours 9 :minutes 10 :seconds 11.25 :negative nil)))
         (should (equal (nth 2 row)
                        '(:year 2024 :month 1 :day 15
                          :hours 13 :minutes 45 :seconds 30.125)))
@@ -5846,10 +5846,10 @@ Listing them should send no catalog query."
         (should (eq (nth 5 row) :false))
         (should (equal (nth 6 row) [nil :false t]))
         (should (equal (nth 7 row)
-                       ["2026-04-07 08:30:45" "2026-04-07 08:30:45"
+                       ["2026-04-07 08:30:45.25" "2026-04-07 08:30:45"
                         "infinity" nil]))
         (should (equal (clutch--format-value (nth 7 row))
-                       (concat "[\"2026-04-07 08:30:45\","
+                       (concat "[\"2026-04-07 08:30:45.25\","
                                "\"2026-04-07 08:30:45\",\"infinity\",null]")))))))
 
 ;;;; Unit tests — SQL building (paged queries)
@@ -7474,17 +7474,17 @@ The session time zone differs from Emacs's here, as it often does."
       (clutch-db-query conn "SET TIME ZONE 'UTC'")
       (let* ((shown (car (clutch-db-result-rows
                           (clutch-db-query
-                           conn "SELECT timestamptz '2026-01-02 03:04:05+00'"))))
+                           conn "SELECT timestamptz '2026-01-02 03:04:05.123456+00'"))))
              (row (car (clutch-db-result-rows
                         (clutch-db-execute-params
                          conn
-                         "SELECT ? = timestamptz '2026-01-02 03:04:05+00', to_char(? AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+                         "SELECT ? = timestamptz '2026-01-02 03:04:05.123456+00', to_char(? AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
                          (list (clutch-db-typed-param (car shown) "timestamptz")
                                (clutch-db-typed-param "2026-01-02 11:04:06"
                                                       "timestamptz")))))))
         (should (equal (car shown)
                        '(:year 2026 :month 1 :day 2
-                         :hours 11 :minutes 4 :seconds 5)))
+                         :hours 11 :minutes 4 :seconds 5.123456)))
         (should (equal row '(t "2026-01-02 03:04:06")))))))
 
 (ert-deftest clutch-db-test-pg-live-keyboard-quit-keeps-connection-usable ()

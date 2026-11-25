@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Insert forms preserve pasted line breaks, and PostgreSQL timestamps retain fractional seconds when cloned or written back.
+
 - SQLite row edits use an available physical rowid even when a table declares a column named `rowid`.
 
 - Column completion and alias navigation recognize grouped single tables, quoted table names with spaces, and SQLite UPDATE conflict clauses.

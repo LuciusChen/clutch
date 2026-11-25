@@ -218,9 +218,7 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
   (let* ((negative (string-prefix-p "-" value))
          (rest (if negative (substring value 1) value))
          (rest (replace-regexp-in-string "[+-][0-9:]+\\'" "" rest))
-         (dot-pos (string-search "." rest))
-         (time-part (if dot-pos (substring rest 0 dot-pos) rest))
-         (parts (split-string time-part ":")))
+         (parts (split-string rest ":")))
     (pcase parts
       (`(,hours ,minutes ,seconds)
        (list :hours (string-to-number hours)
@@ -244,14 +242,14 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
           :seconds (string-to-number (match-string 6 value))))
    ((stringp value) value)
    (t
-    (pcase-let ((`(,seconds ,minutes ,hours ,day ,month ,year . ,_)
-                  (decode-time value)))
+    (pcase-let* ((`(,seconds ,minutes ,hours ,day ,month ,year . ,_) (decode-time value))
+                 (micros (mod (car (time-convert value 1000000)) 1000000)))
       (list :year year
             :month month
             :day day
             :hours hours
             :minutes minutes
-            :seconds seconds)))))
+            :seconds (if (zerop micros) seconds (+ seconds (/ micros 1e6))))))))
 
 (defun clutch-db-pg--normalize-value (value col-def)
   "Normalize PG VALUE according to COL-DEF's clutch type category."

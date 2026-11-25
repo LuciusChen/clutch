@@ -1382,18 +1382,6 @@ Use \\[clutch-result-submit] in the result buffer to submit."
       (setf (plist-get field :error-overlay) nil
             (plist-get field :error-message) nil))))
 
-(defun clutch-result-insert--annotate-field-line (field-name line-start line-end)
-  "Attach FIELD-NAME metadata to the buffer text from LINE-START to LINE-END."
-  (add-text-properties line-start line-end
-                       `(clutch-insert-field-name ,field-name)))
-
-(defun clutch-result-insert--field-name-at-position (&optional pos)
-  "Return insert field name at POS, or at point when POS is nil."
-  (let ((pos (or pos (point))))
-    (or (get-text-property pos 'clutch-insert-field-name)
-        (and (> pos (point-min))
-             (get-text-property (1- pos) 'clutch-insert-field-name)))))
-
 (defun clutch-result-insert--all-column-names ()
   "Return canonical column order for the current insert buffer."
   (mapcar (lambda (field) (plist-get field :name))
@@ -1464,26 +1452,17 @@ Use \\[clutch-result-submit] in the result buffer to submit."
 
 (defun clutch-result-insert--field-state-at-position (&optional pos)
   "Return structured insert field state at POS, or at point when POS is nil."
-  (or (when-let* ((field-name (clutch-result-insert--field-name-at-position pos)))
-        (clutch-result-insert--field-state field-name))
-      (let ((pos (or pos (point))))
-        (cl-find-if
-         (lambda (field)
-           (when-let* ((marker (plist-get field :value-marker))
-                       (start (marker-position marker)))
-             (save-excursion
-               (goto-char start)
-               (and (<= (line-beginning-position) pos)
-                    (<= pos (line-end-position))))))
-         clutch-result-insert--fields))))
+  (let ((pos (min (or pos (point)) (1- (point-max)))))
+    (seq-find (lambda (field)
+                (when-let* ((end (plist-get field :end-marker)))
+                  (<= pos end)))
+              clutch-result-insert--fields)))
 
 (defun clutch-result-insert--field-value-bounds (field)
   "Return editable value bounds for structured FIELD, or nil."
-  (when-let* ((marker (plist-get field :value-marker))
-              (beg (marker-position marker)))
-    (save-excursion
-      (goto-char beg)
-      (cons beg (line-end-position)))))
+  (when-let* ((beg (plist-get field :value-marker))
+              (end (plist-get field :end-marker)))
+    (cons (marker-position beg) (marker-position end))))
 
 (defun clutch-result-insert--field-value (field)
   "Return the canonical value for structured FIELD."
@@ -1509,8 +1488,8 @@ Use \\[clutch-result-submit] in the result buffer to submit."
    ((string-match-p " expects 0/1\\'" message) "invalid bool")
    ((string-match-p " expects a numeric value\\'" message) "invalid numeric")
    ((string-match-p " expects YYYY-MM-DD\\'" message) "invalid date")
-   ((string-match-p " expects HH:MM\\[:SS\\]\\'" message) "invalid time")
-   ((string-match-p " expects YYYY-MM-DD HH:MM\\[:SS\\]\\'" message) "invalid datetime")
+   ((string-match-p " expects HH:MM" message) "invalid time")
+   ((string-match-p " expects YYYY-MM-DD HH:MM" message) "invalid datetime")
    ((string-match-p " expects valid JSON\\'" message) "invalid JSON")
    (t "invalid value")))
 
@@ -1574,15 +1553,12 @@ All field types use the same delay so feedback timing is consistent."
                #'clutch-result-insert--run-idle-validation
                (current-buffer))))
 
-(defun clutch-result-insert--after-change (beg end _len)
-  "Schedule local validation for the changed insert field spanning BEG..END."
-  (when-let* ((field (or (clutch-result-insert--field-state-at-position beg)
-                         (and (> beg (point-min))
-                              (clutch-result-insert--field-state-at-position (1- beg)))
-                         (clutch-result-insert--field-state-at-position end))))
-    (when-let* ((bounds (clutch-result-insert--field-value-bounds field)))
-      (clutch-result-insert--set-field-prop
-       field :value (buffer-substring-no-properties (car bounds) (cdr bounds))))
+(defun clutch-result-insert--after-change (beg _end _len)
+  "Update the insert field containing the edit at BEG."
+  (when-let* ((field (clutch-result-insert--field-state-at-position beg))
+              (bounds (clutch-result-insert--field-value-bounds field)))
+    (clutch-result-insert--set-field-prop
+     field :value (buffer-substring-no-properties (car bounds) (cdr bounds)))
     (clutch-result-insert--refresh-field-placeholder field)
     (clutch-result-insert--schedule-field-validation field)))
 
@@ -1678,10 +1654,7 @@ next field.  Returns nil when no matching field exists."
 
 (defun clutch-result-insert--current-field-name ()
   "Return the current insert field name, or nil."
-  (save-excursion
-    (beginning-of-line)
-    (when-let* ((field (clutch-result-insert--field-state-at-position)))
-      (plist-get field :name))))
+  (plist-get (clutch-result-insert--field-state-at-position) :name))
 
 (defun clutch-result-insert--current-field-value-bounds ()
   "Return value bounds of the current insert field, or nil."
@@ -1768,6 +1741,8 @@ next field.  Returns nil when no matching field exists."
   "Keep point out of the read-only insert field prefix."
   (when-let* ((field (clutch-result-insert--field-state-at-position))
               (bounds (clutch-result-insert--field-value-bounds field)))
+    (when (> (point) (cdr bounds))
+      (goto-char (cdr bounds)))
     (when (< (point) (car bounds))
       (goto-char (car bounds)))
     (let ((line-start (save-excursion
@@ -1931,9 +1906,9 @@ If nothing handles the completion, fall back to `completing-read'."
                                '(read-only t front-sticky t rear-nonsticky t))
           (let ((value (clutch-result-insert--field-value field))
                 (value-marker (copy-marker (point))))
-            (insert value "\n")
-            (clutch-result-insert--annotate-field-line col prefix-start (point))
-            (setf (plist-get field :value-marker) value-marker)
+            (insert value (propertize "\n" 'read-only t 'rear-nonsticky t))
+            (setf (plist-get field :value-marker) value-marker
+                  (plist-get field :end-marker) (copy-marker (1- (point)) t))
             (clutch-result-insert--refresh-field-placeholder field))))))
   (clutch-result-insert--refresh-header-line)
   (goto-char (point-min))
@@ -1993,7 +1968,7 @@ projection labels for editing and importing."
                (list :name label :source-column name :column-def def :detail detail
                      :value (or (cdr cell) "") :provided (and cell t)
                      :special-value (and cell (null (cdr cell)) 'null)
-                     :special-overlay nil :value-marker nil
+                     :special-overlay nil :value-marker nil :end-marker nil
                      :error-overlay nil :error-message nil)))))
 
 (defun clutch-result-insert--open-buffer
@@ -2270,9 +2245,13 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
         (error nil)))))
 
 (defun clutch-result-insert--valid-time-value-p (value)
-  "Return non-nil when VALUE is a valid HH:MM[:SS] time."
+  "Check time VALUE, including optional fractional seconds and UTC offset."
   (when (string-match
-         "\\`\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)\\(?::\\([0-9]\\{2\\}\\)\\)?\\'"
+         (rx string-start (group (= 2 digit)) ":" (group (= 2 digit))
+             (optional ":" (group (= 2 digit)) (optional "." (+ digit)))
+             (optional (or "Z" (seq (in "+-") (or (seq (in "01") digit) (seq "2" (in "0-3")))
+                                    (optional (optional ":") (in "0-5") digit))))
+             string-end)
          value)
     (let ((hour (string-to-number (match-string 1 value)))
           (minute (string-to-number (match-string 2 value)))
@@ -2284,8 +2263,10 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
            (<= 0 second 59)))))
 
 (defun clutch-result-insert--valid-datetime-value-p (value)
-  "Return non-nil when VALUE is a valid YYYY-MM-DD HH:MM[:SS] datetime."
-  (when (string-match "\\`\\(.+\\) \\(.+\\)\\'" value)
+  "Check datetime VALUE with a space or ISO T separator."
+  (when (string-match (rx string-start (group (+ (in "0-9-"))) (in " T")
+                          (group (+ nonl)) string-end)
+                      value)
     (let ((date-part (match-string 1 value))
           (time-part (match-string 2 value)))
       (and (clutch-result-insert--valid-date-value-p date-part)
@@ -2321,10 +2302,10 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
         (user-error "Field %s expects YYYY-MM-DD" field-name))
        ((and (eq type-category 'time)
              (not (clutch-result-insert--valid-time-value-p value)))
-        (user-error "Field %s expects HH:MM[:SS]" field-name))
+        (user-error "Field %s expects HH:MM[:SS], optionally with fractional seconds and an offset" field-name))
        ((and (eq type-category 'datetime)
              (not (clutch-result-insert--valid-datetime-value-p value)))
-        (user-error "Field %s expects YYYY-MM-DD HH:MM[:SS]" field-name))
+        (user-error "Field %s expects YYYY-MM-DD HH:MM[:SS] or ISO datetime with optional fraction and offset" field-name))
        ((or (eq type-category 'json)
             (string= type "json"))
         (clutch-result-insert--validate-json field-name value))))))

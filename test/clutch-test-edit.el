@@ -52,7 +52,7 @@ the edit buffer behind it is killed with it."
       '("CREATE TABLE jobs (id INTEGER PRIMARY KEY, owner TEXT)"
         "INSERT INTO jobs VALUES (1, 'seed')")
       "SELECT * FROM jobs"
-    (dolist (owner '("A" "B" "C"))
+    (dolist (owner '("A" "B\nsecond ↵ line\n" "C"))
       (with-current-buffer result (clutch-result-insert-row))
       (with-current-buffer (window-buffer (selected-window))
         (clutch-test--set-insert-field-value "owner" owner)
@@ -60,8 +60,10 @@ the edit buffer behind it is killed with it."
     (clutch--goto-cell 2 1)
     (clutch-result-edit-cell)
     (let ((form (current-buffer)))
-      (should (equal (cdr (assoc "owner" (clutch-result-insert--parse-fields))) "B"))
-      (clutch-test--set-insert-field-value "owner" "B-edited")
+      (should (equal (cdr (assoc "owner" (clutch-result-insert--parse-fields))) "B\nsecond ↵ line\n"))
+      (clutch-test--goto-insert-field-value "owner")
+      (goto-char (cdr (clutch-result-insert--current-field-value-bounds)))
+      (insert "edited")
       (pop-to-buffer result)
       (clutch--goto-cell 1 1)
       (clutch-result-discard-pending-at-point)
@@ -70,8 +72,11 @@ the edit buffer behind it is killed with it."
       (pop-to-buffer form)
       (clutch-result-insert-stage)
       (with-current-buffer result
-        (should (equal clutch--pending-inserts
-                       '((("owner" . "B-edited")) (("owner" . "C")))))))))
+        (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+          (clutch-result-submit))
+        (should (equal (clutch-db-result-rows
+                        (clutch-db-query conn "SELECT owner FROM jobs ORDER BY id"))
+                       '(("seed") ("B\nsecond ↵ line\nedited") ("C"))))))))
 
 (ert-deftest clutch-test-edit-cell-shows-metadata-and-completion-hints ()
   "Edit buffer should expose enum metadata and completion affordances."
@@ -1652,13 +1657,18 @@ from closing."
               ((:name "opened_at" :type-category datetime)
                (:name "due_on" :type-category date)
                (:name "starts_at" :type-category time))
-              (("opened_at" . "ss")
+              (("opened_at" . "2026-11-25T10:20:30.123456+08:00")
                ("due_on" . "2026-02-30")
                ("starts_at" . "25:61"))
               ((:name "opened_at" :type "datetime")
                (:name "due_on" :type "date")
                (:name "starts_at" :type "time"))
-              "Field opened_at expects YYYY-MM-DD HH:MM\\[:SS\\]")
+              "Field due_on expects YYYY-MM-DD")
+             (("opened_at")
+              ((:name "opened_at" :type-category datetime))
+              (("opened_at" . "2026-02-30T10:20:30Z"))
+              ((:name "opened_at" :type "datetime"))
+              "Field opened_at expects YYYY-MM-DD")
              (("impact_score")
               ((:name "impact_score" :type-category numeric))
               (("impact_score" . "xx"))
