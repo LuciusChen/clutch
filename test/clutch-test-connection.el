@@ -3191,20 +3191,22 @@ carried onto it."
         (kill-buffer opened)))))
 
 (ert-deftest clutch-test-redis-command-at-point-keeps-semicolon-as-input ()
-  "Redis command execution should be line-oriented, not semicolon-delimited.
-The line is picked at point, so it flashes as SQL picked at point does."
+  "Both Redis execution entries preserve the command line and its bounds."
   (with-temp-buffer
     (clutch-redis-mode)
+    (setq-local clutch-connection (make-clutch-test-conn :backend 'redis))
     (insert "GET user:1;  ")
-    (let (captured)
-      (cl-letf (((symbol-function 'clutch--execute-and-mark)
-                 (lambda (command beg end &optional at-point)
-                   (setq captured
-                         (list command
-                               (buffer-substring-no-properties beg end)
-                               at-point)))))
-        (clutch-redis-execute-command-at-point))
-      (should (equal captured '("GET user:1;" "GET user:1;" t))))))
+    (goto-char (point-min))
+    (dolist (keys '("C-c C-c" "C-c ? x"))
+      (let (captured)
+        (cl-letf (((symbol-function 'clutch--execute-and-mark)
+                   (lambda (text beg end &optional at-point)
+                     (setq captured (list text (buffer-substring-no-properties beg end)
+                                          at-point)))))
+          (clutch-test--type-keys keys))
+        (should (equal captured '("GET user:1;" "GET user:1;" t)))))
+    (dolist (key '("C-c C-r" "C-c C-b" "C-c C-m" "C-c C-u" "C-c C-a"))
+      (should-not (local-key-binding (kbd key))))))
 
 (ert-deftest clutch-test-query-console-no-match-builds-ad-hoc-connection ()
   "No-match query-console choices should build temporary backend params."

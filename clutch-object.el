@@ -954,9 +954,10 @@ server's default-schema position between two dots."
      ".")))
 
 (defun clutch--use-object-action-keymap ()
-  "Install object action keys on top of the current local map."
+  "Install navigation keys for a read-only object view."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map (current-local-map))
+    (define-key map "q" #'quit-window)
     (define-key map (kbd "C-c C-o") #'clutch-act-dwim)
     (define-key map (kbd "C-c C-d") #'clutch-describe-dwim)
     (use-local-map map)))

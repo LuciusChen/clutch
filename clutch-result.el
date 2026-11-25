@@ -4707,6 +4707,8 @@ The connection comes from the cached render state, not from the server."
     ("v" "Full value" clutch-record-view-value)]
    ["Mutate"
     ("C-c '" "Edit / re-edit" clutch-result-edit-cell)
+    ("C-c C-c" "Submit staged" clutch-record-submit
+     :if clutch-record--pending-changes-p)
     ("C-c C-k" "Discard staged at point" clutch-result-discard-pending-at-point
      :inapt-if-not clutch-record--pending-changes-p)
     ("I" "Clone row to insert" clutch-clone-row-to-insert)]

@@ -69,7 +69,7 @@ Row editing stays within the [row-editing boundaries](docs/user-guide.md#row-edi
 | Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
 | DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
 | MongoDB | Basic native document support; optional SQL Interface surface | Native use requires `mongodb.el`; SQL Interface uses `:surface sql-interface` and JDBC |
-| Redis | Basic key/value support | Requires `redis.el`; includes command buffers, bounded key browsing, and type-aware values |
+| Redis | Basic key/value support | Requires `redis.el`; includes a line-oriented command menu, bounded key browsing, and type-aware values |
 | Cassandra | Basic CQL support via JDBC | CQL console, bounded read-only results, and table and column browsing. Table definition actions are unavailable. |
 | ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Backend-specific limits apply to editing, transactions, and dialect behavior |
 

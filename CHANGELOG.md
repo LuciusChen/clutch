@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- The Redis console menu runs the current line intact, including semicolons in keys and values.
+
 - Insert forms preserve pasted line breaks, and PostgreSQL timestamps retain fractional seconds when cloned or written back.
 
 - SQLite row edits use an available physical rowid even when a table declares a column named `rowid`.

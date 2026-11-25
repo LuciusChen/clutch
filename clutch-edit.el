@@ -1317,9 +1317,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
 
 (define-derived-mode clutch--result-insert-major-mode text-mode "clutch-insert"
   "Major mode for editing a new row to INSERT.
-\\<clutch--result-insert-major-mode-map>
-\\[clutch-result-insert-stage]	stage row insertion
-\\[clutch-result-insert-cancel]	cancel editing"
+\\{clutch--result-insert-major-mode-map}"
   (setq-local truncate-lines t)
   (add-hook 'post-command-hook #'clutch-result-insert--normalize-point nil t)
   (add-hook 'after-change-functions #'clutch-result-insert--after-change nil t)
@@ -1731,7 +1729,7 @@ next field.  Returns nil when no matching field exists."
    " Insert into " (clutch--table-key-label clutch-result-insert--table)
    (clutch--status-separator)
    (clutch--key-hints
-    '(("C-c C-c" "Stage") ("C-c C-k" "Cancel")))))
+    '(("C-c C-c" "Stage") ("C-c C-k" "Cancel") ("C-h m" "Keys")))))
 
 (defun clutch-result-insert--refresh-header-line ()
   "Refresh the insert form header line."
