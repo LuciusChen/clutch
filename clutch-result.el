@@ -260,7 +260,7 @@ TABLE is a metadata key from `clutch--table-key'."
              (clutch--refresh-display)))
           ('foreign-keys
            (let ((fk-info (clutch--foreign-key-column-info
-                           clutch-connection table clutch--result-columns)))
+                           clutch-connection table (clutch--result-source-column-names))))
              (unless (equal fk-info clutch--fk-info)
                (setq-local clutch--fk-info fk-info)
                (clutch--refresh-display)))))))))
@@ -2851,8 +2851,8 @@ Return nil when the current graphical display cannot create one."
                   (line-spacing . 0)
                   (vertical-scroll-bars . nil)
                   (horizontal-scroll-bars . nil)
-                  (left-fringe . 0)
-                  (right-fringe . 0)
+                  (left-fringe . 6)
+                  (right-fringe . 6)
                   (border-width . 1)
                   (border-color . ,border)
                   (internal-border-width . 0)
@@ -2874,6 +2874,7 @@ Return nil when the current graphical display cannot create one."
           (setq frame (let ((after-make-frame-functions nil))
                         (with-current-buffer buffer
                           (make-frame parameters))))
+          (set-face-background 'fringe background frame)
           (let ((window (frame-root-window frame)))
             (set-window-buffer window buffer)
             (set-window-parameter window 'mode-line-format 'none)
@@ -4331,7 +4332,7 @@ the label column width."
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
-         (formatted (or (clutch--cell-placeholder-value display-val)
+         (formatted (or (clutch--cell-placeholder-value display-val edited)
                         (and (null display-val) clutch--null-cell-display-text)
                         (clutch--format-value display-val)))
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
@@ -4356,8 +4357,14 @@ the label column width."
                            cell-props))
             (apply #'propertize display
                    (append (when face (list 'face face))
-                           cell-props))
-            "\n")))
+                           cell-props)))
+    (when fk
+      (let ((target (string-join
+                     (delq nil (list (plist-get fk :ref-schema) (plist-get fk :ref-table)
+                                     (plist-get fk :ref-column)))
+                     ".")))
+        (insert (apply #'propertize (concat "  → " target) 'face 'shadow cell-props))))
+    (insert "\n")))
 
 (defun clutch-record--render (&optional _ignore-auto _noconfirm)
   "Render the current row in the Record buffer."
@@ -4443,12 +4450,7 @@ result's table that join the column.  Follow the first, a foreign key of
 the database before a relation added by hand, or with ASK choose when
 there are several."
   (let* ((source-columns
-          (with-current-buffer result-buf
-            (cl-mapcar (lambda (name definition)
-                         (if (plist-member definition :source-column)
-                             (plist-get definition :source-column)
-                           name))
-                       clutch--result-columns clutch--result-column-defs)))
+          (with-current-buffer result-buf (clutch--result-source-column-names)))
          (relations
           (with-current-buffer result-buf
             (clutch--ensure-connection)

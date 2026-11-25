@@ -1979,7 +1979,7 @@ relation added by hand starts at the same field, offered after the key."
   (require 'clutch-db-sqlite)
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
         (clutch-er-relations-directory (make-temp-file "clutch-er-" t))
-        result-buf)
+        result-buf record-buf)
     (cl-flet ((show-shops ()
                 (with-temp-buffer
                   (clutch-mode)
@@ -2006,7 +2006,13 @@ relation added by hand starts at the same field, offered after the key."
                 (columns . [["code" "code"]]))))
             (show-shops)
             (with-current-buffer result-buf
-              (clutch-record--follow-column result-buf 1 0)
+              (clutch--goto-cell 0 1)
+              (save-window-excursion
+                (clutch-result-open-record)
+                (setq record-buf (current-buffer))
+                (goto-char (1- (search-forward "regions.code")))
+                (clutch-record-toggle-expand)))
+            (with-current-buffer result-buf
               (clutch-test--await-queries)
               (should (equal clutch--last-query
                              "SELECT * FROM \"regions\" WHERE \"code\" = 'n' AND \"country\" = 'b'"))
@@ -2020,6 +2026,8 @@ relation added by hand starts at the same field, offered after the key."
               (clutch-test--await-queries)
               (should (equal clutch--last-query
                              "SELECT * FROM \"notes\" WHERE \"code\" = 'n'"))))
+        (when (buffer-live-p record-buf)
+          (kill-buffer record-buf))
         (when (buffer-live-p result-buf)
           (kill-buffer result-buf))
         (delete-directory clutch-er-relations-directory t)

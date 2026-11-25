@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Record view shows and follows a foreign key when the query gives its column an alias.
+
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 
 - Insert forms preserve pasted line breaks, and PostgreSQL timestamps retain fractional seconds when cloned or written back.

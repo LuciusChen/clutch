@@ -102,6 +102,9 @@ where the result's query ran."
 (defvar-local clutch-result-edit--column-name nil
   "Column name for the current single-cell edit buffer.")
 
+(defvar-local clutch-result-edit--target-label nil
+  "Qualified write target captured when this cell editor was opened.")
+
 (defvar-local clutch-result-edit--column-def nil
   "Column definition plist for the current single-cell edit buffer.")
 
@@ -438,7 +441,7 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
 (defun clutch-result-edit--header-line ()
   "Build the edit-buffer header line."
   (let* ((tags (clutch-result-edit--metadata-tags))
-         (title (concat " Editing cell"
+         (title (concat " Edit " clutch-result-edit--target-label
                         (when tags
                           (format " [%s]" (string-join tags " ")))))
          (affordances nil))
@@ -451,9 +454,8 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
     (concat title
             (clutch--status-separator)
             (clutch--key-hints
-             (append (nreverse affordances)
-                     '(("C-c C-c" "Stage edit")
-                       ("C-c C-k" "Cancel"))
+             (append '(("C-c C-c" "Stage") ("C-c C-k" "Cancel"))
+                     (nreverse affordances)
                      (when (clutch-result-edit--null-available-p)
                        '(("C-c C-n" "Set NULL")))
                      (when (and clutch-result-edit--default-supported-p
@@ -693,6 +695,10 @@ RETURN-BUFFER is the buffer that invoked the edit command."
               (clutch-backend-update-default-p
                (clutch-db-backend-key clutch-connection)))
              (source-column (plist-get detail :name))
+             (target-label (string-replace
+                            "%" "%%" ; Literal identifiers in a header-line format.
+                            (concat (clutch--table-key-label (clutch--result-source-key))
+                                    "." source-column)))
              (original-state
               (clutch-result-edit--state-for-value
                original
@@ -713,6 +719,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
+                      clutch-result-edit--target-label target-label
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
                       clutch-result-edit--blob-encoding
@@ -910,12 +917,10 @@ Populates `clutch--fk-info' with an alist mapping
 column indices to their referenced table and column."
   (setq clutch--fk-info nil)
   (when-let* ((conn clutch-connection)
-              (table (clutch--result-source-key))
-              (col-names clutch--result-columns))
-    (when (clutch--foreign-keys-cached-p conn table)
-      (setq clutch--fk-info
-            (clutch--foreign-key-column-info conn table col-names)))
-    (unless (clutch--foreign-keys-cached-p conn table)
+              (table (and clutch--result-columns (clutch--result-source-key))))
+    (if (clutch--foreign-keys-cached-p conn table)
+        (setq clutch--fk-info (clutch--foreign-key-column-info
+                               conn table (clutch--result-source-column-names)))
       (clutch--ensure-foreign-keys-async conn table))))
 
 (defun clutch-result--ensure-where-guard (statements op-name)

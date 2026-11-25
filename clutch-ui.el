@@ -799,9 +799,10 @@ Uses a stricter heuristic to avoid misclassifying plain \"<...\" text."
              (not (clutch--blob-text-display-value-p val)))
     "<BLOB>"))
 
-(defun clutch--cell-placeholder-value (val)
-  "Return display placeholder text for special cell VAL, or nil."
+(defun clutch--cell-placeholder-value (val &optional edited)
+  "Return display placeholder text for special VAL or an EDITED empty string."
   (pcase val
+    ((and "" (guard edited)) "<empty>")
     (:clutch-generated-placeholder "<generated>")
     (:clutch-default-placeholder "<default>")
     (_ nil)))
@@ -1293,10 +1294,6 @@ background.  The mark goes away when the statement's text is deleted."
                   (copy-sequence label))))
     (add-face-text-property 0 (length label) 'clutch-field-name-face
                             'append label)
-    ;; Only underline the column name, not its spacer or sort indicator.
-    (dotimes (i (length label))
-      (when (get-text-property i 'clutch-header-name label)
-        (add-face-text-property i (1+ i) '(:underline t) 'append label)))
     label))
 
 (defun clutch--header-sort-keymap (cidx name)
@@ -1341,22 +1338,16 @@ when the cell is open in a cell edit buffer."
   "Return the unpadded display string for a cell value VAL in width W.
 COL-DEF describes the column.  EDITED is a staged edit and FACE styles VAL."
   (let* ((display-val (if edited (cdr edited) val))
-         (special-placeholder (clutch--cell-placeholder-value display-val))
-         (override (cond ((and edited (equal display-val "")) "<empty>")
-                         ((not special-placeholder)
-                          (clutch--cell-custom-display display-val col-def))))
+         (override (or (clutch--cell-placeholder-value display-val edited)
+                       (clutch--cell-custom-display display-val col-def)))
          (json-cell (and (not override)
-                         (not special-placeholder)
                          (not edited)
                          (clutch--json-cell-value-p display-val col-def)))
          (xml-cell (and (not override)
-                        (not special-placeholder)
                         (not edited)
                         (clutch--xml-like-string-p display-val)))
          (display (and (not override)
                        (cond
-                        (special-placeholder
-                         (cons special-placeholder nil))
                         ((null display-val)
                          (cons clutch--null-cell-display-text nil))
                         (t
@@ -1369,7 +1360,6 @@ COL-DEF describes the column.  EDITED is a staged edit and FACE styles VAL."
          (placeholder (and value-truncated
                            (not override)
                            (not edited)
-                           (not special-placeholder)
                            (clutch--value-placeholder display-val col-def)))
          (formatted (or override placeholder s))
          (truncated (if (or override placeholder)
@@ -1712,15 +1702,14 @@ ROW-COUNT and PAGE-NUM describe the visible page, PAGE-SIZE is the configured
 page length, and TOTAL-ROWS is the exact overall total when known.
 PAGE-OFFSET overrides PAGE-NUM for last-window pagination, and PAGE-HAS-MORE
 records one-row lookahead."
-  (let ((hi 'font-lock-keyword-face)
-        (dim 'font-lock-comment-face)
+  (let ((dim 'shadow)
         (offset (or page-offset (* page-num page-size))))
     (if (zerop row-count)
         (let ((total (or total-rows offset)))
-          (concat (propertize "0" 'face hi)
+          (concat "0"
                   (unless (eql total 0)
                     (concat (propertize " of " 'face dim)
-                            (propertize (format "%s" total) 'face hi)))
+                            (format "%s" total)))
                   (propertize " rows" 'face dim)))
       (let* ((start (1+ offset))
              (end (+ offset row-count))
@@ -1730,9 +1719,9 @@ records one-row lookahead."
                           (page-has-more (format "%d+" (1+ end)))
                           (inferred-total (format "%d" inferred-total))
                           (t "?"))))
-        (concat (propertize (format "%d-%d" start end) 'face hi)
+        (concat (format "%d-%d" start end)
                 (propertize " of " 'face dim)
-                (propertize total-text 'face hi)
+                total-text
                 (propertize " rows" 'face dim))))))
 
 (defun clutch--footer-aggregate-part ()
@@ -1858,7 +1847,7 @@ Returns a list of propertized strings (may be empty)."
         (propertize
          (concat
           (clutch--footer-icon '(codicon . "nf-cod-warning") "⚠" warning-face)
-          (propertize "row editing unavailable E/D off" 'face warning-face))
+          (propertize "Update/delete unavailable" 'face warning-face))
          'help-echo help)))))
 
 (defun clutch--footer-main-parts (row-count page-num page-size total-rows
@@ -1868,23 +1857,21 @@ ROW-COUNT and PAGE-NUM describe the visible page, PAGE-SIZE sets the page
 length, and TOTAL-ROWS describes the full result size when known.
 PAGE-OFFSET overrides PAGE-NUM for last-window pagination, and PAGE-HAS-MORE
 records one-row lookahead."
-  (let ((hi 'font-lock-keyword-face))
-    (delq nil
-          (list
-           (clutch--transaction-header-line-segment
-            (plist-get clutch--connection-render-state :transaction-state))
-           (clutch--footer-pending-part)
-           (concat (clutch--footer-icon '(mdicon . "nf-md-sigma") "Σ" hi)
-                   (clutch--footer-row-summary
-                    row-count page-num page-size total-rows
-                    page-offset page-has-more))
-           (clutch--footer-sort-part)
-           (clutch--footer-mutation-capability-part)))))
+  (delq nil
+        (list
+         (clutch--transaction-header-line-segment
+          (plist-get clutch--connection-render-state :transaction-state))
+         (clutch--footer-pending-part)
+         (concat (clutch--footer-icon '(mdicon . "nf-md-sigma") "Σ" 'shadow)
+                 (clutch--footer-row-summary
+                  row-count page-num page-size total-rows
+                  page-offset page-has-more))
+         (clutch--footer-sort-part)
+         (clutch--footer-mutation-capability-part))))
 
 (defun clutch--footer-timing-part ()
   "Return the dynamic footer timing segment for the current result buffer."
-  (let ((hi 'font-lock-keyword-face)
-        (running (clutch--execution-elapsed-seconds)))
+  (let ((running (clutch--execution-elapsed-seconds)))
     (when-let* ((payload (cond
                           (running
                            (propertize (clutch--format-elapsed running)
@@ -1892,8 +1879,8 @@ records one-row lookahead."
                           (clutch--query-elapsed
                            (propertize
                             (clutch--format-elapsed clutch--query-elapsed)
-                            'face hi)))))
-      (concat (clutch--footer-icon '(mdicon . "nf-md-timer_outline") "⏱" hi)
+                            'face 'shadow)))))
+      (concat (clutch--footer-icon '(mdicon . "nf-md-timer_outline") "⏱" 'shadow)
               payload))))
 
 (defun clutch--footer-cursor-part ()
@@ -2518,6 +2505,15 @@ Priority: region rows, then current row."
   (or clutch--result-source-table
       (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
+
+(defun clutch--result-source-column-names ()
+  "Return the base column for each result field, or nil for an expression."
+  (let ((definitions clutch--result-column-defs))
+    (cl-loop for name in clutch--result-columns
+             for definition = (pop definitions)
+             collect (if (plist-member definition :source-column)
+                         (plist-get definition :source-column)
+                       name))))
 
 (defun clutch--result-source-key ()
   "Return the metadata key of the current result's source table, or nil.

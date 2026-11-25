@@ -416,10 +416,11 @@ schema switching, and any statement that returns no result set."
 
 (defun clutch--foreign-key-column-info (conn table col-names)
   "Return cached foreign-key metadata indexed by COL-NAMES for CONN/TABLE."
-  (when (clutch--foreign-keys-cached-p conn table)
-    (cl-loop for (col-name . ref-info) in (clutch--cached-foreign-keys conn table)
-             for idx = (cl-position col-name col-names :test #'string=)
-             when idx collect (cons idx ref-info))))
+  (when-let* ((keys (clutch--cached-foreign-keys conn table)))
+    (cl-loop for name in col-names
+             for idx from 0
+             for ref = (cdr (assoc name keys))
+             when ref collect (cons idx ref))))
 
 (defun clutch--cache-table-entry-comments (conn entries)
   "Prime CONN's table-comment cache from ENTRIES with explicit comments."

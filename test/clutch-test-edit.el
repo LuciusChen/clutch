@@ -96,7 +96,8 @@ the edit buffer behind it is killed with it."
       (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
       (should (string-match-p "Set NULL.*Set DEFAULT"
                               (format "%s" header-line-format)))
-      (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
+      (should (string-match-p (regexp-quote "Edit shipping_incidents.severity")
+                              (format "%s" header-line-format)))
       (pcase-let ((`(,beg ,end ,candidates . ,_)
                    (clutch-result-edit-completion-at-point)))
         (should (= beg (point-min)))
