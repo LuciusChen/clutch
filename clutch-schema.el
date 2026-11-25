@@ -419,7 +419,7 @@ schema switching, and any statement that returns no result set."
   (when-let* ((keys (clutch--cached-foreign-keys conn table)))
     (cl-loop for name in col-names
              for idx from 0
-             for ref = (cdr (assoc name keys))
+             for ref = (cdr (clutch-db-assoc-column conn name keys))
              when ref collect (cons idx ref))))
 
 (defun clutch--cache-table-entry-comments (conn entries)

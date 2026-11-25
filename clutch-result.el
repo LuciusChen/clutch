@@ -4417,7 +4417,9 @@ source column names, in result order, with nil for expressions.  The referenced
 table retains its catalog and schema qualification."
   (with-current-buffer result-buf
     (let* ((conn clutch-connection)
-           (row (nth ridx (clutch--result-display-rows))))
+           (values (cl-loop for name in columns
+                            for value in (nth ridx (clutch--result-display-rows))
+                            when name collect (cons name value))))
       (clutch--execute
        (format "SELECT * FROM %s WHERE %s"
                (clutch--object-sql-name
@@ -4426,11 +4428,10 @@ table retains its catalog and schema qualification."
                            :catalog (plist-get relation :catalog)))
                (mapconcat
                 (pcase-lambda (`(,column . ,referenced))
-                  (let* ((cidx (or (cl-position column columns
-                                                :test #'equal)
-                                   (user-error "The relation also needs %s, which the result does not show"
-                                               column)))
-                         (value (nth cidx row)))
+                  (let* ((field (or (clutch-db-assoc-column conn column values)
+                                    (user-error "The relation also needs %s, which the result does not show"
+                                                column)))
+                         (value (cdr field)))
                     (when (null value)
                       (user-error "NULL value in %s — cannot follow" column))
                     (when-let* ((placeholder (clutch--cell-placeholder-value value)))
@@ -4458,7 +4459,8 @@ there are several."
             (clutch-result--refuse-if-moved)
             (let ((column (nth cidx source-columns)))
               (cl-remove-if-not
-               (lambda (relation) (assoc column (plist-get relation :pairs)))
+               (lambda (relation)
+                 (clutch-db-assoc-column clutch-connection column (plist-get relation :pairs)))
                (clutch-er-outgoing-relations
                 clutch-connection clutch--connection-params
                 (list :name (or clutch--result-source-table

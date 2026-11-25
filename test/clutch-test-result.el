@@ -1986,7 +1986,7 @@ relation added by hand starts at the same field, offered after the key."
                   (setq-local clutch-connection conn)
                   (let ((source (current-buffer)))
                     (clutch-test--execute-and-present
-                     "SELECT id, code AS region_code, country AS region_country FROM shops" conn)
+                     "SELECT id, CODE AS region_code, COUNTRY AS region_country FROM shops" conn)
                     (setq result-buf
                           (buffer-local-value 'clutch--last-result-buffer
                                               source))))

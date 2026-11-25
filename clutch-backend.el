@@ -2016,6 +2016,13 @@ the backend has no fixed rule.")
   "Return nil for an unspecified identifier case rule."
   nil)
 
+(defun clutch-db-assoc-column (conn name alist)
+  "Find resolved column NAME in ALIST using CONN's identifier case rule."
+  (when name
+    (if (eq (clutch-db-identifier-case conn) 'ascii-insensitive)
+        (with-case-table ascii-case-table (assoc-string name alist t))
+      (assoc name alist))))
+
 (defun clutch-db-sql-fold-identifier (conn token)
   "Return identifier TOKEN as named in the catalog of CONN's database.
 A quoted TOKEN keeps its case, and an unquoted one folds as
