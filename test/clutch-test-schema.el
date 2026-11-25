@@ -611,9 +611,11 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 
 (ert-deftest clutch-test-result-column-details-contract ()
   "Detail resolution should map result columns by name and skip missing tables."
-  (clutch-test--with-isolated-metadata-caches
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq)))
    (with-temp-buffer
-     (let* ((clutch-connection (make-clutch-test-conn))
+     (clutch-result-mode)
+     (let* ((inhibit-read-only t)
+            (clutch-connection (make-clutch-test-conn))
             (clutch--result-source-table "users")
             (clutch--row-identity '(:source-token "users"))
             (clutch--result-columns '("id" "Name" "NAME" "name" "alias"))
@@ -624,17 +626,23 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
        (clutch--set-table-metadata clutch-connection "users" :column-details details)
        (should (equal (clutch--result-column-details clutch-connection "users")
                       (append (butlast details) '(nil nil))))
-       ;; A mixed star still needs the database spelling of its explicit alias.
+       ;; SELECT * omits a catalog column; the alias uses the database collation.
+       (clutch--set-table-metadata clutch-connection "users" :column-details
+                                   (append details '((:name "period_end"))))
        (setq clutch--result-query-prep '(:mixed-star (star nil "cafe"))
              clutch--result-columns '("ID" "Name" "NAME" "café" "extra" "alias")
              clutch--result-column-defs
              (mapcar (lambda (label) (list :name label :source-column nil)) clutch--result-columns))
+       (clutch--set-table-metadata clutch-connection "users" :foreign-keys
+                                   '(("café" :ref-table "parent" :ref-column "id")))
        (insert (propertize "alias" 'clutch-col-idx 5))
        (goto-char (point-min))
        (cl-letf (((symbol-function 'clutch-db-resolve-column-names-async)
-                  (lambda (_conn names _target cb) (should (equal names '("cafe"))) (setq reply cb))))
+                  (lambda (_conn names _target cb) (should (equal names '("cafe" star))) (setq reply cb))))
          (clutch-result-column-info)
-         (funcall reply '(("cafe" . "café")))
+         (should (functionp reply))
+         (funcall reply '(("cafe" . "café") (star "ID" "Name" "NAME" "café")))
+         (should (assq 5 clutch--fk-info))
          (should (string-match-p "Type: int" (clutch-result-column-info)))))))
   (should-not (clutch--result-column-details
                'dummy nil)))

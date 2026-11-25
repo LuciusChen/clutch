@@ -1994,7 +1994,7 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
            (sql (format (concat "SELECT source_column FROM sys.dm_exec_describe_first_result_set"
                                 "(N%s, NULL, 2) WHERE is_hidden = 0 ORDER BY column_ordinal")
                         (clutch-db-escape-literal conn select))))
-      (cl-mapcar #'cons names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
+      (clutch-db--column-bindings names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
 
 (cl-defmethod clutch-db-resolve-column-names-async ((conn clutch-jdbc-conn) names source-token callback)
   "Resolve NAMES on SOURCE-TOKEN on CONN's metadata session and call CALLBACK."
@@ -2003,7 +2003,7 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
      "describe-source-columns"
      `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
        (projection . ,(clutch-db--column-binding-select conn names source-token)))
-     (lambda (result) (funcall callback (cl-mapcar #'cons names (plist-get result :columns))))
+     (lambda (result) (funcall callback (clutch-db--column-bindings names (plist-get result :columns))))
      nil nil conn)))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
