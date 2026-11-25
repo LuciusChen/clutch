@@ -1312,6 +1312,8 @@ and signal `clutch-query-interrupted'."
                   (cl-flet ((finish (result err &optional cancelled)
                               (release)
                               (let* ((elapsed (- (float-time) start))
+                                     (moved (not (equal (cadr before)
+                                                        (clutch-db-metadata-scope connection))))
                                      (outcome
                                       (if (or err (eq cancelled 'confirmed))
                                           (list :error err
@@ -1332,10 +1334,6 @@ and signal `clutch-query-interrupted'."
                                           (clutch--forget-row-identities connection)
                                           (clutch--note-schema-affecting-query
                                            sql connection))
-                                        (when (clutch-db-namespace-switch-p
-                                               connection sql)
-                                          (clutch--note-namespace-switch
-                                           connection before))
                                         (list :result result
                                               :connection connection
                                               :elapsed elapsed
@@ -1343,13 +1341,19 @@ and signal `clutch-query-interrupted'."
                                               :resolution-context
                                               (and result-query-p
                                                    present-result-p
-                                                   (clutch--read-resolution-context
-                                                    connection))
+                                                   ;; A batch can return rows before switching database.
+                                                   (if moved 'unknown
+                                                     (clutch--read-resolution-context connection)))
                                               :row-identity-prep row-identity-prep
                                               :server-pageable server-pageable
                                               :result-context result-context
                                               :source-buffer source-buffer
                                               :cancelled cancelled))))
+                                ;; A batch can change database before a later statement fails.
+                                (when (or moved
+                                          (and (not err) (not (eq cancelled 'confirmed))
+                                               (clutch-db-namespace-switch-p connection sql)))
+                                  (clutch--note-namespace-switch connection before))
                                 (if dispatching
                                     (setq inline-outcome outcome)
                                   (funcall k outcome)))))
