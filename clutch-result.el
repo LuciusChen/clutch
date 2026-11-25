@@ -168,6 +168,8 @@ Nil means derive the offset from `clutch--page-current'.")
   "The `clutch-db-resolution-context' the result's query ran in.
 It is `unknown' when it could not be read, and nil for a result that
 recorded none.")
+(defvar-local clutch--result-metadata-scope nil
+  "Connection namespace whose table metadata belongs to this result.")
 (defvar-local clutch--result-server-pageable nil
   "Non-nil when server-side page navigation is safe for this result.")
 (defvar-local clutch--result-server-rewritable nil
@@ -328,6 +330,7 @@ With SYNC use the primary connection.  CALLBACK may be nil."
                 (when (buffer-live-p buffer)
                   (with-current-buffer buffer
                     (when (and (eq conn clutch-connection) (eq prep clutch--result-query-prep)
+                               (clutch--result-metadata-current-p)
                                (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
                       (dolist (pair pairs) (puthash (car pair) (cdr pair) bindings))
                       (when pairs
@@ -338,9 +341,16 @@ With SYNC use the primary connection.  CALLBACK may be nil."
                  (resolved (clutch-db-resolve-column-names conn names target)))
         (clutch-db-resolve-column-names-async conn names target #'resolved)))))
 
+(defun clutch--result-metadata-current-p ()
+  "Return whether the connection's metadata still belongs to this result."
+  (and (not (eq clutch--result-resolution-context 'unknown))
+       (or (null clutch--result-metadata-scope)
+           (equal clutch--result-metadata-scope (clutch--namespace-before clutch-connection)))))
+
 (defun clutch--load-fk-info (&optional refresh)
   "Show known foreign keys, optionally REFRESH, and request missing spellings."
   (when-let* ((conn clutch-connection)
+              ((clutch--result-metadata-current-p))
               (table (and clutch--result-columns (clutch--result-source-key))))
     (if (not (clutch--foreign-keys-cached-p conn table))
         (clutch--ensure-foreign-keys-async conn table)
@@ -360,7 +370,8 @@ TABLE is a metadata key from `clutch--table-key'."
       (when (and (derived-mode-p 'clutch-result-mode)
                  (eq clutch-connection conn)
                  clutch--result-columns
-                 (equal (clutch--result-source-key) table))
+                 (equal (clutch--result-source-key) table)
+                 (clutch--result-metadata-current-p))
         (pcase kind
           ((or 'column-details 'source-columns)
            (setq-local clutch--result-column-details (clutch--result-column-details conn table))
@@ -646,6 +657,7 @@ Returns column names."
               clutch--result-source-schema source-schema
               clutch--result-source-catalog source-catalog
               clutch--result-resolution-context resolution-context
+              clutch--result-metadata-scope (and clutch-connection (clutch--namespace-before clutch-connection))
               clutch--result-server-pageable server-pageable
               clutch--result-server-rewritable server-rewritable
               clutch--page-total-rows (and (not server-pageable)

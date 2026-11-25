@@ -9351,17 +9351,25 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
           (should-not (gethash 42 clutch-jdbc--async-callbacks)))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-quit-forgets-the-request ()
-  "A quit while waiting should forget the request, so its late reply is dropped."
-  (let ((clutch-jdbc--agent-process 'fake-proc)
-        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql)))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
-              ((symbol-function 'accept-process-output)
-               (lambda (&rest _) (signal 'quit nil))))
-      (should (eq (condition-case nil
-                      (clutch-jdbc--recv-response 5 10.0)
-                    (quit 'quit))
-                  'quit)))
-    (should-not (gethash 5 clutch-jdbc--async-callbacks))))
+  "An abandoned query drops its reply but keeps its own id for cancellation."
+  (dolist (reports-catalog '(nil t))
+    (let* ((clutch-jdbc--agent-process 'fake-proc)
+           (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+           (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+           (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+           (conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
+                                        :params (list :driver 'sqlserver :catalog "a" :rpc-timeout 10)
+                                        :reports-catalog reports-catalog))
+           (id 0))
+      (puthash 7 conn clutch-jdbc--connections-by-id)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'clutch-jdbc--send) (lambda (&rest _) (cl-incf id)))
+                ((symbol-function 'accept-process-output) (lambda (&rest _) (signal 'quit nil))))
+        (should (eq 'quit (condition-case nil (clutch-db-query conn "USE b")
+                            (quit 'quit))))
+        (should (eql (gethash conn clutch-jdbc--busy-request-ids) 1))
+        (should-not (gethash 1 clutch-jdbc--async-callbacks))
+        (should (eq (clutch-db-resolution-context conn) 'unknown))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-cleans-state ()
   "When RPC timeout fires, agent and pending callback state are reset."

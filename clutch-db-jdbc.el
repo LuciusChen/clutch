@@ -759,6 +759,10 @@ TIMEOUT-SECONDS overrides CONN's RPC timeout."
               (setq response (clutch-jdbc--recv-response id timeout op conn))
               (clutch-jdbc--response-result-or-signal conn op response))
           (quit
+           ;; The late foreground reply can no longer confirm the database.
+           (when (clutch-jdbc--sqlserver-conn-p conn)
+             (setf (clutch-jdbc-conn-params conn)
+                   (plist-put (clutch-jdbc-conn-params conn) :catalog nil)))
            (setq clear-request-id nil)
            (signal 'quit nil)))
       (when (and clear-request-id
@@ -1822,6 +1826,8 @@ can suppress that readback; retry after the next foreground statement."
       (let ((case-fold-search t))
         (when (and (not (clutch-jdbc-conn-reports-catalog conn))
                    (clutch-jdbc--sqlserver-conn-p conn)
+                   ;; The abandoned request still owns its id until C-g cancels it.
+                   (not (gethash conn clutch-jdbc--busy-request-ids))
                    (or (not (clutch-jdbc--conn-catalog conn))
                        (string-match-p "\\bUSE\\b" (alist-get 'sql payload)))
                    (clutch-db-live-p conn))
