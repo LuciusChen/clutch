@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Record view shows and follows a foreign key when the query gives its column an alias.
+- Record view shows and follows a foreign key when the query gives its column an alias. SQL Server result metadata follows the current database after `USE`.
 
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 

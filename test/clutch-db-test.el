@@ -766,6 +766,8 @@ and a `?' inside a dollar-quoted function body is part of the body."
             captured-params)
         (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                   ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                  ((symbol-function 'clutch-jdbc--execute-rpc)
+                   (lambda (&rest _) (make-clutch-db-result :rows '(("app")))))
                   ((symbol-function 'clutch-jdbc--rpc)
                    (lambda (_conn _op params &optional _timeout-seconds)
                      (setq captured-params params)
