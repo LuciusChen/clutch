@@ -1033,7 +1033,7 @@ same-named projection with Clutch's hidden values."
                                         (t source))))
                  do (when hidden-p (setq copy (plist-put copy :hidden t)))
                  when (and (plist-get prep :mixed-star) (not (plist-get prep :cte))
-                           (or origin (plist-member column :source-column)))
+                           (or physical (plist-member column :source-column)))
                  do (setq copy (plist-put copy :read-source (and (not hidden-p) physical)))
                  when projection-present-p
                  do (setq copy (plist-put copy :source-column name))
