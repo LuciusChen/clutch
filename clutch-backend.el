@@ -2978,14 +2978,18 @@ time (with :hours only) plists returned by the protocol layers."
           (minutes (plist-get val :minutes))
           (seconds (plist-get val :seconds))
           (negative (plist-get val :negative)))
+      (when hours
+        (setq seconds (if (= seconds (truncate seconds))
+                          (format "%02d" seconds)
+                        (string-trim-right (format "%09.6f" seconds) "0+"))))
       (cond
        ((and year hours)
-        (format "%04d-%02d-%02d %02d:%02d:%02d"
+        (format "%04d-%02d-%02d %02d:%02d:%s"
                 year month day hours minutes seconds))
        (year
         (format "%04d-%02d-%02d" year month day))
        (hours
-        (format "%s%02d:%02d:%02d"
+        (format "%s%02d:%02d:%s"
                 (if negative "-" "")
                 hours minutes seconds))))))
 

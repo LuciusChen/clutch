@@ -208,7 +208,7 @@ INSERT submission and copy/export target a simple query's table, schema included
 
 Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. The active field line is highlighted. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
 
-`C-c C-y` imports delimited text directly into the form. A single imported row prefills the current insert buffer; multiple imported rows become staged inserts immediately. Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
+Pasting into a field preserves line breaks through staging and reopening. `C-c C-y` imports delimited text directly into the form. A single imported row prefills the current insert buffer; multiple imported rows become staged inserts immediately. Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
 
 JSON fields still support direct editing in the insert buffer, but `C-c '` opens an on-demand child editor for more comfortable multi-line editing. Saving that child editor writes compact JSON back into the insert form, so the primary flow remains result buffer -\> insert buffer. Opening and cancelling the child editor leaves the parent field's value and NULL/default/empty state unchanged.
 
