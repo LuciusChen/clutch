@@ -278,6 +278,12 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
               (setq rows-buffer (buffer-local-value 'clutch--last-result-buffer source))
               (with-current-buffer rows-buffer
                 (clutch-test--await (lambda () (assq 0 clutch--fk-info)))
+                (let ((send (symbol-function 'clutch-jdbc--send)) requests)
+                  (cl-letf (((symbol-function 'clutch-jdbc--send)
+                             (lambda (op args) (push op requests) (funcall send op args))))
+                    (with-current-buffer source (clutch-execute-buffer))
+                    (clutch-test--await-queries))
+                  (should-not (member "describe-source-columns" requests)))
                 (clutch-record--follow-column rows-buffer 0 0)
                 (clutch-test--await-queries)
                 (should (equal (cl-subseq (car clutch--result-rows) 0 3) '(11 1 2)))))

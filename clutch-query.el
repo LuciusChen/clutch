@@ -474,7 +474,7 @@ Keep quoting until CONN resolves the base column, including through aliases."
 (defun clutch--writable-select-projection (conn sql &optional base-table)
   "Describe the direct source columns in SQL on CONN.
 Return `star' for the table's star or one source token or nil per item.
-A single BASE-TABLE star can also be expanded among direct columns."
+A single BASE-TABLE star can also occur among other items."
   (if-let* ((items (clutch--select-list-items sql)))
       (let* ((qualifiers (when (cl-some (lambda (item) (string-search "." item)) items)
                            (mapcar #'clutch-db-sql--table-raw-parts
@@ -486,7 +486,7 @@ A single BASE-TABLE star can also be expanded among direct columns."
         (cond
          ((equal sources '(star)) 'star)
          ((not (memq 'star sources)) sources)
-         ((and base-table (= (cl-count 'star sources) 1) (not (memq nil sources))
+         ((and base-table (= (cl-count 'star sources) 1)
                (clutch-db-sql-source-table sql t))
           sources)
          (t 'none)))
@@ -915,6 +915,8 @@ key would change the current row instead of the one shown."
               (clutch-db-error
                (setq identity-error (or identity-error err))
                'none)))
+           (mixed-star (and (consp projection) (memq 'star projection)
+                            (memq nil projection) projection))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -932,7 +934,8 @@ key would change the current row instead of the one shown."
             :source-catalog source-catalog
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
-            :writable-projection projection
+            :writable-projection (if mixed-star 'none projection)
+            :mixed-star mixed-star
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status

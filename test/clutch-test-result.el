@@ -1980,13 +1980,13 @@ relation added by hand starts at the same field, offered after the key."
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
         (clutch-er-relations-directory (make-temp-file "clutch-er-" t))
         result-buf record-buf)
-    (cl-flet ((show-shops ()
+    (cl-flet ((show-shops (projection)
                 (with-temp-buffer
                   (clutch-mode)
                   (setq-local clutch-connection conn)
                   (let ((source (current-buffer)))
                     (clutch-test--execute-and-present
-                     "SELECT id, CODE AS region_code, COUNTRY AS region_country FROM shops" conn)
+                     (format "SELECT %s FROM shops" projection) conn)
                     (setq result-buf
                           (buffer-local-value 'clutch--last-result-buffer
                                               source))))
@@ -2004,8 +2004,10 @@ relation added by hand starts at the same field, offered after the key."
              (clutch-er--relations-file conn nil)
              '(((from . ((table . "shops"))) (to . ((table . "notes")))
                 (columns . [["code" "code"]]))))
-            (show-shops)
+            (show-shops "*, upper(code) AS extra")
             (with-current-buffer result-buf
+              (should (assq 1 clutch--fk-info))
+              (should-not (assq 3 clutch--fk-info))
               (clutch--goto-cell 0 1)
               (save-window-excursion
                 (clutch-result-open-record)
@@ -2019,7 +2021,7 @@ relation added by hand starts at the same field, offered after the key."
               (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
                                      clutch--result-rows)
                              '(("n" "b" "north b")))))
-            (show-shops)
+            (show-shops "id, CODE AS region_code, COUNTRY AS region_country")
             (with-current-buffer result-buf
               (clutch-test--with-minibuffer-answers '("notes (code) from code")
                 (clutch-record--follow-column result-buf 1 0 t))
