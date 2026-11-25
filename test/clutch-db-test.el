@@ -749,6 +749,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (dolist (case '((:label "sqlserver default"
                    :oracle-manual-commit t
                    :driver sqlserver
+                   :reply (:catalog "app")
                    :params (:host "db" :port 1433 :database "app"
                             :user "sa" :password "secret")
                    :driver-class "com.microsoft.sqlserver.jdbc.SQLServerDriver"
@@ -766,12 +767,10 @@ and a `?' inside a dollar-quoted function body is part of the body."
             captured-params)
         (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
                   ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
-                  ((symbol-function 'clutch-jdbc--execute-rpc)
-                   (lambda (&rest _) (make-clutch-db-result :rows '(("app")))))
                   ((symbol-function 'clutch-jdbc--rpc)
                    (lambda (_conn _op params &optional _timeout-seconds)
                      (setq captured-params params)
-                     '(:conn-id 8))))
+                     (append '(:conn-id 8) (plist-get case :reply)))))
           (clutch-db-jdbc-connect
            (plist-get case :driver)
            (plist-get case :params))
@@ -8943,13 +8942,19 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
     (should (equal (clutch-db-display-name conn) "SQL Server"))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-query ()
-  "SQL Server JDBC query should return one row for SELECT 1."
+  "SQL Server should return rows and report a database switch even on error."
   :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let ((result (clutch-db-query conn "SELECT 1 AS n")))
       (should (clutch-db-result-p result))
       (should (= (length (clutch-db-result-rows result)) 1))
-      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))
+    (should-error (clutch-db-query conn "USE tempdb; THROW 50000, 'after USE', 1")
+                  :type 'clutch-db-error)
+    (should (equal (clutch-db-database conn) "tempdb"))
+    (clutch-db-query conn "USE master; SET NOEXEC ON")
+    (clutch-db-query conn "SET NOEXEC OFF")
+    (should (equal (clutch-db-database conn) "master"))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-release-invalidates-later-savepoints ()
   "Releasing a SQL Server savepoint should invalidate later local handles."

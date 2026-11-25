@@ -238,6 +238,7 @@ Entries without Maven coordinates require manual installation.")
   process   ; the shared agent process
   conn-id   ; integer handle in the agent's ConnectionManager
   driver    ; internal JDBC driver implementation symbol
+  reports-catalog ; the agent reports the primary database with foreground replies
   describe-source-columns ; the agent can bind a SQL Server metadata projection
   params    ; original connection plist (for metadata)
   busy)     ; t during execution, or the state of an active foreground fetch
@@ -705,6 +706,9 @@ nobody waiting and is dropped, as is an older agent's unknown-op error."
 (defun clutch-jdbc--response-result-or-signal (conn op response)
   "Return RESPONSE's result or signal `clutch-db-error' for OP.
 When CONN is non-nil, remember structured diagnostics on the connection."
+  (when-let* ((conn) (catalog (plist-get response :catalog)))
+    (setf (clutch-jdbc-conn-params conn)
+          (plist-put (clutch-jdbc-conn-params conn) :catalog catalog)))
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
     (let* ((details (clutch-jdbc--remember-error-response conn op response))
@@ -1058,6 +1062,7 @@ Returns a `clutch-jdbc-conn'."
                   :process  clutch-jdbc--agent-process
                   :conn-id  (plist-get result :conn-id)
                   :driver   driver
+                  :reports-catalog (stringp (plist-get result :catalog))
                   :describe-source-columns (eq (plist-get result :describe-source-columns) t)
                   :params   conn-params
                   :busy     nil)))
@@ -1093,9 +1098,13 @@ Returns a `clutch-jdbc-conn'."
               (clutch-db-disconnect conn)))))
       (when (clutch-jdbc--sqlserver-conn-p conn)
         (condition-case err
-            (if-let* ((catalog (plist-get conn-params :catalog)))
-                (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn catalog)))
-              (clutch-jdbc--read-sqlserver-catalog conn))
+            (let ((requested (plist-get conn-params :catalog))
+                  (opened (plist-get result :catalog)))
+              (cond
+               ((and requested (not (equal requested opened)))
+                (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn requested))))
+               (opened (setf (clutch-jdbc-conn-params conn) (plist-put conn-params :catalog opened)))
+               (t (clutch-jdbc--read-sqlserver-catalog conn))))
           (clutch-db-error
            (clutch-db-disconnect conn)
            (signal (car err) (cdr err)))))
@@ -1709,7 +1718,7 @@ ASYNC non-nil marks a request that nothing waits for."
        conn
        (clutch-jdbc--rpc-on-conn
         conn op (clutch-jdbc--execute-params conn payload)))
-    (setf (clutch-jdbc-conn-busy conn) nil)))
+    (clutch-jdbc--finish-execution conn payload)))
 
 (defun clutch-jdbc--send-foreground (conn op params outcome)
   "Send OP with PARAMS on CONN and pass its (RESULT ERROR) to OUTCOME.
@@ -1775,8 +1784,8 @@ Keep CONN busy through any cursor fetches."
                        nil)))))
              (when (eql (gethash conn clutch-jdbc--busy-request-ids) request-id)
                (remhash conn clutch-jdbc--busy-request-ids))
-             (setf (clutch-jdbc-conn-busy conn) nil)
-             (funcall callback result error)))
+             (unwind-protect (clutch-jdbc--finish-execution conn payload)
+               (funcall callback result error))))
          (receive (raw error)
            (if (and (not error) (plist-get raw :cursor-id)
                     (not (eq t (plist-get raw :done)))
@@ -1794,18 +1803,40 @@ Keep CONN busy through any cursor fetches."
   nil)
 
 (defun clutch-jdbc--read-sqlserver-catalog (conn)
-  "Record the database of SQL Server CONN for result identity and metadata."
-  (let ((catalog (caar (clutch-db-result-rows (clutch-db-query conn "SELECT DB_NAME()")))))
-    (setf (clutch-jdbc-conn-params conn)
-          (plist-put (clutch-jdbc-conn-params conn) :catalog catalog))))
+  "Record the database of SQL Server CONN when the agent cannot report it."
+  (let (catalog)
+    (unwind-protect
+        (setq catalog
+              (caar (plist-get (clutch-jdbc--rpc-on-conn
+                                conn "execute" (clutch-jdbc--execute-params
+                                                conn '((sql . "SELECT DB_NAME()"))))
+                               :rows)))
+      (setf (clutch-jdbc-conn-params conn)
+            (plist-put (clutch-jdbc-conn-params conn) :catalog catalog)))))
+
+(defun clutch-jdbc--finish-execution (conn payload)
+  "Release CONN after executing PAYLOAD and updating its database.
+Older SQL Server agents need a readback after a possible USE.  NOEXEC
+can suppress that readback; retry after the next foreground statement."
+  (unwind-protect
+      (let ((case-fold-search t))
+        (when (and (not (clutch-jdbc-conn-reports-catalog conn))
+                   (clutch-jdbc--sqlserver-conn-p conn)
+                   (or (not (clutch-jdbc--conn-catalog conn))
+                       (string-match-p "\\bUSE\\b" (alist-get 'sql payload)))
+                   (clutch-db-live-p conn))
+          (condition-case err
+              (clutch-jdbc--read-sqlserver-catalog conn)
+            (clutch-db-error (message "Could not verify the current database: %s"
+                                      (clutch-db--error-message err))))))
+    (setf (clutch-jdbc-conn-busy conn) nil)))
 
 (defun clutch-jdbc--namespace-statement-p (conn sql)
   "Return non-nil when SQL may move JDBC CONN into another schema.
 The server reports the effective namespace after these statements."
   (pcase (clutch-db-sql-leading-keyword sql)
     ("ALTER" (clutch-jdbc--oracle-conn-p conn))
-    ("USE" (or (clutch-jdbc--duckdb-conn-p conn) (clutch-jdbc--sqlserver-conn-p conn)))
-    ((or "SET" "RESET") (clutch-jdbc--duckdb-conn-p conn))))
+    ((or "USE" "SET" "RESET") (clutch-jdbc--duckdb-conn-p conn))))
 
 (defun clutch-jdbc--follow-schema (conn sql)
   "Follow JDBC CONN into the schema SQL may have set.
@@ -1815,16 +1846,14 @@ Failing to follow is only reported: SQL has run, and its outcome must
 still arrive."
   (when (clutch-jdbc--namespace-statement-p conn sql)
     (condition-case err
-        (cond
-         ((clutch-jdbc--sqlserver-conn-p conn) (clutch-jdbc--read-sqlserver-catalog conn))
-         ((clutch-jdbc--duckdb-conn-p conn) (clutch-jdbc--refresh-duckdb-namespace conn))
-         (t
+        (if (clutch-jdbc--duckdb-conn-p conn)
+            (clutch-jdbc--refresh-duckdb-namespace conn)
           (let ((schema (caar (clutch-db-result-rows
                                (clutch-db-query
                                 conn
                                 "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")))))
             (unless (equal schema (clutch-jdbc--conn-schema conn))
-              (clutch-jdbc--use-oracle-schema conn schema)))))
+              (clutch-jdbc--use-oracle-schema conn schema))))
       (clutch-db-error
        (message "Could not follow the current schema: %s" (cadr err))))))
 
@@ -2385,13 +2414,13 @@ DuckDB reads it once and refreshes after namespace-changing statements."
 (cl-defmethod clutch-db-resolution-context ((conn clutch-jdbc-conn))
   "Return what an unqualified table name on JDBC CONN resolves in.
 DuckDB resolves one through its catalog, current schema and search path."
-  (if (clutch-jdbc--duckdb-conn-p conn)
-      (car (clutch-db-result-rows
-            (clutch-db-query
-             conn
-             (concat "SELECT current_catalog(), current_schema(), "
-                     "current_setting('search_path')"))))
-    (cl-call-next-method)))
+  (cond
+   ((clutch-jdbc--duckdb-conn-p conn)
+    (car (clutch-db-result-rows
+          (clutch-db-query conn (concat "SELECT current_catalog(), current_schema(), "
+                                        "current_setting('search_path')")))))
+   ((and (clutch-jdbc--sqlserver-conn-p conn) (not (clutch-jdbc--conn-catalog conn))) 'unknown)
+   (t (cl-call-next-method))))
 
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-jdbc-conn) schema)
   "Switch JDBC CONN to SCHEMA."
@@ -3098,12 +3127,12 @@ Only PostgreSQL and MySQL URLs have plans."
 (cl-defmethod clutch-db-database ((conn clutch-jdbc-conn))
   "Return the database for JDBC CONN."
   (let ((params (clutch-jdbc-conn-params conn)))
-    (or (and (clutch-jdbc--sqlserver-conn-p conn) (plist-get params :catalog))
-        (plist-get params :database)
-        (if (clutch-jdbc--clickhouse-conn-p conn)
-            (clutch-jdbc--clickhouse-url-database (plist-get params :url))
-          (plist-get (clutch-jdbc--url-metadata (plist-get params :url))
-                     :database)))))
+    (if (and (clutch-jdbc--sqlserver-conn-p conn) (plist-member params :catalog))
+        (plist-get params :catalog)
+      (or (plist-get params :database)
+          (if (clutch-jdbc--clickhouse-conn-p conn)
+              (clutch-jdbc--clickhouse-url-database (plist-get params :url))
+            (plist-get (clutch-jdbc--url-metadata (plist-get params :url)) :database))))))
 
 (cl-defmethod clutch-db-display-name ((conn clutch-jdbc-conn))
   "Return a display name for CONN based on the JDBC driver type."
