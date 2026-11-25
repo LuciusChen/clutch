@@ -227,6 +227,14 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 
 ;;;; Result buffer lifecycle
 
+(defun clutch--result-source-column-names ()
+  "Return each result field's catalog name, with nil for expressions."
+  (let ((bindings (plist-get clutch--result-query-prep :catalog-columns))
+        (defs clutch--result-column-defs))
+    (cl-loop for label in clutch--result-columns for def = (pop defs)
+             for source = (if (plist-member def :source-column) (plist-get def :source-column) label)
+             collect (or (cdr (assoc source bindings)) source))))
+
 (defun clutch--result-column-details (conn table col-names &optional load)
   "Return detail plists aligned with result columns COL-NAMES.
 Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
@@ -241,6 +249,48 @@ missing table metadata."
       (mapcar (lambda (name)
                 (gethash (downcase name) by-name))
               col-names))))
+
+(defun clutch--update-fk-info (conn table refresh)
+  "Show CONN's cached foreign keys for TABLE, redrawing the grid if REFRESH."
+  (let ((links (clutch--foreign-key-column-info conn table (clutch--result-source-column-names))))
+    (unless (equal links clutch--fk-info)
+      (setq-local clutch--fk-info links)
+      (when refresh
+        (clutch--refresh-display)
+        (when-let* ((record (get-buffer "*clutch-record*"))
+                    ((eq (current-buffer) (buffer-local-value 'clutch-record--result-buffer record)))
+                    ((memq (buffer-local-value 'clutch-record--row record) (clutch--result-display-rows))))
+          (with-current-buffer record (clutch-record--revert)))))))
+
+(defun clutch--load-fk-info (&optional refresh)
+  "Show known foreign keys, optionally REFRESH, and request missing spellings."
+  (when-let* ((conn clutch-connection)
+              (table (and clutch--result-columns (clutch--result-source-key))))
+    (if (not (clutch--foreign-keys-cached-p conn table))
+        (clutch--ensure-foreign-keys-async conn table)
+      (clutch--update-fk-info conn table refresh)
+      (when-let* ((keys (clutch--cached-foreign-keys conn table))
+                  (prep clutch--result-query-prep)
+                  (pending (cl-loop for col in clutch--result-column-defs
+                                    when (plist-get col :unresolved-source)
+                                    collect (plist-get col :source-column)))
+                  (metadata (clutch--table-metadata conn table))
+                  (known (append (mapcar #'car keys) (mapcar #'car (plist-get prep :catalog-columns))
+                                 (plist-get metadata :columns)
+                                 (mapcar (lambda (col) (plist-get col :name))
+                                         (plist-get metadata :column-details))))
+                  (names (seq-difference (delete-dups pending) known #'equal)))
+        (let ((buffer (current-buffer)))
+          (clutch-db-resolve-column-names-async
+           conn names (clutch-result--insert-target conn table clutch--last-query)
+           (lambda (bindings)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (when (and (eq conn clutch-connection) (eq prep clutch--result-query-prep))
+                   ;; Pages share the projection.  Writes still bind on the primary session.
+                   (setf (plist-get clutch--result-query-prep :catalog-columns)
+                         (append bindings (plist-get prep :catalog-columns)))
+                   (clutch--update-fk-info conn table t)))))))))))
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND.
@@ -258,12 +308,7 @@ TABLE is a metadata key from `clutch--table-key'."
                         clutch-connection table clutch--result-columns))
            (when clutch--pending-inserts
              (clutch--refresh-display)))
-          ('foreign-keys
-           (let ((fk-info (clutch--foreign-key-column-info
-                           clutch-connection table (clutch--result-source-column-names))))
-             (unless (equal fk-info clutch--fk-info)
-               (setq-local clutch--fk-info fk-info)
-               (clutch--refresh-display)))))))))
+          ('foreign-keys (clutch--load-fk-info t)))))))
 
 (add-hook 'clutch--table-metadata-updated-hook
           #'clutch--handle-table-metadata-updated)

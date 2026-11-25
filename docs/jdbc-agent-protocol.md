@@ -103,6 +103,7 @@ Schema and object metadata:
 - `search-tables`
 - `get-columns`
 - `search-columns`
+- `describe-source-columns` when advertised by SQL Server connections
 - `get-primary-keys`
 - `get-foreign-keys`
 - `get-referencing-keys` (agent 0.2.28+)
@@ -236,6 +237,8 @@ Generic JDBC rows contain:
 ## Column metadata payload
 
 `get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
+
+A SQL Server `connect` reply can advertise `describe-source-columns: true`. The operation takes `conn-id` and a `projection` SELECT, describes it on the metadata session without executing it, and returns `columns` in projection order. An entry is null when SQL Server cannot identify a source column.
 
 On DuckDB and SQL Server, `get-columns` forwards schema and table as JDBC LIKE patterns. Clutch escapes literal underscores, percent signs and backslashes for both column names and details, including the connection's default schema; catalog remains an exact name. Primary-key and foreign-key operations take exact schema/table names and do not use that escaping. Oracle's direct column metadata queries also use exact names.
 

@@ -2714,6 +2714,11 @@ Signal ambiguity for a write operation OP."
   "Resolve competing spellings in NAMES on CONN against SQL SOURCE-TOKEN.
 Return an alist mapping each resolved spelling to its physical column name.")
 
+(cl-defgeneric clutch-db-resolve-column-names-async (conn names source-token callback)
+  "Resolve NAMES on SOURCE-TOKEN for display using CONN's metadata session.
+Call CALLBACK with the bindings.  Return nil if unsupported."
+  (:method ((_conn t) _names _source-token _callback) nil))
+
 (cl-defmethod clutch-db-resolve-column-names ((conn t) names source-token)
   "Match NAMES to the columns of SOURCE-TOKEN visible in CONN's session."
   (let ((columns (clutch-db-result-columns
