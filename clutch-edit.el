@@ -223,7 +223,7 @@ the SELECT projection cannot be proven writable."
 
 (defun clutch-result--bind-source-columns (columns target &optional details)
   "Resolve unconfirmed source spellings in COLUMNS on TARGET.
-Use exact names in DETAILS and catalog spellings verified for this table.
+Use exact names in DETAILS and cached spellings for fully qualified tables.
 Ask the original relation about remaining names together."
   (when-let* ((pending (seq-filter (lambda (col) (plist-get col :unresolved-source)) columns)))
     (let* ((names (delete-dups (mapcar (lambda (col) (plist-get col :source-column)) pending)))
@@ -231,8 +231,10 @@ Ask the original relation about remaining names together."
                           (cl-loop for col in columns unless (plist-get col :unresolved-source)
                                    collect (plist-get col :source-column))))
            (unknown (seq-difference names known #'equal))
-           (catalog (plist-get (clutch--table-metadata clutch-connection (clutch--result-source-key))
-                               :catalog-columns))
+           ;; A relative target can name different tables on the two sessions.
+           (catalog (pcase (clutch--result-source-key)
+                      ((and key `(,(pred stringp) ,(pred stringp) ,_))
+                       (plist-get (clutch--table-metadata clutch-connection key) :catalog-columns))))
            (bindings (when unknown
                        (clutch-result--refuse-if-moved)
                        (when catalog
@@ -260,12 +262,14 @@ Ask the original relation about remaining names together."
 
 (defun clutch-result--writable-source-detail (table cidx op &optional details)
   "Return canonical source-column metadata for CIDX in TABLE during OP.
-TABLE is a metadata key from `clutch--table-key'.  An exact metadata name
-wins.  Otherwise, accept a single case-insensitive match so unquoted
-identifiers can be reconciled with backend canonical case.
-Return nil when no metadata column matches, and reject ambiguous matches."
-  (let ((details (or details (clutch-result--source-column-details table op (list cidx)))))
-    (clutch-db-source-column-detail (clutch-result--writable-source-column cidx op) details op)))
+TABLE is a metadata key from `clutch--table-key'.  A database-confirmed
+name must match DETAILS exactly."
+  (let* ((details (or details (clutch-result--source-column-details table op (list cidx))))
+         (name (clutch-result--writable-source-column cidx op)))
+    (if (plist-member (nth cidx clutch--result-column-defs) :unresolved-source)
+        (or (cl-find name details :key (lambda (detail) (plist-get detail :name)) :test #'equal)
+            (user-error "Cannot %s: source column %s is missing from table metadata" op name))
+      (clutch-db-source-column-detail name details op))))
 
 (defun clutch-result--field-metadata-tags (col-def detail)
   "Return short metadata tags for COL-DEF and DETAIL."
@@ -1940,7 +1944,7 @@ projection labels for editing and importing."
              for def = (nth idx clutch--result-column-defs)
              for label = (nth idx clutch--result-columns)
              for source = (plist-get def :source-column)
-             for detail = (and source (clutch-db-source-column-detail source details "insert"))
+             for detail = (and source details (clutch-result--writable-source-detail table idx "insert" details))
              for name = (or (plist-get detail :name) source)
              when (and name (not (member name sources)))
              collect

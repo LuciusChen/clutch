@@ -1037,9 +1037,10 @@ same-named projection with Clutch's hidden values."
                  do (setq copy (plist-put copy :read-source (and (not hidden-p) physical)))
                  when projection-present-p
                  do (setq copy (plist-put copy :source-column name))
-                 when (and name (not case-rule) (not physical) (stringp source)
-                           (not (member name (plist-get (plist-get prep :candidate) :columns))))
-                 do (setq copy (plist-put copy :unresolved-source t))
+                 when (and name (not case-rule))
+                 do (setq copy (plist-put copy :unresolved-source
+                                          (and (not physical) (stringp source)
+                                               (not (member name (plist-get (plist-get prep :candidate) :columns))))))
                  collect copy)))))
 
 ;;;; SQL pagination helpers
