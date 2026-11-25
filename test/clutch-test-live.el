@@ -2251,6 +2251,8 @@ submitted updated B's table of the same name."
                 (should-not (eq (car results) (cadr results)))
                 (with-current-buffer (cadr results)
                   (should (assq 2 clutch--fk-info))
+                  (clutch--goto-cell 0 1)
+                  (should-error (clutch-result-column-info) :type 'user-error)
                   (should-error (clutch-test--xtdb-submit) :type 'user-error))
                 (should (equal (list (value a) (value b)) '("orig" "orig")))
                 (clutch-test--run-in-console (format "USE %s" a))

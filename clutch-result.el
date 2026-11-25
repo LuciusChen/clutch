@@ -4230,6 +4230,7 @@ The column is centered in the window unless KEEP-VIEW is non-nil."
                (or (clutch--result-unbound-star)
                    (nth index (clutch--result-source-column-names))))
       (clutch-result--require-connection)
+      (clutch-result--refuse-if-moved)
       (clutch--ensure-column-details clutch-connection table)
       (setq-local clutch--result-column-details (clutch--result-column-details clutch-connection table))
       (unless (nth index clutch--result-column-details)
