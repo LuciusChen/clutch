@@ -1505,8 +1505,10 @@ Use \\[clutch-result-submit] in the result buffer to submit."
       (overlay-put ov 'face 'clutch-insert-field-error-face)
       (overlay-put ov 'after-string hint)
       (overlay-put ov 'help-echo message)
-      (overlay-put ov 'priority 100)
-      (overlay-put ov 'evaporate t)
+      ;; An empty value shares its display position with the placeholder.
+      (when (< beg end)
+        (overlay-put ov 'priority 100)
+        (overlay-put ov 'evaporate t))
       (clutch-result-insert--set-field-prop field :error-overlay ov)
       (clutch-result-insert--set-field-prop field :error-message message))))
 
@@ -1516,7 +1518,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (value (clutch-result-insert--field-value field))
          (detail (plist-get field :detail))
          (col-def (plist-get field :column-def)))
-    (unless (string-empty-p value)
+    (when (and (plist-get field :provided) (not (plist-get field :special-value)))
       (condition-case err
           (clutch-result--field-validation-message name value col-def detail)
         (user-error (error-message-string err))))))
@@ -1878,8 +1880,8 @@ If nothing handles the completion, fall back to `completing-read'."
    clutch-result-insert-json--parent-buffer
    #'clutch-result-insert--normalize-point))
 
-(defun clutch-result-insert--populate-buffer (&optional new)
-  "Render the insert fields.  For a NEW row, begin at the first required field."
+(defun clutch-result-insert--populate-buffer (&optional initial-field)
+  "Render the insert fields and move to INITIAL-FIELD or the first field."
   (let ((label-width
          (clutch-result-insert--field-label-width
           (clutch-result-insert--all-column-names))))
@@ -1902,14 +1904,8 @@ If nothing handles the completion, fall back to `completing-read'."
                   (plist-get field :end-marker) (copy-marker (1- (point)) t))
             (clutch-result-insert--refresh-field-placeholder field))))))
   (clutch-result-insert--refresh-header-line)
-  (let ((first (when new
-                 (or (seq-find (lambda (f)
-                                 (clutch-result-insert--required-p (plist-get f :detail)))
-                               clutch-result-insert--fields)
-                     (seq-find (lambda (f) (not (plist-get (plist-get f :detail) :generated)))
-                               clutch-result-insert--fields)))))
-    (goto-char (cdr (clutch-result-insert--field-value-bounds
-                     (or first (car clutch-result-insert--fields))))))
+  (goto-char (cdr (clutch-result-insert--field-value-bounds
+                   (or initial-field (car clutch-result-insert--fields)))))
   (clutch-result-insert--normalize-point))
 
 (defun clutch-result-insert--clone-copy-column-p (detail cidx)
@@ -1987,7 +1983,13 @@ staged insert to update.  CLONE-INDEX prefills from a result or staged row."
                   clutch-result-insert--pending-entry (and reedit fields)
                   completion-at-point-functions
                   '(clutch-result-insert-completion-at-point))
-      (clutch-result-insert--populate-buffer (not (or fields reedit clone-index))))
+      (clutch-result-insert--populate-buffer
+       (unless (or fields reedit)
+         (or (and (not clone-index)
+                  (seq-find (lambda (f) (clutch-result-insert--required-p (plist-get f :detail)))
+                            field-state))
+             (seq-find (lambda (f) (not (plist-get (plist-get f :detail) :generated)))
+                       field-state)))))
     (pop-to-buffer buf)))
 
 (defun clutch-result-insert--ensure-live-result-context ()
@@ -2314,8 +2316,9 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
     (clutch-result--validate-field-value
      field-name value (clutch-result-insert--column-def field-name) detail)))
 
-(defun clutch-result-insert--validated-source-fields (fields)
-  "Validate form FIELDS and return values keyed by their target columns."
+(defun clutch-result-insert--validated-source-fields (fields &optional show-inline-error)
+  "Validate FIELDS and return values keyed by their target columns.
+With SHOW-INLINE-ERROR, mark the invalid value in the current form."
   (cl-loop for (label . value) in fields
            for field = (clutch-result-insert--field-state label)
            do (condition-case err
@@ -2323,6 +2326,8 @@ Omit untouched blank fields; retain explicit empty strings and SQL NULL."
                 (user-error
                  (goto-char (plist-get field :value-marker))
                  (clutch-result-insert--normalize-point)
+                 (when show-inline-error
+                   (clutch-result-insert--show-field-error field (error-message-string err)))
                  (signal (car err) (cdr err))))
            collect (cons (plist-get field :source-column) value)))
 
@@ -2381,7 +2386,7 @@ Use \\[clutch-result-submit] in the result buffer to submit."
          (entry clutch-result-insert--pending-entry))
     (unless fields (user-error "No values entered"))
     (clutch-result-insert--ensure-live-result-context)
-    (setq fields (clutch-result-insert--validated-source-fields fields))
+    (setq fields (clutch-result-insert--validated-source-fields fields t))
     (with-current-buffer result-buf
       (if entry
           (let ((index (or (cl-position entry clutch--pending-inserts :test #'eq)
