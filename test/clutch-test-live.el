@@ -267,12 +267,19 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (clutch-test--await-queries))
                   (should (equal calls '("get-primary-keys")))
                   (should (string-match-p "ER load cancelled" (buffer-string))))))
-            (when (and (eq clutch-test-backend 'sqlserver)
-                       (clutch-jdbc-conn-describe-source-columns conn))
+            (when (or (eq clutch-test-backend 'mysql)
+                      (and (eq clutch-test-backend 'sqlserver)
+                           (clutch-jdbc-conn-describe-source-columns conn)))
+              (when (eq clutch-test-backend 'sqlserver)
+                ;; Period columns belong to the catalog but not to SELECT *.
+                (clutch-db-query conn (format (concat "ALTER TABLE %s ADD "
+                                                      "valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL DEFAULT SYSUTCDATETIME(), "
+                                                      "valid_to datetime2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL DEFAULT '9999-12-31 23:59:59.9999999', "
+                                                      "PERIOD FOR SYSTEM_TIME (valid_from, valid_to)") child)))
               (clutch-db-query conn (format "INSERT INTO %s VALUES (11,1,2)" parent))
               (clutch-db-query conn (format "INSERT INTO %s VALUES (7,11,1,2)" child))
               (with-current-buffer source
-                (insert (format "SELECT P AS parent_alias, *, id + 1 AS extra FROM %s" child))
+                (insert (format "SELECT P AS parent_alias, %s.*, id + 1 AS extra FROM %s" child child))
                 (clutch-execute-buffer))
               (clutch-test--await-queries)
               (setq rows-buffer (buffer-local-value 'clutch--last-result-buffer source))

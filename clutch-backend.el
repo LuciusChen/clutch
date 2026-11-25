@@ -2707,12 +2707,20 @@ Signal ambiguity for a write operation OP."
 (defun clutch-db--column-binding-select (conn names source-token)
   "Select identifiers NAMES directly from SQL SOURCE-TOKEN on CONN."
   (format "SELECT %s FROM %s"
-          (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) names ", ")
+          (mapconcat (lambda (name) (if (eq name 'star) "*" (clutch-db-escape-identifier conn name)))
+                     names ", ")
           source-token))
+
+(defun clutch-db--column-bindings (names columns)
+  "Pair requested NAMES with COLUMNS in result order.
+A trailing `star' represents all remaining columns in the projection."
+  (cl-loop for name in names while columns
+           collect (cons name (if (eq name 'star) columns (pop columns)))))
 
 (cl-defgeneric clutch-db-resolve-column-names (conn names source-token)
   "Resolve competing spellings in NAMES on CONN against SQL SOURCE-TOKEN.
-Return an alist mapping each resolved spelling to its physical column name.")
+Return an alist mapping each resolved spelling to its physical column name.
+A trailing `star' asks for the ordered column names SELECT * actually returns.")
 
 (cl-defgeneric clutch-db-resolve-column-names-async (conn names source-token callback)
   "Resolve NAMES on SOURCE-TOKEN for display using CONN's metadata session.
@@ -2724,8 +2732,9 @@ Call CALLBACK with the bindings.  Return nil if unsupported."
   (let ((columns (clutch-db-result-columns
                   (clutch-db-query conn (format "SELECT * FROM %s WHERE 1=0" source-token)))))
     (cl-loop for name in names
-             for detail = (clutch-db-source-column-detail name columns)
-             when detail collect (cons name (plist-get detail :name)))))
+             if (eq name 'star) collect (cons name (clutch-db-result-column-names columns))
+             else append (when-let* ((detail (clutch-db-source-column-detail name columns)))
+                           (list (cons name (plist-get detail :name)))))))
 
 ;; Re-entrancy guard
 

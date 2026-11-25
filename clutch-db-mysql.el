@@ -929,9 +929,11 @@ FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND "
   (clutch-db--translate-library-error mysql-error
     (let* ((sql (concat (clutch-db--column-binding-select conn names source-token) " LIMIT 0"))
            (fields (mysql-result-columns (clutch-db-mysql--metadata-query conn sql))))
-      (cl-loop for name in names for field in fields
-               for physical = (plist-get field :org-name)
-               unless (string-empty-p physical) collect (cons name physical)))))
+      (cl-loop for name in names
+               if (eq name 'star)
+               collect (cons name (mapcar (lambda (field) (plist-get field :name)) fields))
+               else append (let ((physical (plist-get (pop fields) :org-name)))
+                             (unless (string-empty-p physical) (list (cons name physical))))))))
 
 (cl-defmethod clutch-db-list-columns ((conn mysql-conn) table)
   "Return column names for TABLE on MySQL CONN."
