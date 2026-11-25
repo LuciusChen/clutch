@@ -2288,9 +2288,28 @@ throughout."
             (dolist (schema (list s2 s3))
               (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
               (clutch-db-query
-               admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text)" schema))
+               admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text, memo %s)" schema
+                             (if (equal schema s2) (format "int REFERENCES %s.t" s2) "date")))
               (clutch-db-query
                admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
+            (clutch-test--with-live-console params
+              (cl-flet ((describe-on (schema)
+                          (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 schema))
+                          (clutch-test--await (lambda () (gethash clutch-connection clutch--schema-cache)))
+                          (clutch-test--run-in-console "SELECT memo, id FROM t")
+                          (with-current-buffer (clutch-result--buffer-name)
+                            (clutch-test--await
+                             (lambda () (and (clutch--foreign-keys-cached-p clutch-connection "t")
+                                             (not (clutch-db-in-use-p clutch-connection)))))
+                            (clutch--goto-cell 0 0)
+                            (clutch-result-column-info)
+                            (list (plist-get (car clutch--result-column-details) :type)
+                                  (and (assq 0 clutch--fk-info) t)))))
+                (clutch-test--with-live-result-buffer result-name
+                  (should (equal (describe-on s2) '("integer" t)))
+                  (clutch-test--with-live-result-buffer (concat result-name "-other")
+                    (should (equal (describe-on s3) '("date" nil))))
+                  (with-current-buffer result-name (should (assq 0 clutch--fk-info))))))
             (dolist (action '(console submit edit copy))
               (clutch-test--with-live-console params
                 (clutch-toggle-auto-commit)
