@@ -144,7 +144,7 @@ With an agent that provides JDBC byte previews, Clutch receives up to 256 bytes 
 
 ## Edit Buffer Keys
 
-Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: `C-c C-c` stages the edited value, and the result buffer's `C-c C-c` submits all staged row changes. Closing a result buffer with staged edits, inserts or deletes asks before discarding them. Declining or pressing `C-g` keeps the buffer and its changes; accepting does not submit changes or end a database transaction.
+The grid marks a cell staged as an empty string with `<empty>` until the edit is submitted or discarded. Single-cell edit buffers use the same staged-mutation vocabulary as result buffers: `C-c C-c` stages the edited value, and the result buffer's `C-c C-c` submits all staged row changes. Closing a result buffer with staged edits, inserts or deletes asks before discarding them. Declining or pressing `C-g` keeps the buffer and its changes; accepting does not submit changes or end a database transaction.
 
 | Key               | Action                                        |
 |-------------------|-----------------------------------------------|
@@ -206,7 +206,7 @@ An untouched blank insert field is omitted, allowing a default or trigger to sup
 
 INSERT submission and copy/export target a simple query's table, schema included, and name it as the query does, as UPDATE and DELETE do; a result without row identity whose query a server-side filter has wrapped names it as the database stores it. Incomplete JDBC CLOB previews remain viewable but cannot be edited, cloned as data, or exported as complete values.
 
-Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. New forms start at the first required field, or the first non-generated field when none is required. Insert buffers also validate locally as you type: obvious enum / bool / json / numeric / date-time mistakes are shown inline on the current field before staging.
+Insert buffers show visible fields that read a table column, including generated/defaulted ones. An aliased field keeps its result label in the form and writes to its source column. Field labels are read-only, aligned to a shared value column, and may show tags such as `generated`, `default`…, `enum`, `bool`, `json`, and `required`. New forms start at the first required field, or the first non-generated field when none is required. Clones start at the first non-generated field. Invalid values are marked inline as you type. Staging takes you to the first invalid field and shows its error immediately.
 
 Pasting into a field preserves line breaks through staging and reopening. `C-c C-y` imports delimited text directly into the form. A single imported row prefills the current insert buffer; multiple imported rows become staged inserts immediately. Header-based imports map by column name; otherwise clutch maps positionally using the fields currently visible in the insert form.
 

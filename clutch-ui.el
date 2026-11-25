@@ -1338,17 +1338,18 @@ when the cell is open in a cell edit buffer."
 COL-DEF describes the column.  EDITED is a staged edit and FACE styles VAL."
   (let* ((display-val (if edited (cdr edited) val))
          (special-placeholder (clutch--cell-placeholder-value display-val))
-         (custom (and (not special-placeholder)
-                      (clutch--cell-custom-display display-val col-def)))
-         (json-cell (and (not custom)
+         (override (cond ((and edited (equal display-val "")) "<empty>")
+                         ((not special-placeholder)
+                          (clutch--cell-custom-display display-val col-def))))
+         (json-cell (and (not override)
                          (not special-placeholder)
                          (not edited)
                          (clutch--json-cell-value-p display-val col-def)))
-         (xml-cell (and (not custom)
+         (xml-cell (and (not override)
                         (not special-placeholder)
                         (not edited)
                         (clutch--xml-like-string-p display-val)))
-         (display (and (not custom)
+         (display (and (not override)
                        (cond
                         (special-placeholder
                          (cons special-placeholder nil))
@@ -1362,12 +1363,12 @@ COL-DEF describes the column.  EDITED is a staged edit and FACE styles VAL."
          (s (car-safe display))
          (value-truncated (cdr-safe display))
          (placeholder (and value-truncated
-                           (not custom)
+                           (not override)
                            (not edited)
                            (not special-placeholder)
                            (clutch--value-placeholder display-val col-def)))
-         (formatted (or custom placeholder s))
-         (truncated (if (or custom placeholder)
+         (formatted (or override placeholder s))
+         (truncated (if (or override placeholder)
                         (> (string-width formatted) w)
                       value-truncated))
          (incomplete (or value-truncated truncated)))
@@ -1380,7 +1381,7 @@ COL-DEF describes the column.  EDITED is a staged edit and FACE styles VAL."
                   (<= (length formatted) clutch--xml-cell-highlight-max-chars))
              (clutch--xml-display-highlight formatted))
             (truncated
-             (if (and (not custom) (not placeholder))
+             (if (and (not override) (not placeholder))
                  formatted
                (clutch--truncate-display-string formatted w)))
             (t formatted))))

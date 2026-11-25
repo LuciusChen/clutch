@@ -633,6 +633,7 @@ field metadata without changing parsed names."
         (clutch--goto-cell 0 0)
         (clutch-clone-row-to-insert))
       (with-current-buffer insert-buf
+        (should (equal (clutch-result-insert--current-field-name) "severity"))
         (should (string-match-p "^id[ ]+\\[generated\\]: $" (buffer-string)))
         (should (string-match-p "^severity[ ]+\\[enum required\\]: high$"
                                 (buffer-string)))
@@ -733,7 +734,7 @@ was typed in it, and multi-row delimited import should stage inserts by
 header names and empty the form.  Importing rows should be refused while
 a statement runs, as staging is: the page that statement brings would
 replace the staged rows."
-  (pcase-dolist (`(,label ,text ,running ,form ,staged)
+  (pcase-dolist (`(,label ,text ,failure ,form ,staged)
                  '(("one CSV row" "owner,severity\n\"Bob, Jr.\",high\n" nil
                     ("^owner[ ]*: Bob, Jr\\.$"
                      "^severity[ ]+\\[enum required\\]: high$")
@@ -742,8 +743,10 @@ replace the staged rows."
                     ("^severity[ ]+\\[enum required\\]: $")
                     ((("owner" . "bob") ("severity" . "high"))
                      (("owner" . "ann") ("severity" . "low"))))
+                   ("invalid TSV keeps valid form input" "severity\nhigh\nunknown" invalid
+                    ("^severity[ ]+\\[enum required\\]: low$") nil)
                    ("TSV rows while a query runs"
-                    "owner\tseverity\nbob\thigh\nann\tlow\n" t nil nil)))
+                    "owner\tseverity\nbob\thigh\nann\tlow\n" busy nil nil)))
     (ert-info (label)
       (let ((clutch--running-queries (make-hash-table :test 'eq)))
         (clutch-test--with-pop-to-buffer-capture insert-buf
@@ -759,15 +762,18 @@ replace the staged rows."
                :source-table "shipping_incidents"
                :render t)
             (clutch-result-insert--open-buffer "shipping_incidents" result-buf)
-            (when running
+            (when (eq failure 'busy)
               (puthash (buffer-local-value 'clutch-connection result-buf)
                        (list :buffer result-buf) clutch--running-queries))
             (with-current-buffer insert-buf
               (clutch-test--set-insert-field-value "severity" "low")
-              (if running
+              (if failure
                   (should-error (clutch-result-insert-import-delimited text)
                                 :type 'user-error)
                 (clutch-result-insert-import-delimited text))
+              (when (eq failure 'invalid)
+                (should-not (plist-get (clutch-result-insert--field-state "severity")
+                                       :error-overlay)))
               (dolist (field form)
                 (should (string-match-p field (buffer-string)))))
             (with-current-buffer result-buf
@@ -1596,7 +1602,6 @@ from closing."
               (clutch-result-edit-cell))
             (setq edit-buf (current-buffer))
             (erase-buffer)
-            (insert "z")
             (cl-letf (((symbol-function 'quit-window)
                        (lambda (&rest _args)
                          (switch-to-buffer result-buf)
@@ -1607,6 +1612,8 @@ from closing."
             (should (eq (current-buffer) result-buf))
             (should (= (get-text-property (point) 'clutch-row-idx) 1))
             (should (= (get-text-property (point) 'clutch-col-idx) 4))
+            (should (looking-at-p " *<empty>"))
+            (should (equal (get-text-property (point) 'clutch-full-value) ""))
             (should (= (window-hscroll) 40)))
         (when (buffer-live-p result-buf)
           (with-current-buffer result-buf
@@ -1687,6 +1694,8 @@ from closing."
               (should (string-prefix-p
                        (format "Field %s " (clutch-result-insert--current-field-name))
                        (error-message-string err)))
+              (should (equal (error-message-string err)
+                             (get-char-property (point) 'help-echo)))
               (when expected-message
                 (should (string-match-p expected-message
                                         (error-message-string err)))))))
