@@ -911,18 +911,6 @@ Refresh the affected row and footer in place when possible."
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
 
-(defun clutch--load-fk-info ()
-  "Load foreign key info for the current result's source table.
-Populates `clutch--fk-info' with an alist mapping
-column indices to their referenced table and column."
-  (setq clutch--fk-info nil)
-  (when-let* ((conn clutch-connection)
-              (table (and clutch--result-columns (clutch--result-source-key))))
-    (if (clutch--foreign-keys-cached-p conn table)
-        (setq clutch--fk-info (clutch--foreign-key-column-info
-                               conn table (clutch--result-source-column-names)))
-      (clutch--ensure-foreign-keys-async conn table))))
-
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
   (dolist (stmt statements)

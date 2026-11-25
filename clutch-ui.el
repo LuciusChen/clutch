@@ -2506,15 +2506,6 @@ Priority: region rows, then current row."
       (user-error "Cannot %s: source table cannot be detected (multi-table or derived query)"
                   op)))
 
-(defun clutch--result-source-column-names ()
-  "Return the base column for each result field, or nil for an expression."
-  (let ((definitions clutch--result-column-defs))
-    (cl-loop for name in clutch--result-columns
-             for definition = (pop definitions)
-             collect (if (plist-member definition :source-column)
-                         (plist-get definition :source-column)
-                       name))))
-
 (defun clutch--result-source-key ()
   "Return the metadata key of the current result's source table, or nil.
 It keeps the schema and catalog that qualify the table in the query, so

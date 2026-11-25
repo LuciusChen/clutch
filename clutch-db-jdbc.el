@@ -238,6 +238,7 @@ Entries without Maven coordinates require manual installation.")
   process   ; the shared agent process
   conn-id   ; integer handle in the agent's ConnectionManager
   driver    ; internal JDBC driver implementation symbol
+  describe-source-columns ; the agent can bind a SQL Server metadata projection
   params    ; original connection plist (for metadata)
   busy)     ; t during execution, or the state of an active foreground fetch
 
@@ -1057,6 +1058,7 @@ Returns a `clutch-jdbc-conn'."
                   :process  clutch-jdbc--agent-process
                   :conn-id  (plist-get result :conn-id)
                   :driver   driver
+                  :describe-source-columns (eq (plist-get result :describe-source-columns) t)
                   :params   conn-params
                   :busy     nil)))
       (puthash (clutch-jdbc-conn-conn-id conn) conn clutch-jdbc--connections-by-id)
@@ -1993,6 +1995,16 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
                                 "(N%s, NULL, 2) WHERE is_hidden = 0 ORDER BY column_ordinal")
                         (clutch-db-escape-literal conn select))))
       (cl-mapcar #'cons names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
+
+(cl-defmethod clutch-db-resolve-column-names-async ((conn clutch-jdbc-conn) names source-token callback)
+  "Resolve NAMES on SOURCE-TOKEN on CONN's metadata session and call CALLBACK."
+  (when (clutch-jdbc-conn-describe-source-columns conn)
+    (clutch-jdbc--rpc-async
+     "describe-source-columns"
+     `((conn-id . ,(clutch-jdbc-conn-conn-id conn))
+       (projection . ,(clutch-db--column-binding-select conn names source-token)))
+     (lambda (result) (funcall callback (cl-mapcar #'cons names (plist-get result :columns))))
+     nil nil conn)))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.
