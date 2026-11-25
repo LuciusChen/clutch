@@ -329,18 +329,11 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
     (clutch-db-pg--follow-search-path conn sql result)
     result))
 
-(defun clutch-db-pg--cache-current-schema (conn schema)
-  "Cache SCHEMA as the current schema for CONN."
-  (setf (clutch-db-pg--connection-current-schema conn) schema)
-  schema)
-
 (defun clutch-db-pg--set-search-path (conn schema)
-  "Set CONN search_path to SCHEMA and update the local cache."
+  "Set CONN's search_path to SCHEMA."
   (let ((schema (string-trim schema)))
-    (clutch-db-pg--exec conn
-             (format "SET search_path TO %s"
-                     (pgsql-escape-identifier schema)))
-    (clutch-db-pg--cache-current-schema conn schema)))
+    (clutch-db-pg--exec conn (format "SET search_path TO %s" (pgsql-escape-identifier schema)))
+    schema))
 
 (defun clutch-db-pg--namespace-statement-p (sql)
   "Return non-nil for SQL after which the search_path may differ.
@@ -961,28 +954,23 @@ WHERE schema_name <> 'information_schema' \
 ORDER BY schema_name")))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
-(defun clutch-db-pg--read-namespace (conn)
-  "Cache CONN's current schema and effective search path from one server reply."
-  (clutch-db--translate-library-error pgsql-error
-    (let* ((sql (if (eq (clutch-db-backend-key conn) 'xtdb)
-                    "SELECT current_schema()"
-                  "SELECT current_schema(), current_schemas(true)"))
-           (row (car (clutch-db-pg--metadata-rows (clutch-db-pg--exec conn sql)))))
-      (setf (clutch-db-pg--connection-current-schema conn) (or (car row) 'none)
-            (clutch-db-pg--connection-schemas conn) (cadr row)))))
-
 (cl-defmethod clutch-db-current-schema ((conn clutch-db-pg--connection))
-  "Return the current effective schema for PostgreSQL CONN.
+  "Return CONN's current schema and cache the effective path from the same reply.
 Remember an empty schema too, until the search path may have changed."
   (unless (clutch-db-pg--connection-current-schema conn)
-    (clutch-db-pg--read-namespace conn))
+    (clutch-db--translate-library-error pgsql-error
+      (let* ((sql (if (eq (clutch-db-backend-key conn) 'xtdb)
+                      "SELECT current_schema()"
+                    "SELECT current_schema(), current_schemas(true)"))
+             (row (car (clutch-db-pg--metadata-rows (clutch-db-pg--exec conn sql)))))
+        (setf (clutch-db-pg--connection-current-schema conn) (or (car row) 'none)
+              (clutch-db-pg--connection-schemas conn) (cadr row)))))
   (let ((schema (clutch-db-pg--connection-current-schema conn)))
     (unless (eq schema 'none) schema)))
 
 (cl-defmethod clutch-db-resolution-context ((conn clutch-db-pg--connection))
   "Return CONN's database and effective search path, including implicit schemas."
-  (unless (clutch-db-pg--connection-schemas conn)
-    (clutch-db-pg--read-namespace conn))
+  (clutch-db-current-schema conn)
   (list (clutch-db-database conn) (clutch-db-pg--connection-schemas conn)))
 
 (cl-defmethod clutch-db-metadata-scope ((conn clutch-db-pg--connection))

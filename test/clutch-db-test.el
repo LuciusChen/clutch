@@ -6374,10 +6374,11 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq executed-sql sql)
-                   (clutch-db-test--make-pg-result))))
+                   (clutch-db-test--make-pg-result :rows '(("app" ["pg_catalog" "app"]))))))
         (should (equal (clutch-db-set-current-schema conn "app") "app"))
         (should (equal executed-sql "SET search_path TO \"app\""))
-        (should (equal (clutch-db-current-schema conn) "app"))))))
+        (should (equal (clutch-db-current-schema conn) "app"))
+        (should (equal (alist-get 'search-path (clutch-db-metadata-scope conn)) ["pg_catalog" "app"]))))))
 
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
@@ -6393,7 +6394,7 @@ again after SQL that may change it, a rollback included."
                 ((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq executed-sql sql)
-                   (clutch-db-test--make-pg-result))))
+                   (clutch-db-test--make-pg-result :rows '(("app" ["pg_catalog" "app"]))))))
         (let ((conn (clutch-db-pg-connect
                      '(:host "127.0.0.1"
                        :port 54321
@@ -6567,17 +6568,16 @@ but the console went on showing that SET's schema after clutch-rollback,
 as the adapter found no transaction to end and kept its cached path."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
-    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
-      (cl-letf (((symbol-function 'pgsql-exec)
-                 (lambda (_client sql)
-                   (clutch-db-test--make-pg-result
-                    :rows (and (equal sql "SELECT current_schema(), current_schemas(true)")
-                               '(("public" ["pg_catalog" "public"]))))))
-                ((symbol-function 'pgsql-transaction-status)
-                 (lambda (_client) 'idle)))
-        (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
-                              (lambda (conn) (clutch-db-set-auto-commit conn t))))
-          (clutch-db-pg--cache-current-schema conn "alt")
+    (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
+                          (lambda (conn) (clutch-db-set-auto-commit conn t))))
+      (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+            (schema "alt"))
+        (cl-letf (((symbol-function 'pgsql-exec)
+                   (lambda (_client _sql)
+                     (clutch-db-test--make-pg-result :rows `((,schema [,schema])))))
+                  ((symbol-function 'pgsql-transaction-status) (lambda (_client) 'idle)))
+          (should (equal (clutch-db-current-schema conn) "alt"))
+          (setq schema "public")
           (should-not (funcall finish conn))
           (should (equal (clutch-db-current-schema conn) "public")))))))
 
