@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Record view shows and follows a foreign key when the query gives its column an alias.
+- Column info and Record foreign keys follow the source column when a query gives it an alias. Computed fields no longer inherit details from a table column with the same name.
 
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 

@@ -227,8 +227,8 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 
 ;;;; Result buffer lifecycle
 
-(defun clutch--result-column-details (conn table col-names &optional load)
-  "Return detail plists aligned with result columns COL-NAMES.
+(defun clutch--result-column-details (conn table source-names &optional load)
+  "Return detail plists aligned with SOURCE-NAMES, with nil for expressions.
 Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
 missing table metadata."
   (when-let* ((details (and table
@@ -237,10 +237,13 @@ missing table metadata."
                                      (clutch--ensure-column-details conn table))))))
     (let ((by-name (make-hash-table :test 'equal)))
       (dolist (detail details)
-        (puthash (downcase (plist-get detail :name)) detail by-name))
+        (push detail (gethash (downcase (plist-get detail :name)) by-name)))
       (mapcar (lambda (name)
-                (gethash (downcase name) by-name))
-              col-names))))
+                (let ((matches (and name (gethash (downcase name) by-name))))
+                  (if (cdr matches)
+                      (clutch-db-source-column-detail name matches)
+                    (car matches))))
+              source-names))))
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND.
@@ -255,7 +258,7 @@ TABLE is a metadata key from `clutch--table-key'."
           ('column-details
            (setq-local clutch--result-column-details
                        (clutch--result-column-details
-                        clutch-connection table clutch--result-columns))
+                        clutch-connection table (clutch--result-source-column-names)))
            (when clutch--pending-inserts
              (clutch--refresh-display)))
           ('foreign-keys
@@ -4105,12 +4108,11 @@ When details are not yet cached, attempts to load them from the database."
       (user-error "No column at point"))
     ;; Try to populate details on demand if missing.
     (unless clutch--result-column-details
-      (when-let* ((table (clutch--result-source-key))
-                  (cols clutch--result-columns))
+      (when-let* ((table (clutch--result-source-key)))
         (clutch-result--require-connection)
         (setq-local clutch--result-column-details
                     (clutch--result-column-details
-                     clutch-connection table cols t))))
+                     clutch-connection table (clutch--result-source-column-names) t))))
     (if-let* ((info (clutch--column-info-string cidx)))
         (message "%s" (clutch--column-info-message-string info))
       (message "%s (no detail info)" (nth cidx clutch--result-columns)))))

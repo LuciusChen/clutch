@@ -263,22 +263,18 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 ;;;; Schema cache — column details and metadata
 
 (ert-deftest clutch-test-result-column-info-works-on-cell-padding ()
-  "Column info should resolve from padded whitespace inside a data cell."
-  (with-temp-buffer
-    (setq-local clutch-column-padding 1
-                clutch--result-columns '("name")
-                clutch--result-column-defs '((:name "name" :type-category text))
-                clutch--result-column-details
-                (list (list :name "name" :type "VARCHAR(255)" :nullable t)))
-    (insert (clutch--render-row '("alice") 0 '(0) [8] nil))
-    (goto-char 2)
-    (let (seen)
-      (cl-letf (((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq seen (apply #'format fmt args)))))
-        (clutch-result-column-info)
-        (should (string-match-p "name" seen))
-        (should (string-match-p "Type: VARCHAR(255)" seen))))))
+  "Column info on cell padding follows the source field through an alias."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE m (gross INTEGER NOT NULL, net TEXT)"
+        "INSERT INTO m VALUES (42, 'abc')")
+      "SELECT gross AS net, upper(net) AS gross FROM m"
+    (clutch--goto-cell 0 0)
+    (should (eq (char-after) ?\s))
+    (let ((info (clutch-result-column-info)))
+      (should (string-match-p "Type: INTEGER" info))
+      (should (string-match-p "Nullable: NO" info)))
+    (clutch--goto-cell 0 1)
+    (should (equal (clutch-result-column-info) "gross (no detail info)"))))
 
 (ert-deftest clutch-test-metadata-sync-failures-are-memoized ()
   "Repeated sync metadata failures should not reissue the same failing RPC."
@@ -616,15 +612,11 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 (ert-deftest clutch-test-result-column-details-contract ()
   "Detail resolution should map result columns by name and skip missing tables."
   (clutch-test--with-isolated-metadata-caches
-   (clutch--set-table-metadata
-    'dummy-conn "users" :column-details
-    '((:name "ID" :type "INT" :nullable nil)
-      (:name "NAME" :type "VARCHAR" :nullable t)))
-   (let ((result (clutch--result-column-details
-                  'dummy-conn "users" '("id" "name"))))
-     (should (= (length result) 2))
-     (should (equal (plist-get (nth 0 result) :type) "INT"))
-     (should (equal (plist-get (nth 1 result) :type) "VARCHAR"))))
+   (let ((details '((:name "ID") (:name "Name") (:name "NAME"))))
+     (clutch--set-table-metadata 'dummy-conn "users" :column-details details)
+     (should (equal (clutch--result-column-details
+                     'dummy-conn "users" '("id" "Name" "NAME" "name"))
+                    (append details '(nil))))))
   (should-not (clutch--result-column-details
                'dummy nil '("col1"))))
 
