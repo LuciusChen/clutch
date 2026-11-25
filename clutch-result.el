@@ -229,11 +229,28 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 
 (defun clutch--result-source-column-names ()
   "Return each result field's catalog name, with nil for expressions."
-  (let ((bindings (plist-get clutch--result-query-prep :catalog-columns))
-        (defs clutch--result-column-defs))
+  (let* ((table (clutch--result-source-key))
+         (metadata (clutch--table-metadata clutch-connection table))
+         (bindings (plist-get metadata :catalog-columns))
+         (projection (plist-get clutch--result-query-prep :mixed-star))
+         (defs clutch--result-column-defs)
+         (sources
+          (when-let* (projection
+                      (names (mapcar (lambda (col) (plist-get col :name))
+                                     (plist-get metadata :column-details)))
+                      (star (memq 'star projection))
+                      (start (- (length projection) (length star)))
+                      (labels (cl-loop for def in defs unless (plist-get def :hidden)
+                                       collect (plist-get def :name)))
+                      ((= (length labels) (+ (length names) (length projection) -1)))
+                      ((equal names (seq-subseq labels start (+ start (length names))))))
+            ;; An expression can expand into several columns.  Verify the star's
+            ;; actual output before using it for display; writes stay conservative.
+            (append (butlast projection (length star)) names (cdr star)))))
     (cl-loop for label in clutch--result-columns for def = (pop defs)
-             for source = (if (plist-member def :source-column) (plist-get def :source-column) label)
-             collect (or (cdr (assoc source bindings)) source))))
+             for source = (if projection (unless (plist-get def :hidden) (pop sources))
+                            (if (plist-member def :source-column) (plist-get def :source-column) label))
+             collect (if bindings (gethash source bindings source) source))))
 
 (defun clutch--result-column-details (conn table &optional index)
   "Return cached CONN/TABLE details in result order, with nil for expressions.
@@ -271,6 +288,39 @@ For a requested INDEX, load its metadata and resolve its source spelling."
                     ((memq (buffer-local-value 'clutch-record--row record) (clutch--result-display-rows))))
           (with-current-buffer record (clutch-record--revert)))))))
 
+(defun clutch--resolve-result-column-names (conn table names callback)
+  "Resolve NAMES for display on CONN and call CALLBACK in the same result.
+Keep the verified spellings with TABLE's other metadata across query reruns."
+  (let ((buffer (current-buffer))
+        (prep clutch--result-query-prep)
+        (bindings (or (plist-get (clutch--table-metadata conn table) :catalog-columns)
+                      (let ((index (make-hash-table :test 'equal)))
+                        (clutch--set-table-metadata conn table :catalog-columns index)
+                        index))))
+    (clutch-db-resolve-column-names-async
+     conn names (clutch-result--insert-target conn table clutch--last-query)
+     (lambda (pairs)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (when (and (eq conn clutch-connection) (eq prep clutch--result-query-prep)
+                      (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
+             (dolist (pair pairs) (puthash (car pair) (cdr pair) bindings))
+             (funcall callback))))))))
+
+(defun clutch--unknown-result-column-names (metadata columns)
+  "Return source spellings in COLUMNS still unverified by table METADATA."
+  (when-let* ((pending (cl-loop for col in columns when (plist-get col :unresolved-source)
+                                collect (plist-get col :source-column))))
+    (let ((bindings (plist-get metadata :catalog-columns))
+          (known (append (mapcar #'car (plist-get metadata :foreign-keys))
+                         (plist-get metadata :columns)
+                         (mapcar (lambda (col) (plist-get col :name))
+                                 (plist-get metadata :column-details)))))
+      (cl-loop for name in (delete-dups pending)
+               unless (or (member name known)
+                          (and bindings (not (eq (gethash name bindings 'missing) 'missing))))
+               collect name))))
+
 (defun clutch--load-fk-info (&optional refresh)
   "Show known foreign keys, optionally REFRESH, and request missing spellings."
   (when-let* ((conn clutch-connection)
@@ -278,28 +328,13 @@ For a requested INDEX, load its metadata and resolve its source spelling."
     (if (not (clutch--foreign-keys-cached-p conn table))
         (clutch--ensure-foreign-keys-async conn table)
       (clutch--update-fk-info conn table refresh)
-      (when-let* ((keys (clutch--cached-foreign-keys conn table))
-                  (prep clutch--result-query-prep)
-                  (pending (cl-loop for col in clutch--result-column-defs
-                                    when (plist-get col :unresolved-source)
-                                    collect (plist-get col :source-column)))
-                  (metadata (clutch--table-metadata conn table))
-                  (known (append (mapcar #'car keys) (mapcar #'car (plist-get prep :catalog-columns))
-                                 (plist-get metadata :columns)
-                                 (mapcar (lambda (col) (plist-get col :name))
-                                         (plist-get metadata :column-details))))
-                  (names (seq-difference (delete-dups pending) known #'equal)))
-        (let ((buffer (current-buffer)))
-          (clutch-db-resolve-column-names-async
-           conn names (clutch-result--insert-target conn table clutch--last-query)
-           (lambda (bindings)
-             (when (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (when (and (eq conn clutch-connection) (eq prep clutch--result-query-prep))
-                   ;; Pages share the projection.  Writes still bind on the primary session.
-                   (setf (plist-get clutch--result-query-prep :catalog-columns)
-                         (append bindings (plist-get prep :catalog-columns)))
-                   (clutch--update-fk-info conn table t)))))))))))
+      (when (clutch--cached-foreign-keys conn table)
+        (if (plist-get clutch--result-query-prep :mixed-star)
+            (clutch--ensure-column-details-async conn table)
+          (when-let* ((names (clutch--unknown-result-column-names
+                              (clutch--table-metadata conn table) clutch--result-column-defs)))
+            (clutch--resolve-result-column-names
+             conn table names (lambda () (clutch--update-fk-info conn table t)))))))))
 
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND.
@@ -312,6 +347,8 @@ TABLE is a metadata key from `clutch--table-key'."
                  (equal (clutch--result-source-key) table))
         (pcase kind
           ('column-details
+           (when (plist-get clutch--result-query-prep :mixed-star)
+             (clutch--update-fk-info conn table t))
            (setq-local clutch--result-column-details
                        (clutch--result-column-details
                         clutch-connection table))
