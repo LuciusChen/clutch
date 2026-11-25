@@ -78,10 +78,6 @@ not flash.  The flash uses `pulse', so `pulse-flag' and
   :type 'boolean
   :group 'clutch)
 
-;; Direct workflow loads must not reverse-load the composition root.
-(defvar clutch-result-max-rows 500
-  "Direct-load fallback for the shared result row budget defined in clutch.el.")
-
 (defvar-local clutch--last-query nil
   "Last executed SQL query string.")
 

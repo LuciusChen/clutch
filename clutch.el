@@ -44,11 +44,6 @@
   :group 'comm
   :prefix "clutch-")
 
-(defcustom clutch-result-max-rows 500
-  "Maximum number of rows to display in result tables."
-  :type 'natnum
-  :group 'clutch)
-
 (require 'clutch-backend)
 (require 'clutch-diagnostics)
 (require 'clutch-connection)

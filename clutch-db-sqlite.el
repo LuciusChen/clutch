@@ -468,7 +468,7 @@ FKS is an FK alist."
             :nullable    (= notnull 0)
             :primary-key (> pk 0)
             :foreign-key (cdr (assoc name fks))
-            :default     (and dflt-val (not generated) dflt-val)
+            :default     (unless generated dflt-val)
             :generated   (and generated t)
             :comment     nil))))
 

@@ -7302,39 +7302,29 @@ Skips unless `clutch-db-test-mongodb-live-enabled' is non-nil."
   (clutch-db-test--with-mysql conn
     (let* ((table (format "clutch_rowid_gipk_%d" (emacs-pid)))
            (drop-sql (format "DROP TABLE IF EXISTS %s" table)))
-      (condition-case nil
+      (condition-case err
           (progn
-            (ignore-errors
-              (clutch-db-query
-               conn
-               "SET SESSION show_gipk_in_create_table_and_information_schema=ON"))
+            (clutch-db-query
+             conn "SET SESSION show_gipk_in_create_table_and_information_schema=ON")
             (clutch-db-query
              conn "SET SESSION sql_generate_invisible_primary_key=ON"))
         (clutch-db-error
-         (ert-skip "MySQL generated invisible primary keys are unavailable")))
+         (if (string-prefix-p "[1193]" (clutch-db--error-message err))
+             (ert-skip "MySQL generated invisible primary keys are unavailable")
+           (signal (car err) (cdr err)))))
       (unwind-protect
           (progn
             (clutch-db-query conn drop-sql)
             (clutch-db-query
              conn
-             (format "CREATE TABLE %s (name VARCHAR(64))" table))
-            (let ((show-keys
-                   (clutch-db-query
-                    conn
-                    (format "SHOW KEYS FROM %s WHERE Key_name = 'PRIMARY'"
-                            table))))
-              (unless (clutch-db-result-rows show-keys)
-                (ert-skip "MySQL generated invisible primary key metadata is hidden")))
+             (format "CREATE TABLE %s (name VARCHAR(64)) ENGINE=InnoDB" table))
             (should (equal (clutch-db-primary-key-columns conn table)
                            '("my_row_id")))
             (let ((candidate (car (clutch-db-row-identity-candidates
                                    conn table))))
               (should (equal (plist-get candidate :kind) 'primary-key))
               (should (equal (plist-get candidate :columns) '("my_row_id")))))
-        (ignore-errors (clutch-db-query conn drop-sql))
-        (ignore-errors
-          (clutch-db-query
-           conn "SET SESSION sql_generate_invisible_primary_key=OFF"))))))
+        (ignore-errors (clutch-db-query conn drop-sql))))))
 
 (ert-deftest clutch-db-test-mysql-live-index-details-filter-by-target-table ()
   "MySQL index details should stay scoped to the target table."

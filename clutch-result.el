@@ -1374,10 +1374,7 @@ The cycle is unsorted, ascending, descending, then unsorted again."
                             (<= 0 col-idx)
                             (< col-idx (length clutch--result-columns))
                             (nth col-idx clutch--result-columns)))
-         (col-name (if expected-name
-                       (and (member expected-name visible-names)
-                            expected-name)
-                     indexed-name))
+         (col-name (or expected-name indexed-name))
          (resolved-idx
           (if (and indexed-name
                    (or (null expected-name)

@@ -42,9 +42,6 @@
 (defconst clutch--architecture-largest-scc-baseline 2
   "Maximum permitted strongly connected component size.")
 
-(defconst clutch--architecture-root-state-baseline 1
-  "Maximum mutable state definitions permitted in the composition root.")
-
 (defun clutch--architecture-root-state-forms (forms)
   "Return mutable package-state definitions from root FORMS."
   (let (state-forms)
@@ -62,13 +59,13 @@
   (with-temp-buffer
     (insert-file-contents file)
     (goto-char (point-min))
-    (let (forms form)
+    (set-syntax-table emacs-lisp-mode-syntax-table)
+    (let (forms)
       (condition-case err
-          (while t
-            (setq form (read (current-buffer)))
-            (push form forms))
-        (end-of-file (nreverse forms))
-        (error (error "Cannot read %s: %s" file (error-message-string err)))))))
+          (while (progn (forward-comment (buffer-size)) (not (eobp)))
+            (push (read (current-buffer)) forms))
+        (error (error "Cannot read %s: %s" file (error-message-string err))))
+      (nreverse forms))))
 
 (defun clutch--architecture-feature-name (form)
   "Return feature name represented by FORM, or nil.
@@ -375,10 +372,8 @@ NODES names modules and DEPENDENCIES is the edge list from the reader."
       (push (format "largest SCC: %d (maximum %d)"
                     largest-scc clutch--architecture-largest-scc-baseline)
             errors))
-    (when (> (length root-state) clutch--architecture-root-state-baseline)
-      (push (format "composition-root state definitions: %d (maximum %d)"
-                    (length root-state)
-                    clutch--architecture-root-state-baseline)
+    (when root-state
+      (push (format "mutable state in composition root: %S" (mapcar #'cadr root-state))
             errors))
     (when unapproved
       (push (format "unapproved adapter-to-workflow dependencies: %S" unapproved)

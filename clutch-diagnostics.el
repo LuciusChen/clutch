@@ -487,14 +487,13 @@ Recognized keys include :buffer, :connection, :op, :phase, :summary, :sql,
     (plist-put details :diag diag)))
 
 (defun clutch--make-buffer-query-error-details
-    (connection sql err &optional extra-context extra-diag)
+    (connection sql err &optional extra-context)
   "Return structured error details for a failed SQL execution on CONNECTION.
 SQL is the user-visible statement.  ERR is the original signaled condition.
-EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
-EXTRA-DIAG is merged into the diagnostic plist when non-nil."
+EXTRA-CONTEXT is merged into the diagnostic context when non-nil."
   (let* ((details (clutch--db-error-details err (and connection (clutch-db-backend-key connection))))
-         (diag (append extra-diag (plist-get details :diag)))
-         (context (append extra-context (plist-get (plist-get details :diag) :context))))
+         (diag (plist-get details :diag))
+         (context (append extra-context (plist-get diag :context))))
     (unless (or (plist-get context :generated-sql)
                 (plist-get context :sql))
       (setq context (plist-put context :sql sql)))
@@ -502,29 +501,27 @@ EXTRA-DIAG is merged into the diagnostic plist when non-nil."
     (plist-put details :diag diag)))
 
 (defun clutch--remember-buffer-query-error-details
-    (buffer connection sql err &optional extra-context extra-diag)
+    (buffer connection sql err &optional extra-context)
   "Store the failed SQL execution details for BUFFER.
 CONNECTION, SQL and ERR describe the failed query.
-EXTRA-CONTEXT is merged into the diagnostic context when non-nil.
-EXTRA-DIAG is merged into the diagnostic plist when non-nil."
+EXTRA-CONTEXT is merged into the diagnostic context when non-nil."
   (when (buffer-live-p buffer)
     (clutch--remember-problem-record
      :buffer buffer
      :connection connection
      :problem (clutch--make-buffer-query-error-details
-               connection sql err extra-context extra-diag))))
+               connection sql err extra-context))))
 
 (defun clutch--remember-query-error
-    (buffer connection op sql err &optional context diag)
+    (buffer connection op sql err &optional context)
   "Capture a failed query-like OP for BUFFER on CONNECTION.
 SQL is the generated statement and ERR is the original condition.
 Optional CONTEXT is merged into the stored problem and debug event.
-Optional DIAG is merged into the stored problem diagnostic plist.
 Return `(MESSAGE . SUMMARY)' for the failure."
   (let* ((message (clutch--redact-diagnostic-urls (clutch-db--error-message err)))
          (summary (clutch--humanize-db-error message)))
     (clutch--remember-buffer-query-error-details
-     buffer connection sql err context diag)
+     buffer connection sql err context)
     (when clutch-debug-mode
       (clutch--remember-debug-event
        :buffer buffer

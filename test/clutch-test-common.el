@@ -284,23 +284,15 @@ Driving a Transient menu this way runs its real suffixes and switches."
          (clutch--table-metadata-updated-hook nil))
      ,@body))
 
-(defun clutch-test--primary-row-identity (&optional table columns indices)
+(defun clutch-test--primary-row-identity (table columns indices)
   "Return primary-key row identity metadata for tests."
-  (let ((indices (or indices '(0))))
-    (list :kind 'primary-key
-          :name "PRIMARY"
-          :table (or table "users")
-          :columns (or columns '("id"))
-          :indices indices
-          :source-indices indices)))
+  (list :kind 'primary-key :name "PRIMARY" :table table
+        :columns columns :indices indices :source-indices indices))
 
-(defun clutch-test--completion-candidates (capf &optional prefix)
-  "Return CAPF completion candidates matching PREFIX.
-When PREFIX is nil, use the text between CAPF's bounds, matching the real
-`completion-at-point' filtering path."
+(defun clutch-test--completion-candidates (capf)
+  "Return CAPF completion candidates matching the text within its bounds."
   (all-completions
-   (or prefix
-       (buffer-substring-no-properties (nth 0 capf) (nth 1 capf)))
+   (buffer-substring-no-properties (nth 0 capf) (nth 1 capf))
    (nth 2 capf)))
 
 (defun clutch-test--insert-field-value-bounds (field-name)

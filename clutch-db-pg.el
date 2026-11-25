@@ -686,7 +686,7 @@ FKS is an alist of (column-name . fk-plist)."
       (let ((detail (list :name name :type type :nullable nullable
                           :primary-key (and pk-p t)
                           :foreign-key fk
-                          :default (and default-val (not generated) default-val)
+                          :default (unless generated default-val)
                           :generated (and generated t)
                           :read-only (equal generated-str "ALWAYS")
                           :comment (and (stringp comment)

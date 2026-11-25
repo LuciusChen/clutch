@@ -502,7 +502,7 @@ ORDER BY ORDINAL_POSITION"
       (list :name name :type type :nullable nullable
             :primary-key (and pk-p t)
             :foreign-key fk
-            :default (and default-val (not generated) default-val)
+            :default (unless generated default-val)
             :generated (and generated t)
             :read-only (and read-only t)
             :comment (and comment (not (string-empty-p comment)) comment)))))
