@@ -1037,6 +1037,23 @@ is not a writable source column."
                   op (string-join (nreverse invalid) ", ")))
     (nreverse columns)))
 
+(defun clutch-result--source-edits (table identity edits source-name)
+  "Group EDITS to row IDENTITY of TABLE by the source name of each field.
+SOURCE-NAME maps a result index to its source column, or nil to skip it.
+Return (NAME INDEX . VALUE) entries; aliases of a source must agree."
+  (let ((seen (make-hash-table :test #'equal)) unique)
+    (dolist (edit edits)
+      (when-let* ((name (funcall source-name (car edit))))
+        (if-let* ((previous (gethash name seen)))
+            (unless (equal-including-properties (cdr edit) (cdr previous))
+              (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
+                          table name identity
+                          (nth (car previous) clutch--result-columns)
+                          (nth (car edit) clutch--result-columns)))
+          (puthash name edit seen)
+          (push (cons name edit) unique))))
+    (nreverse unique)))
+
 (defun clutch-result--build-update-stmt
     (table identity-vec edits row-identity columns)
   "Build an UPDATE statement spec for TABLE.
@@ -1046,26 +1063,17 @@ COLUMNS, from `clutch-result--update-source-columns', gives the source
 column of each cidx.  Aliases of one source column must agree."
   (let* ((conn clutch-connection)
          (where-spec (clutch--row-identity-where-parts conn row-identity identity-vec))
-         (seen (make-hash-table :test #'equal))
+         (unique (clutch-result--source-edits
+                  table identity-vec edits (lambda (idx) (car (alist-get idx columns)))))
          set-parts set-params)
-    (dolist (edit edits)
-      (pcase-let* ((`(,name . ,type) (alist-get (car edit) columns))
-                   (value (cdr edit))
-                   (previous (gethash name seen)))
-        (if previous
-            (unless (equal-including-properties value (cdr previous))
-              (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
-                          table name identity-vec
-                          (nth (car previous) clutch--result-columns)
-                          (nth (car edit) clutch--result-columns)))
-          (puthash name edit seen)
-          (let ((column (clutch-db-escape-identifier conn name)))
-            (if (eq value clutch--cell-default-placeholder)
-                (push (format "%s = DEFAULT" column) set-parts)
-              (push (format "%s = ?" column) set-parts)
-              (push (clutch-db-typed-param
-                     (clutch-db-require-complete-value value) type)
-                    set-params))))))
+    (pcase-dolist (`(,name ,idx . ,value) unique)
+      (let ((column (clutch-db-escape-identifier conn name)))
+        (if (eq value clutch--cell-default-placeholder)
+            (push (format "%s = DEFAULT" column) set-parts)
+          (push (format "%s = ?" column) set-parts)
+          (push (clutch-db-typed-param
+                 (clutch-db-require-complete-value value) (cdr (alist-get idx columns)))
+                set-params))))
     (cons (format "UPDATE %s SET %s WHERE %s"
                   (or (plist-get row-identity :source-token)
                       (clutch-db-escape-identifier conn table))
@@ -2021,18 +2029,18 @@ once the connection moved from where the result's query ran."
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
 
+(defun clutch-result--row-edits (identity)
+  "Return the staged (INDEX . VALUE) edits for IDENTITY."
+  (cl-loop for ((id . idx) . val) in clutch--pending-edits
+           when (equal id identity) collect (cons idx val)))
+
 (defun clutch-result--row-values-with-pending-edits (row)
   "Return ROW as a list, applying any staged edits in the current result buffer."
-  (let* ((values (append row nil))
-         (row-identity clutch--row-identity)
-         (identity-vec (and clutch--pending-edits row-identity
-                            (clutch-db-row-identity-values
-                             row row-identity))))
-    (when identity-vec
-      (dolist (edit clutch--pending-edits)
-        (pcase-let ((`((,edit-identity . ,cidx) . ,new-value) edit))
-          (when (equal edit-identity identity-vec)
-            (setcar (nthcdr cidx values) new-value)))))
+  (let ((values (append row nil)))
+    (when-let* (clutch--pending-edits clutch--row-identity
+                (id (clutch-db-row-identity-values row clutch--row-identity)))
+      (pcase-dolist (`(,idx . ,val) (clutch-result--row-edits id))
+        (setcar (nthcdr idx values) val)))
     values))
 
 ;;;###autoload

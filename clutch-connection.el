@@ -1198,6 +1198,8 @@ caused it."
                     (clutch--update-mode-line t))
                    ((derived-mode-p 'clutch-repl-mode)
                     (clutch--update-mode-line))
+                   ;; The parent result redraws Record when its links change.
+                   ((derived-mode-p 'clutch-record-mode) (force-mode-line-update))
                    ;; Newer Emacs versions give every buffer the inherited
                    ;; default `revert-buffer--default', including non-file
                    ;; buffers.  Only a buffer-local function represents an
