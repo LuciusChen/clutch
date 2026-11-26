@@ -255,7 +255,7 @@ Typical flow:
 | `q` | Quit |
 | `C-c ?` | Transient menu |
 
-A cached foreign-key target appears beside its field. After DDL, rollback, or switching back to the query's schema, the open Record refreshes its link. Pressing `RET` shares a pending lookup. Every field of a composite key opens the same row, using staged values even when a source column appears under two aliases. NULL values and known expressions respond immediately. If the lookup fails, refresh the schema to retry. The Record transient labels `RET` from the field at point: `Follow FK`, `Expand`, `Collapse`, or `Show value`. It is inapt when point is not on a field.
+A cached foreign-key target appears beside its field. After DDL, rollback, or switching back to the query's schema, the open Record refreshes its link. Pressing `RET` shares a pending lookup. A value staged through one alias appears under every alias of that source column. Every field of a composite key follows the same referenced row. NULL values and known expressions respond immediately. If the lookup fails, refresh the schema to retry. The Record transient labels `RET` from the field at point: `Follow FK`, `Expand`, `Collapse`, or `Show value`. It is inapt when point is not on a field.
 
 Staging a field edit with `C-c C-c` returns to the same field in the Record view. Press `C-c C-c` again to confirm all staged changes in the result table, even if the displayed row is filtered out. The Record follows its row through client-side filtering and sorting. If the row is hidden or the result is replaced, reopen the Record before acting on that row. If a query replaces the result while the cell editor is open, Clutch refuses to stage the edit and keeps your input in the editor.
 

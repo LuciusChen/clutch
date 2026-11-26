@@ -1933,45 +1933,48 @@ It orders exponent floats, infinity, and NaN as well."
 ;;;; Foreign-key navigation
 
 (ert-deftest clutch-test-qualified-sqlite-result-follows-keys-in-its-schema ()
-  "Following a foreign key of aux.children should open aux.parents.
-SQLite finds main.parents first for the bare name, with a row of the same key."
-  (require 'clutch-db-sqlite)
-  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-        result-buf)
-    (unwind-protect
-        (progn
-          (dolist (sql '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
-                         "INSERT INTO main.parents VALUES (1, 'main')"
-                         "ATTACH DATABASE ':memory:' AS aux"
-                         "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
-                         "INSERT INTO aux.parents VALUES (1, 'aux')"
-                         "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
-                         "INSERT INTO aux.children VALUES (1, 1)"))
-            (clutch-db-query conn sql))
-          (with-temp-buffer
-            (clutch-mode)
-            (setq-local clutch-connection conn)
-            (let ((source (current-buffer)))
-              (clutch-test--execute-and-present "SELECT * FROM aux.children" conn)
-              (setq result-buf
-                    (buffer-local-value 'clutch--last-result-buffer source))))
-          (ert-run-idle-timers)
-          (with-current-buffer result-buf
-            (let ((clutch-er-relations-directory
-                   (make-temp-name (expand-file-name "clutch-er-none-"
-                                                     temporary-file-directory))))
-              (clutch-record--follow-column result-buf 1 0))
-            (clutch-test--await-queries)
-            (should (equal clutch--last-query
-                           "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
-            ;; The followed row is the aux parent, its hidden row identity
-            ;; after its columns.
-            (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
-                                   clutch--result-rows)
-                           '((1 "aux"))))))
-      (when (buffer-live-p result-buf)
-        (kill-buffer result-buf))
-      (clutch-db-disconnect conn))))
+  "Two aliases of one staged key show and follow the value written to aux."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
+        "INSERT INTO main.parents VALUES (2, 'main')"
+        "ATTACH DATABASE ':memory:' AS aux"
+        "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
+        "INSERT INTO aux.parents VALUES (2, 'aux')"
+        "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
+        "INSERT INTO aux.children VALUES (1, NULL)")
+      "SELECT id, PARENT_ID AS a, parent_id AS b FROM aux.children"
+    (ert-run-idle-timers)
+    (let ((destination (clutch-result--buffer-name)) parent record)
+      ;; Keep the child and its staged edit while RET opens the parent.
+      (rename-buffer " *clutch-child*" t)
+      (unwind-protect
+          (progn
+            (clutch--goto-cell 0 2)
+            (save-current-buffer
+              (clutch-result-open-record)
+              (setq record (current-buffer)))
+            (with-current-buffer (clutch-result-edit-cell)
+              (insert "2")
+              (clutch-result-edit-finish))
+            (dolist (idx '(1 2))
+              (with-current-buffer record
+                (goto-char (point-min))
+                (forward-line idx)
+                (should (looking-at-p "[ab] +: 2  → "))
+                (clutch-record-toggle-expand))
+              (clutch-test--await-queries)
+              (setq parent (clutch--connection-view-buffer conn destination))
+              (with-current-buffer parent
+                (should (equal (seq-take (car clutch--result-rows) 2) '(2 "aux"))))
+              (kill-buffer parent))
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (clutch-result-submit)))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT parent_id FROM aux.children"))
+                           '((2)))))
+        (when (buffer-live-p record) (kill-buffer record))
+        (when (buffer-live-p parent) (kill-buffer parent))))))
 
 (ert-deftest clutch-test-sqlite-record-follows-whole-keys-and-stored-relations ()
   "Following a key over two columns names both, so it finds one row.  A

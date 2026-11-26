@@ -435,18 +435,20 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
         (select-window win)
       (pop-to-buffer return-buf))))
 
-(defun clutch-result-edit--refresh-record-return-buffer (return-buf cidx)
-  "Refresh RETURN-BUF when it is a Record buffer and keep point on CIDX."
-  (when (and (integerp cidx)
-             (buffer-live-p return-buf)
-             (with-current-buffer return-buf
-               (derived-mode-p 'clutch-record-mode)))
-    (with-current-buffer return-buf
+(defun clutch-result--refresh-record (rows &optional record field)
+  "Redraw the Record for this result when its row is among ROWS.
+Use RECORD when the command started there.  FIELD restores point after
+closing a cell editor; otherwise the Record keeps its current field."
+  (when-let* ((record (or record (get-buffer "*clutch-record*")))
+              ((buffer-live-p record))
+              ((eq (current-buffer) (buffer-local-value 'clutch-record--result-buffer record)))
+              ((memq (buffer-local-value 'clutch-record--row record) rows)))
+    (with-current-buffer record
       (revert-buffer t t)
-      (goto-char (point-min))
-      (when-let* ((match (text-property-search-forward
-                          'clutch-col-idx cidx #'eq)))
-        (goto-char (prop-match-beginning match))))))
+      (when field
+        (goto-char (point-min))
+        (when-let* ((match (text-property-search-forward 'clutch-col-idx field #'eq)))
+          (goto-char (prop-match-beginning match)))))))
 
 (defun clutch-result-edit--header-line ()
   "Build the edit-buffer header line."
@@ -818,6 +820,7 @@ the selected window."
             (_ (cdr new-state))))
          (cb clutch-result--edit-callback)
          (return-buf clutch-result-edit--return-buffer)
+         (result-buf clutch-result--edit-result-buffer)
          (target-cell clutch-result-edit--target-cell))
     (when (and clutch-result-edit--blob-encoding
                (stringp new-value)
@@ -843,8 +846,12 @@ the selected window."
       (funcall cb new-value))
     (clutch-result-edit--close-buffer kill-buffer-directly)
     ;; `quit-window' restores its saved point, so refresh the Record afterward.
-    (clutch-result-edit--refresh-record-return-buffer return-buf
-                                                      (cdr target-cell))))
+    (when (and target-cell (buffer-live-p result-buf))
+      (with-current-buffer result-buf
+        (let ((record (unless (eq return-buf result-buf) return-buf)))
+          (clutch-result--refresh-record
+           (list (nth (car target-cell) (clutch--result-display-rows)))
+           record (and record (cdr target-cell))))))))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
@@ -1037,22 +1044,28 @@ is not a writable source column."
                   op (string-join (nreverse invalid) ", ")))
     (nreverse columns)))
 
-(defun clutch-result--source-edits (table identity edits source-name)
+(defun clutch-result--source-edits (table identity edits source-name &optional for-display)
   "Group EDITS to row IDENTITY of TABLE by the source name of each field.
 SOURCE-NAME maps a result index to its source column, or nil to skip it.
-Return (NAME INDEX . VALUE) entries; aliases of a source must agree."
-  (let ((seen (make-hash-table :test #'equal)) unique)
+Return (NAME INDEX . VALUE) entries.  Conflicting aliases are omitted
+FOR-DISPLAY so each can show its own draft; an action reports the conflict."
+  (let ((groups (make-hash-table :test #'equal)) names)
     (dolist (edit edits)
       (when-let* ((name (funcall source-name (car edit))))
-        (if-let* ((previous (gethash name seen)))
-            (unless (equal-including-properties (cdr edit) (cdr previous))
-              (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
-                          table name identity
-                          (nth (car previous) clutch--result-columns)
-                          (nth (car edit) clutch--result-columns)))
-          (puthash name edit seen)
-          (push (cons name edit) unique))))
-    (nreverse unique)))
+        (unless (gethash name groups) (push name names))
+        (push edit (gethash name groups))))
+    (cl-loop for name in (nreverse names)
+             for (first . others) = (nreverse (gethash name groups))
+             for conflict = (seq-find (lambda (other)
+                                        (not (equal-including-properties
+                                              (cdr first) (cdr other))))
+                                      others)
+             when (and conflict (not for-display))
+             do (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
+                            table name identity
+                            (nth (car first) clutch--result-columns)
+                            (nth (car conflict) clutch--result-columns))
+             unless conflict collect (cons name first))))
 
 (defun clutch-result--build-update-stmt
     (table identity-vec edits row-identity columns)

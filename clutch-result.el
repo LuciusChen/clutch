@@ -317,10 +317,7 @@ needing a database lookup, leaving nil at other positions."
       (setq-local clutch--fk-info links)
       (when refresh
         (clutch--refresh-display)
-        (when-let* ((record (get-buffer "*clutch-record*"))
-                    ((eq (current-buffer) (buffer-local-value 'clutch-record--result-buffer record)))
-                    ((memq (buffer-local-value 'clutch-record--row record) (clutch--result-display-rows))))
-          (with-current-buffer record (clutch-record--revert)))))))
+        (clutch-result--refresh-record (clutch--result-display-rows))))))
 
 (defun clutch--resolve-result-column-names (conn table names callback &optional sync)
   "Resolve NAMES for this result, sharing outstanding lookups for TABLE on CONN.
@@ -1079,8 +1076,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (mapcar (lambda (ridx) (and (< ridx (length rows)) (aref rows ridx)))
             indices)))
 
-(defun clutch-result--discard-pending-at (ridx cidx)
-  "Discard the staged change for RIDX and CIDX in the current result buffer."
+(defun clutch-result--discard-pending-at (ridx cidx &optional record)
+  "Discard the change at RIDX and CIDX.  RECORD may be the invoking view."
   (let* ((display-rows (clutch--result-display-rows))
          (nrows (length display-rows)))
     (cond
@@ -1111,6 +1108,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
+          (clutch-result--refresh-record (list row) record)
           (message "Staged edit discarded"))
          (was-delete
           (setq clutch--pending-deletes
@@ -1129,10 +1127,10 @@ If the result has columns, shows a table; otherwise shows DML summary."
   (if (derived-mode-p 'clutch-record-mode)
       (pcase-let* ((`(,_ ,cidx ,_) (or (clutch--cell-at-point)
                                          (user-error "No field at point")))
-                   (ridx (clutch-record--resolve-row-index)))
+                   (ridx (clutch-record--resolve-row-index))
+                   (record (current-buffer)))
         (with-current-buffer clutch-record--result-buffer
-          (clutch-result--discard-pending-at ridx cidx))
-        (clutch-record--revert))
+          (clutch-result--discard-pending-at ridx cidx record)))
     (let ((ridx (or (clutch--row-idx-at-line)
                     (user-error "No row at point")))
           (cidx (clutch--col-idx-at-point)))
@@ -4522,15 +4520,32 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--render-field (name cidx val col-def identity-vec ridx
-                                        edits fk-info expanded-fields max-name-w)
-  "Insert one field line for column NAME at CIDX.
-VAL is the cell value, COL-DEF the column metadata, IDENTITY-VEC the row's
-precomputed identity vector (or nil).  RIDX is the row index.  EDITS,
-FK-INFO, and EXPANDED-FIELDS provide edit/FK/expand state.  MAX-NAME-W is
-the label column width."
-  (let* ((edited (and identity-vec (assoc (cons identity-vec cidx) edits)))
-         (display-val (if edited (cdr edited) val))
+(defun clutch-record--field-edits (row &optional columns key)
+  "Return staged edits in result order for ROW, shared by aliases.
+COLUMNS lists the source names; use the cached result mapping by default.
+For navigation, KEY lists the relation's column pairs: conflicting edits
+to its columns must be resolved before following it."
+  (when-let* (clutch--pending-edits clutch--row-identity
+              (id (clutch-db-row-identity-values row clutch--row-identity))
+              (edits (clutch-result--row-edits id)))
+    (let* ((columns (or columns (clutch--result-source-column-names)))
+           (names (or key (mapcar #'list columns)))
+           (shared (clutch-result--source-edits
+                    (clutch--result-source-key) id edits
+                    (lambda (idx)
+                      (car (clutch-db-assoc-column clutch-connection (nth idx columns) names)))
+                    (not key))))
+      (cl-loop for name in columns for idx from 0
+               collect (or (assq idx edits)
+                           (cdr (clutch-db-assoc-column clutch-connection name shared)))))))
+
+(defun clutch-record--render-field (name cidx val col-def edited ridx
+                                        fk-info expanded-fields max-name-w)
+  "Insert one field line for column NAME at CIDX of row RIDX.
+VAL and COL-DEF are the result value and metadata.  EDITED holds a
+staged edit for this field.  FK-INFO, EXPANDED-FIELDS and MAX-NAME-W
+supply its links, expansion state and label width."
+  (let* ((display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
@@ -4578,9 +4593,7 @@ the label column width."
          (col-defs (buffer-local-value 'clutch--result-column-defs result-buf))
          (rows (with-current-buffer result-buf
                  (clutch--result-display-rows)))
-         (row-identity (buffer-local-value 'clutch--row-identity result-buf))
          (fk-info (buffer-local-value 'clutch--fk-info result-buf))
-         (edits (buffer-local-value 'clutch--pending-edits result-buf))
          (inhibit-read-only t))
     (unless (< ridx (length rows))
       (user-error "Row %d no longer exists" ridx))
@@ -4597,17 +4610,16 @@ the label column width."
                 (list #'clutch--header-with-disconnect-badge
                       'clutch-record--header-base)))
     (let* ((row (nth ridx rows))
-           (identity-vec (and row-identity row
-                              (clutch-db-row-identity-values row row-identity)))
+           (edits (with-current-buffer result-buf (clutch-record--field-edits row)))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (setq clutch-record--row row)
       (cl-loop for name in col-names
-               for col-def in col-defs
+               for col-def in col-defs for val in row
+               for edit = (pop edits)
                for cidx from 0
                unless (plist-get col-def :hidden)
                do (clutch-record--render-field
-                   name cidx (nth cidx row) col-def
-                   identity-vec ridx edits fk-info clutch-record--expanded-fields
+                   name cidx val col-def edit ridx fk-info clutch-record--expanded-fields
                    max-name-w)))
     (goto-char (point-min))))
 
@@ -4620,14 +4632,10 @@ table retains its catalog and schema qualification."
   (let* ((conn clutch-connection)
          (row (nth ridx (clutch--result-display-rows)))
          (pairs (plist-get relation :pairs))
-         (values (assq-delete-all nil (cl-mapcar #'cons columns row))))
-    (when-let* (clutch--pending-edits clutch--row-identity
-                (id (clutch-db-row-identity-values row clutch--row-identity)))
-      (pcase-dolist (`(,name ,_idx . ,value)
-                     (clutch-result--source-edits
-                      (clutch--result-source-key) id (clutch-result--row-edits id)
-                      (lambda (idx) (car (clutch-db-assoc-column conn (nth idx columns) pairs)))))
-        (push (cons name value) values)))
+         (edits (clutch-record--field-edits row columns pairs))
+         (values (cl-loop for name in columns for value in row
+                          for edit = (pop edits)
+                          when name collect (cons name (if edit (cdr edit) value)))))
     (clutch--execute
      (format "SELECT * FROM %s WHERE %s"
              (clutch--object-sql-name
