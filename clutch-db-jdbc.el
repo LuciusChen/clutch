@@ -2064,7 +2064,7 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
                          (format "USE %s; " (clutch-db-escape-identifier conn catalog)))
                        (clutch-db--column-binding-select conn names source-token))))
      (lambda (result) (funcall callback (clutch-db--column-bindings names (plist-get result :columns))))
-     nil nil conn)))
+     (lambda (error-message) (funcall callback nil error-message)) nil conn)))
 
 (defun clutch-jdbc--catalog-folds-p (conn)
   "Return non-nil when CONN's catalog is asked for folded names.

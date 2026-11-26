@@ -2734,7 +2734,8 @@ A trailing `star' asks for the ordered column names SELECT * actually returns.")
 
 (cl-defgeneric clutch-db-resolve-column-names-async (conn names source-token callback)
   "Resolve NAMES on SOURCE-TOKEN for display using CONN's metadata session.
-Call CALLBACK with the bindings.  Return nil if unsupported."
+Call CALLBACK with the bindings, or nil and an error message on failure.
+Return nil if unsupported."
   (:method ((_conn t) _names _source-token _callback) nil))
 
 (cl-defmethod clutch-db-resolve-column-names ((conn t) names source-token)
