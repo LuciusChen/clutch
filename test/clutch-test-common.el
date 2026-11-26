@@ -277,7 +277,6 @@ Driving a Transient menu this way runs its real suffixes and switches."
          (clutch--object-warmup-generations (make-hash-table :test 'eq))
          (clutch--schema-status-cache (make-hash-table :test 'eq))
          (clutch--schema-refresh-tickets (make-hash-table :test 'eq))
-         (clutch--schema-refresh-ticket-counter 0)
          (clutch--metadata-ticket-counter 0)
          (clutch--schema-cache-updated-hook nil)
          (clutch--metadata-state-changed-hook nil)

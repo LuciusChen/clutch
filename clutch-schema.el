@@ -47,9 +47,6 @@ and SCHEMA are the source table's explicit qualifiers.")
 (defvar clutch--schema-status-cache (make-hash-table :test 'eq)
   "Schema refresh status cache keyed by connection object identity.")
 
-(defvar clutch--schema-refresh-ticket-counter 0
-  "Monotonic counter used to reject stale async schema refreshes.")
-
 (defvar clutch--schema-refresh-tickets (make-hash-table :test 'eq)
   "Latest schema refresh ticket keyed by connection object identity.")
 
@@ -309,17 +306,21 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
              clutch--schema-status-cache)
     (clutch--notify-metadata-state-changed conn)))
 
-(defun clutch--begin-schema-refresh-ticket (conn)
-  "Issue and record a new schema refresh ticket for CONN."
-  (let ((ticket (cl-incf clutch--schema-refresh-ticket-counter)))
+(defun clutch--begin-schema-refresh (conn)
+  "Mark CONN as refreshing and return a unique ticket for its table list."
+  (let* ((replacing (or (clutch--schema-status-entry conn)
+                        (gethash conn clutch--schema-cache)
+                        (cl-some (lambda (cache) (gethash conn (symbol-value cache)))
+                                 clutch--schema-dependent-cache-symbols)))
+         (ticket (list (if replacing 'refresh 'initial))))
     (puthash conn ticket clutch--schema-refresh-tickets)
+    (clutch--set-schema-status conn 'refreshing)
     ticket))
 
 (defun clutch--schema-refresh-ticket-latest-p (conn ticket)
   "Return non-nil when TICKET is the latest refresh ticket for CONN."
   (and conn
-       (eql (gethash conn clutch--schema-refresh-tickets)
-            ticket)))
+       (eq (gethash conn clutch--schema-refresh-tickets) ticket)))
 
 (defun clutch--schema-refresh-ticket-current-p (conn ticket)
   "Return non-nil when TICKET is current on a live CONN."
@@ -472,18 +473,17 @@ schema switching, and any statement that returns no result set."
         (clutch--clear-column-details-active conn))
       (clutch--drain-column-details-async conn))))
 
-(defun clutch--install-schema-cache (conn table-names &optional ticket)
-  "Install TABLE-NAMES as the schema cache for CONN.
-When TICKET is non-nil, ignore the update unless it is still current."
-  (when (and (clutch-db-live-p conn)
-             (or (null ticket)
-                 (clutch--schema-refresh-ticket-current-p conn ticket)))
+(defun clutch--install-schema-cache (conn table-names ticket)
+  "Install TABLE-NAMES for CONN if its refresh TICKET is still current."
+  (when (clutch--schema-refresh-ticket-current-p conn ticket)
     (let ((schema (make-hash-table :test 'equal)))
-      (clutch--notify-schema-cache-updated conn 'invalidated)
+      ;; On the first load, metadata fetched in the meantime is already current.
+      (when (eq (car ticket) 'refresh)
+        (clutch--notify-schema-cache-updated conn 'invalidated)
+        (clutch--clear-schema-dependent-caches conn))
       (dolist (tbl table-names)
         (puthash tbl nil schema))
       (puthash conn schema clutch--schema-cache)
-      (clutch--clear-schema-dependent-caches conn)
       (clutch--set-schema-status conn 'ready (hash-table-count schema))
       (clutch--notify-schema-cache-updated conn 'ready)
       t)))
@@ -513,8 +513,7 @@ When TICKET is non-nil, ignore the update unless it is still current."
   "Refresh schema cache for CONN asynchronously when supported.
 Return non-nil when an asynchronous refresh was started.
 IDLE-DELAY, when non-nil, is passed to idle metadata backends."
-  (let ((ticket (clutch--begin-schema-refresh-ticket conn)))
-    (clutch--set-schema-status conn 'refreshing)
+  (let ((ticket (clutch--begin-schema-refresh conn)))
     (let ((started
            (clutch-db-refresh-schema-async
             conn
@@ -544,8 +543,7 @@ IDLE-DELAY, when non-nil, is passed to idle metadata backends."
 (defun clutch--refresh-schema-cache (conn)
   "Refresh schema cache for CONN.
 Only loads table names (fast).  Column info is loaded lazily."
-  (let ((ticket (clutch--begin-schema-refresh-ticket conn)))
-    (clutch--set-schema-status conn 'refreshing)
+  (let ((ticket (clutch--begin-schema-refresh conn)))
     (condition-case err
         (let ((table-names (clutch-db-list-tables conn)))
           (prog1
