@@ -1265,7 +1265,7 @@ tracks, and a disconnect no longer asked first."
         (should (equal (alist-get 'sql captured-params)
                        "UPDATE dbo.orders SET note = ? WHERE id = ?"))
         (should (equal (alist-get 'values captured-params)
-                       '("中文" 17)))
+                       ["中文" 17]))
         (should (= (clutch-db-result-affected-rows result) 2))))))
 
 (ert-deftest clutch-db-test-jdbc-results-show-the-agents-messages ()
@@ -11004,5 +11004,283 @@ that file, or in a new, empty in-memory database, without a word."
       (should-not sent)
       (should (clutch-db-live-p current))
       (should (= (gethash current clutch-jdbc--busy-request-ids) 21)))))
+
+(ert-deftest clutch-db-test-jdbc-execute-params-encodes-false-and-empty-as-json-arrays ()
+  "JDBC execute-params should serialize :false as JSON false and always send an array."
+  (let* ((conn (make-clutch-jdbc-conn
+                :process 'agent :conn-id 23
+                :params '(:driver jdbc :url "jdbc:postgresql://localhost/app" :rpc-timeout 12)))
+         (clutch-jdbc--agent-process 'agent)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         sent-lines)
+    (puthash 23 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-string)
+               (lambda (_proc text) (push text sent-lines)))
+              ((symbol-function 'clutch-jdbc--recv-response)
+               (lambda (_id &rest _) '(:ok t :result (:type "dml" :affected-rows 1)))))
+      (clutch-db-execute-params
+       conn "UPDATE t SET active = ? WHERE id = ?"
+       (list (clutch-db-typed-param :false "BOOLEAN")
+             (clutch-db-typed-param 42 "INTEGER")))
+      (clutch-db-execute-params
+       conn "UPDATE t SET id = ?, active = ?"
+       (list 1 :false))
+      (clutch-db-execute-params conn "DELETE FROM t" nil))
+    (let ((parsed (mapcar (lambda (line)
+                            (json-parse-string line :object-type 'plist
+                                               :array-type 'list
+                                               :null-object nil
+                                               :false-object :false))
+                          (nreverse sent-lines))))
+      (should (equal (plist-get (plist-get (nth 0 parsed) :params) :values)
+                     '(:false 42)))
+      (should (equal (plist-get (plist-get (nth 1 parsed) :params) :values)
+                     '(1 :false)))
+      (should (string-match-p "\"values\":\\[\\]" (car sent-lines))))))
+
+(ert-deftest clutch-db-test-jdbc-download-agent-jar-removes-temp-on-checksum-mismatch ()
+  "Failed SHA-256 verification must not leave a corrupted agent jar on disk."
+  (let* ((dir (make-temp-file "clutch-agent-download-" t))
+         (clutch-jdbc-agent-dir dir)
+         (clutch-jdbc-agent-version "9.9.9")
+         (clutch-jdbc-agent-sha256 (make-string 64 ?a))
+         (jar (clutch-jdbc--agent-jar)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-copy-file)
+                   (lambda (_url dest &optional _ok)
+                     (with-temp-file dest (insert "corrupted-jar-bytes")))))
+          (should-error (clutch-jdbc--download-agent-jar))
+          (should-not (file-exists-p jar))
+          (should-not (directory-files dir nil "\\.jar\\.part\\'")))
+      (delete-directory dir t))))
+
+(ert-deftest clutch-db-test-jdbc-agent-filter-halts-dispatch-on-protocol-error ()
+  "Invalid JSON in a chunk must stop dispatch of later lines and stop the agent."
+  (let* ((buf (generate-new-buffer " *clutch-filter-test*"))
+         (clutch-jdbc--agent-process 'fake-proc)
+         (clutch-jdbc--protocol-error nil)
+         dispatched stopped)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-buffer) (lambda (_) buf))
+                  ((symbol-function 'clutch-jdbc--dispatch-async-response)
+                   (lambda (resp) (push resp dispatched)))
+                  ((symbol-function 'clutch-jdbc--stop-agent)
+                   (lambda () (setq stopped t))))
+          (clutch-jdbc--agent-filter
+           'fake-proc
+           "{\"id\":1,\"ok\":true}\nnot-json\n{\"id\":2,\"ok\":true}\n")
+          (should stopped)
+          (should clutch-jdbc--protocol-error)
+          (should (= (length dispatched) 1))
+          (should (= (plist-get (car dispatched) :id) 1)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest clutch-db-test-jdbc-fetch-all-closes-cursor-on-error ()
+  "Aborted synchronous fetch-all should send close-cursor to avoid agent leaks."
+  (let* ((conn (make-clutch-jdbc-conn :process 'agent :conn-id 7
+                                      :params '(:driver oracle :rpc-timeout 10)))
+         (clutch-jdbc--agent-process 'agent)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         closed-cursors)
+    (puthash 7 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'clutch-jdbc--rpc-on-conn)
+               (lambda (&rest _) (signal 'clutch-db-error '("fetch failed"))))
+              ((symbol-function 'clutch-jdbc--send)
+               (lambda (op params)
+                 (when (equal op "close-cursor")
+                   (push (alist-get 'cursor-id params) closed-cursors))
+                 99)))
+      (should-error (clutch-jdbc--fetch-all conn 55) :type 'clutch-db-error)
+      (should (equal closed-cursors '(55))))))
+
+(ert-deftest clutch-db-test-jdbc-limit-offset-and-type-categories ()
+  "Generic JDBC should use LIMIT/OFFSET for MySQL/MariaDB/SQLite/PG and classify types accurately."
+  (dolist (url '("jdbc:mysql://db/app"
+                 "jdbc:mariadb://db/app"
+                 "jdbc:sqlite:/tmp/app.db"
+                 "jdbc:postgresql://db/app"))
+    (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
+      (should (string-match-p "LIMIT 10 OFFSET 20\\'"
+                              (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10)))))
+  (should (eq (clutch-jdbc--type-category "BYTEA") 'blob))
+  (should (eq (clutch-jdbc--type-category "INTERVAL") 'text))
+  (should (eq (clutch-jdbc--type-category "POINT") 'text))
+  (should (eq (clutch-jdbc--type-category "TIMETZ") 'time))
+  (should (eq (clutch-jdbc--type-category "TIME WITH TIME ZONE") 'time))
+  (should (eq (clutch-jdbc--type-category "INT4") 'numeric))
+  (should (eq (clutch-jdbc--type-category "BINARY_DOUBLE") 'numeric)))
+
+(ert-deftest clutch-db-test-jdbc-object-definition-and-details-honor-entry-schema ()
+  "Cross-schema JDBC/Oracle views, indexes, and routines should use entry :schema."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver oracle :user "app")))
+        calls)
+    (cl-letf (((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params &optional _timeout)
+                 (push (cons op params) calls)
+                 (pcase op
+                   ("get-object-ddl" '(:ddl "CREATE VIEW v AS SELECT 1 FROM DUAL"))
+                   ("get-object-source" '(:source "PROCEDURE p AS BEGIN NULL; END;"))
+                   ("get-index-columns" '(:columns ((:name "ID" :position 1))))))))
+      (should (equal (clutch-db-object-definition
+                      conn '(:name "V_SALES" :type "VIEW" :schema "REPORTING"))
+                     "CREATE VIEW v AS SELECT 1 FROM DUAL"))
+      (should (equal (clutch-db-object-definition
+                      conn '(:name "P_RUN" :type "PROCEDURE" :schema "BATCH"))
+                     "PROCEDURE p AS BEGIN NULL; END;"))
+      (should (equal (clutch-db-object-details
+                      conn '(:name "IDX_SALES" :type "INDEX" :schema "REPORTING"
+                             :target-table "SALES"))
+                     '((:name "ID" :position 1))))
+      (setq calls (nreverse calls))
+      (should (equal (alist-get 'schema (cdr (nth 0 calls))) "REPORTING"))
+      (should (equal (alist-get 'schema (cdr (nth 1 calls))) "BATCH"))
+      (should (equal (alist-get 'schema (cdr (nth 2 calls))) "REPORTING")))))
+
+(ert-deftest clutch-db-test-mysql-schema-tables-async-uses-metadata-gate ()
+  "MySQL schema-tables-async must respect foreground/socket busy gating."
+  (require 'mysql)
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app"))
+        direct-sent gated-sql)
+    (cl-letf (((symbol-function 'mysql-query-async)
+               (lambda (&rest _) (setq direct-sent t)))
+              ((symbol-function 'clutch-db-mysql--send-metadata)
+               (lambda (_conn sql outcome background)
+                 (should background)
+                 (setq gated-sql sql)
+                 (funcall outcome '(("orders") ("users")) nil)
+                 t))
+              ((symbol-function 'clutch-db-live-p) (lambda (_) t)))
+      (let (tables)
+        (should (clutch-db-schema-tables-async
+                 conn "reporting" (lambda (rows) (setq tables rows))))
+        (should-not direct-sent)
+        (should (equal gated-sql "SHOW TABLES FROM `reporting`"))
+        (should (equal tables '("orders" "users")))))))
+
+(ert-deftest clutch-db-test-mysql-execute-params-keeps-result-when-stmt-close-fails ()
+  "A failing mysql-stmt-close must not discard an already succeeded DML result."
+  (require 'mysql)
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "app")))
+    (cl-letf (((symbol-function 'mysql-prepare) (lambda (_c _s) 'stmt))
+              ((symbol-function 'mysql-execute)
+               (lambda (&rest _) (make-mysql-result :affected-rows 1)))
+              ((symbol-function 'mysql-stmt-close)
+               (lambda (_s) (signal 'mysql-error '("Connection closed")))))
+      (let ((res (clutch-db-execute-params conn "UPDATE t SET a = ?" '(1))))
+        (should (= (clutch-db-result-affected-rows res) 1))))))
+
+(ert-deftest clutch-db-test-mysql-cross-schema-identity-and-object-metadata ()
+  "MySQL unique-key identity, object definition/details, and table comment should honor schema."
+  (require 'mysql)
+  (require 'clutch-db-mysql)
+  (let ((conn (make-mysql-conn :database "current"))
+        queries)
+    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+               (lambda (&rest _) nil))
+              ((symbol-function 'mysql-query)
+               (lambda (_conn sql)
+                 (push sql queries)
+                 (cond
+                  ((string-match-p "SHOW KEYS" sql)
+                   (make-mysql-result
+                    :rows '(("demo" 0 "uq_code" 1 "code" nil nil nil nil "" nil))))
+                  ((string-match-p "SHOW CREATE VIEW" sql)
+                   (make-mysql-result :rows '(("v_sales" "CREATE VIEW v_sales AS SELECT 1"))))
+                  ((string-match-p "INFORMATION_SCHEMA.STATISTICS" sql)
+                   (make-mysql-result :rows '(("code" 1 "A"))))
+                  ((string-match-p "INFORMATION_SCHEMA.TABLES" sql)
+                   (make-mysql-result :rows '(("cross-db comment"))))))))
+      (should (equal (clutch-db-row-identity-candidates conn "demo" "other")
+                     '((:kind unique-key :name "uq_code" :columns ("code")))))
+      (should (equal (clutch-db-object-definition
+                      conn '(:name "v_sales" :type "VIEW" :schema "other"))
+                     "CREATE VIEW v_sales AS SELECT 1"))
+      (should (equal (clutch-db-object-definition
+                      conn '(:name "idx_code" :type "INDEX" :schema "other"
+                             :target-table "demo" :unique t))
+                     "CREATE UNIQUE INDEX `idx_code` ON `other`.`demo` (`code` ASC);"))
+      (should (equal (clutch-db-table-comment conn "demo" "other")
+                     "cross-db comment"))
+      (setq queries (nreverse queries))
+      (should (string-prefix-p "SHOW KEYS FROM `other`.`demo`" (nth 0 queries)))
+      (should (equal (nth 1 queries) "SHOW CREATE VIEW `other`.`v_sales`"))
+      (should (string-match-p "TABLE_SCHEMA = 'other'" (nth 2 queries)))
+      (should (string-match-p "TABLE_SCHEMA = 'other'" (nth 3 queries))))))
+
+(ert-deftest clutch-db-test-pg-connect-disconnects-on-quit-during-session-setup ()
+  "Pressing C-g during post-connect PG setup must close the opened client."
+  (require 'pgsql)
+  (require 'clutch-db-pg)
+  (let (disconnected quit-caught)
+    (cl-letf (((symbol-function 'clutch-db-pg--ensure-client-api) #'ignore)
+              ((symbol-function 'pgsql-connect) (lambda (&rest _) 'fake-pg-client))
+              ((symbol-function 'clutch-db-pg--exec)
+               (lambda (&rest _) (signal 'quit nil)))
+              ((symbol-function 'pgsql-disconnect)
+               (lambda (client) (setq disconnected client))))
+      (condition-case nil
+          (clutch-db-pg-connect '(:host "127.0.0.1" :database "app" :schema "sales"))
+        (quit (setq quit-caught t)))
+      (should quit-caught)
+      (should (eq disconnected 'fake-pg-client)))))
+
+(ert-deftest clutch-db-test-pg-schema-tables-async-uses-metadata-gate ()
+  "PostgreSQL schema-tables-async must route through clutch-db-pg--send-metadata."
+  (require 'pgsql)
+  (require 'clutch-db-pg)
+  (let ((conn (clutch-db-test--make-pg-connection :database "app"))
+        direct-sent gated-sql)
+    (cl-letf (((symbol-function 'pgsql-exec-async)
+               (lambda (&rest _) (setq direct-sent t)))
+              ((symbol-function 'clutch-db-pg--send-metadata)
+               (lambda (_conn sql outcome background)
+                 (should background)
+                 (setq gated-sql sql)
+                 (funcall outcome '(("orders")) nil)
+                 t))
+              ((symbol-function 'clutch-db-live-p) (lambda (_) t)))
+      (let (tables)
+        (should (clutch-db-schema-tables-async
+                 conn "reporting" (lambda (rows) (setq tables rows))))
+        (should-not direct-sent)
+        (should (string-match-p "table_schema = 'reporting'" gated-sql))
+        (should (equal tables '("orders")))))))
+
+(ert-deftest clutch-db-test-pg-triggers-join-schema-and-objects-honor-entry-schema ()
+  "PG triggers query must join on n.nspname, and INDEX/VIEW/SEQUENCE must honor :schema."
+  (require 'pgsql)
+  (require 'clutch-db-pg)
+  (should (string-match-p "n\\.nspname = t\\.event_object_schema"
+                          (clutch-db-pg--object-sql 'triggers)))
+  (let ((conn (clutch-db-test--make-pg-connection :database "app"))
+        queries)
+    (cl-letf (((symbol-function 'clutch-db-pg--metadata-rows) #'identity)
+              ((symbol-function 'clutch-db-pg--exec)
+               (lambda (_conn sql)
+                 (push sql queries)
+                 (cond
+                  ((string-match-p "pg_get_indexdef" sql)
+                   '(("CREATE INDEX idx ON other.t (id)")))
+                  ((string-match-p "pg_views" sql)
+                   '(("CREATE OR REPLACE VIEW v AS SELECT 1")))
+                  ((string-match-p "pg_sequences" sql)
+                   '(("CREATE SEQUENCE other.seq;")))
+                  (t '(("id" 1 "ASC")))))))
+      (clutch-db-object-details conn '(:name "idx_part" :type "INDEX" :schema "other"))
+      (clutch-db-object-definition conn '(:name "idx_part" :type "INDEX" :schema "other"))
+      (clutch-db-object-definition conn '(:name "v_sales" :type "VIEW" :schema "other"))
+      (clutch-db-object-definition conn '(:name "seq_id" :type "SEQUENCE" :schema "other"))
+      (setq queries (nreverse queries))
+      (should (string-match-p "idx\\.relkind IN ('i', 'I')" (nth 0 queries)))
+      (should (string-match-p "n\\.nspname = 'other'" (nth 0 queries)))
+      (should (string-match-p "idx\\.relkind IN ('i', 'I')" (nth 1 queries)))
+      (should (string-match-p "n\\.nspname = 'other'" (nth 1 queries)))
+      (should (string-match-p "schemaname = 'other'" (nth 2 queries)))
+      (should (string-match-p "schemaname = 'other'" (nth 3 queries))))))
 
 ;;; clutch-db-test.el ends here

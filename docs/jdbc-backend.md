@@ -27,7 +27,7 @@ Support levels are defined in [docs/backend-support.md](backend-support.md).
 
 ## Setup
 
-On first `clutch-connect` to a JDBC backend, clutch loads `clutch-db-jdbc.el` automatically and then prompts to download the published agent jar and any required drivers available from Maven Central. Cassandra and DB2 drivers are installed manually.
+On first `clutch-connect` to a JDBC backend, clutch loads `clutch-db-jdbc.el` automatically and checks for the published agent jar and required driver jar; if either is missing, it stops with instructions to run `M-x clutch-jdbc-ensure-agent` or `M-x clutch-jdbc-install-driver`. Cassandra and DB2 drivers are installed manually.
 
 If you prefer to pre-install everything up front:
 

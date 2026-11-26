@@ -427,38 +427,40 @@ backend such as XTDB that speaks the PostgreSQL protocol."
         (connect-timeout (plist-get params :connect-timeout))
         (read-idle-timeout (plist-get params :read-idle-timeout))
         (query-timeout (plist-get params :query-timeout))
-        client conn)
-    (condition-case err
-        (progn
-          (setq client
-                (pgsql-connect
-                 :database (plist-get params :database)
-                 :user (plist-get params :user)
-                 :password (plist-get params :password)
-                 :host (or (plist-get params :host) "localhost")
-                 :port (or (plist-get params :port) 5432)
-                 :sslmode (or sslmode 'disable)
-                 :connect-timeout connect-timeout
-                 :read-timeout read-idle-timeout
-                 :application-name "clutch")
-                conn (funcall (or make-connection
-                                  #'clutch-db-pg--make-connection)
-                              :client client))
-          (when query-timeout
-            (clutch-db-pg--exec
-             conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
-          (cond
-           (search-path
-            (clutch-db-pg--exec
-             conn (format "SELECT set_config('search_path', %s, false)"
-                          (pgsql-escape-literal search-path))))
-           (schema
-            (clutch-db-pg--set-search-path conn schema)))
-          conn)
-      (pgsql-error
-       (when client
-         (pgsql-disconnect client))
-       (signal 'clutch-db-error (clutch-db--error-data err))))))
+        client conn connected)
+    (unwind-protect
+        (condition-case err
+            (progn
+              (setq client
+                    (pgsql-connect
+                     :database (plist-get params :database)
+                     :user (plist-get params :user)
+                     :password (plist-get params :password)
+                     :host (or (plist-get params :host) "localhost")
+                     :port (or (plist-get params :port) 5432)
+                     :sslmode (or sslmode 'disable)
+                     :connect-timeout connect-timeout
+                     :read-timeout read-idle-timeout
+                     :application-name "clutch")
+                    conn (funcall (or make-connection
+                                      #'clutch-db-pg--make-connection)
+                                  :client client))
+              (when query-timeout
+                (clutch-db-pg--exec
+                 conn (format "SET statement_timeout = %d" (* query-timeout 1000))))
+              (cond
+               (search-path
+                (clutch-db-pg--exec
+                 conn (format "SELECT set_config('search_path', %s, false)"
+                              (pgsql-escape-literal search-path))))
+               (schema
+                (clutch-db-pg--set-search-path conn schema)))
+              (setq connected t)
+              conn)
+          (pgsql-error
+           (signal 'clutch-db-error (clutch-db--error-data err))))
+      (when (and client (not connected))
+        (ignore-errors (pgsql-disconnect client))))))
 
 (defun clutch-db-pg--rewrite-param-sql (sql &optional param-count)
   "Return SQL with `?' placeholders rewritten to PostgreSQL `$N' form.
@@ -1057,14 +1059,13 @@ Deliver the names to CALLBACK and failures to ERRBACK."
     ((conn clutch-db-pg--connection) schema callback &optional errback)
   "Fetch PostgreSQL table and view names in SCHEMA on CONN asynchronously."
   (when (fboundp 'pgsql-exec-async)
-    (pgsql-exec-async
-     (clutch-db-pg--connection-client conn)
-     (format "SELECT table_name FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name"
-             (pgsql-escape-literal schema))
-     (lambda (result error)
-       (if error
-           (when errback (funcall errback (clutch-db--error-message error)))
-         (funcall callback (mapcar #'car (clutch-db-pg--metadata-rows result))))))
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-pg--send-metadata conn sql outcome t))
+     (list (format "SELECT table_name FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name"
+                   (pgsql-escape-literal schema)))
+     (lambda (results) (mapcar #'car (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
     t))
 
 (cl-defmethod clutch-db-list-table-entries
@@ -1130,6 +1131,7 @@ ORDER BY p.proname"
 FROM information_schema.triggers t
 JOIN pg_class c ON c.relname = t.event_object_table
 JOIN pg_namespace n ON n.oid = c.relnamespace
+                   AND n.nspname = t.event_object_schema
 JOIN pg_trigger pg_t ON pg_t.tgrelid = c.oid
                     AND pg_t.tgname = t.trigger_name
 WHERE t.trigger_schema = current_schema()
@@ -1193,6 +1195,14 @@ ORDER BY t.event_object_table, t.trigger_name"))))
      (lambda () (clutch-db-live-p conn)))
     t))
 
+(defun clutch-db-pg--entry-schema-sql (entry)
+  "Return SQL expression for PostgreSQL object ENTRY's schema."
+  (let ((schema (or (plist-get entry :schema)
+                    (plist-get entry :source-schema))))
+    (if (and schema (not (string-empty-p schema)))
+        (pgsql-escape-literal schema)
+      "current_schema()")))
+
 (cl-defmethod clutch-db-object-details ((conn clutch-db-pg--connection) entry)
   "Return detail plists for PostgreSQL object ENTRY on CONN."
   (clutch-db--translate-library-error pgsql-error
@@ -1209,11 +1219,12 @@ JOIN pg_namespace n ON n.oid = idx.relnamespace
 JOIN pg_index pi ON pi.indexrelid = idx.oid
 JOIN LATERAL unnest(pi.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON true
 JOIN pg_attribute a ON a.attrelid = pi.indrelid AND a.attnum = k.attnum
-WHERE idx.relkind = 'i'
+WHERE idx.relkind IN ('i', 'I')
   AND idx.relname = %s
-  AND n.nspname = current_schema()
+  AND n.nspname = %s
 ORDER BY k.ordinality"
-                          (pgsql-escape-literal (plist-get entry :name))))))
+                          (pgsql-escape-literal (plist-get entry :name))
+                          (clutch-db-pg--entry-schema-sql entry)))))
            (mapcar
             (lambda (row)
               (pcase-let ((`(,name ,position ,descend) row))
@@ -1327,10 +1338,11 @@ ORDER BY c.ordinal_position"
                  (format "SELECT pg_get_indexdef(idx.oid)
 FROM pg_class idx
 JOIN pg_namespace n ON n.oid = idx.relnamespace
-WHERE idx.relkind = 'i'
+WHERE idx.relkind IN ('i', 'I')
   AND idx.relname = %s
-  AND n.nspname = current_schema()"
-                         (pgsql-escape-literal name))))))
+  AND n.nspname = %s"
+                         (pgsql-escape-literal name)
+                         (clutch-db-pg--entry-schema-sql entry))))))
         ("VIEW"
          (caar (clutch-db-pg--metadata-rows
                 (clutch-db-pg--exec
@@ -1338,8 +1350,9 @@ WHERE idx.relkind = 'i'
                  (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
        pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(format('%%I.%%I', schemaname, viewname)), true)
 FROM pg_views
-WHERE schemaname = current_schema()
+WHERE schemaname = %s
   AND viewname = %s"
+                         (clutch-db-pg--entry-schema-sql entry)
                          (pgsql-escape-literal name))))))
         ("SEQUENCE"
          (caar (clutch-db-pg--metadata-rows
@@ -1349,8 +1362,9 @@ WHERE schemaname = current_schema()
   'CREATE SEQUENCE %%I.%%I INCREMENT BY %%s MINVALUE %%s MAXVALUE %%s START WITH %%s;',
   schemaname, sequencename, increment_by, min_value, max_value, start_value)
 FROM pg_sequences
-WHERE schemaname = current_schema()
+WHERE schemaname = %s
   AND sequencename = %s"
+                         (clutch-db-pg--entry-schema-sql entry)
                          (pgsql-escape-literal name))))))
         (_ nil)))))
 

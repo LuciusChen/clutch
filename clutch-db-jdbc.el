@@ -415,7 +415,8 @@ Return non-nil when a request was waiting for it."
         (insert string)
         (goto-char (min (or clutch-jdbc--agent-scan-position (point-min))
                         (point-max)))
-        (while (search-forward "\n" nil t)
+        (while (and (not clutch-jdbc--protocol-error)
+                    (search-forward "\n" nil t))
           (let ((line (string-trim (buffer-substring (point-min) (point)))))
             (delete-region (point-min) (point))
             (goto-char (point-min))
@@ -1224,7 +1225,11 @@ as is, or 0, meaning none, when CONN has no positive limit."
         (clutch-jdbc--mongodb-conn-p conn)
         (clutch-jdbc--duckdb-conn-p conn)
         (clutch-jdbc--url-prefix-p conn "jdbc:redshift:")
-        (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:"))))
+        (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:mysql:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:mariadb:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:sqlite:")
+        (clutch-jdbc--url-prefix-p conn "jdbc:postgresql:"))))
 
 (defun clutch-jdbc--clickhouse-conn-p (conn)
   "Return non-nil when CONN is a ClickHouse JDBC connection."
@@ -1452,10 +1457,14 @@ so an object name is matched by prefix search instead."
   "Fetch all remaining rows for CURSOR-ID on CONN, returning a flat list."
   (let ((params (clutch-jdbc--fetch-params conn cursor-id))
         batches done)
-    (while (not done)
-      (let ((result (clutch-jdbc--rpc-on-conn conn "fetch" params)))
-        (push (plist-get result :rows) batches)
-        (setq done (eq t (plist-get result :done)))))
+    (unwind-protect
+        (while (not done)
+          (let ((result (clutch-jdbc--rpc-on-conn conn "fetch" params)))
+            (push (plist-get result :rows) batches)
+            (setq done (eq t (plist-get result :done)))))
+      (when (and (not done) cursor-id (clutch-db-live-p conn))
+        (ignore-errors
+          (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor-id))))))
     (apply #'nconc (nreverse batches))))
 
 (defun clutch-jdbc--collect-cursor-async (conn first send outcome)
@@ -1531,13 +1540,16 @@ The agent returns cursor-style :rows batches."
   "Map JDBC-TYPE-NAME to a `clutch-db' type-category symbol."
   (let ((t-upper (upcase (or jdbc-type-name ""))))
     (cond
-     ((string-match-p "INT\\|SMALLINT\\|BIGINT\\|TINYINT\\|NUMBER\\|NUMERIC\\|DECIMAL\\|FLOAT\\|DOUBLE\\|REAL" t-upper) 'numeric)
+     ((string-match-p
+       "\\(?:\\`\\|[^A-Z]\\)\\(?:U?INT\\(?:EGER\\|[0-9]*\\)\\|SMALLINT\\|BIGINT\\|TINYINT\\|MEDIUMINT\\|NUMBER\\|NUMERIC\\|DECIMAL\\|FLOAT\\|DOUBLE\\|REAL\\)\\(?:\\'\\|[^A-Z]\\)"
+       t-upper)
+      'numeric)
      ((string-match-p "BOOL" t-upper)                           'text)
      ((string-match-p "JSON\\|DOCUMENT\\|ARRAY" t-upper)        'json)
-     ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|RAW\\|IMAGE\\|BINDATA" t-upper) 'blob)
+     ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|BYTEA\\|RAW\\|IMAGE\\|BINDATA" t-upper) 'blob)
      ((string-match-p "TIMESTAMP\\|DATETIME" t-upper)           'datetime)
      ((string-match-p "DATE" t-upper)                           'date)
-     ((string-match-p "TIME$" t-upper)                          'time)
+     ((string-match-p "\\`TIME\\(?:TZ\\|\\b\\)" t-upper)        'time)
      (t                                                         'text))))
 
 (defun clutch-jdbc--make-columns (col-names col-types)
@@ -1931,20 +1943,23 @@ still arrive."
 (defun clutch-jdbc--wire-param (param)
   "Return PARAM encoded for the JDBC agent prepared-value protocol."
   (let ((value (clutch-db-param-value param)))
-    (if (clutch-jdbc--binary-param-p param)
-        `((__clutch_jdbc_param . "binary")
-          (jdbc-type . ,(clutch-db-param-type param))
-          (base64 . ,(and value
-                          (base64-encode-string
-                           (clutch-jdbc--binary-param-bytes value) t))))
-      value)))
+    (cond
+     ((clutch-jdbc--binary-param-p param)
+      `((__clutch_jdbc_param . "binary")
+        (jdbc-type . ,(clutch-db-param-type param))
+        (base64 . ,(and value
+                        (base64-encode-string
+                         (clutch-jdbc--binary-param-bytes value) t)))))
+     ((eq value :false)
+      clutch-jdbc--json-false)
+     (t value))))
 
 (cl-defmethod clutch-db-execute-params ((conn clutch-jdbc-conn) sql params)
   "Execute SQL with positional PARAMS on CONN through JDBC prepared binding."
   (clutch-jdbc--execute-rpc
    conn "execute-params"
    `((sql . ,sql)
-     (values . ,(mapcar #'clutch-jdbc--wire-param params)))))
+     (values . ,(vconcat (mapcar #'clutch-jdbc--wire-param params))))))
 
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
   "Interrupt the active JDBC request on CONN.
@@ -2831,9 +2846,22 @@ With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
        conn)
       t)))
 
+(defun clutch-jdbc--entry-metadata-scope (conn entry)
+  "Return JDBC metadata scope params for object ENTRY on CONN.
+Honor ENTRY's non-empty :schema / :source-schema and :catalog over CONN's
+default scope so cross-schema objects resolve in their owning schema."
+  (let* ((raw-schema (or (plist-get entry :schema)
+                         (plist-get entry :source-schema)))
+         (schema (unless (equal raw-schema "") raw-schema))
+         (raw-catalog (plist-get entry :catalog))
+         (catalog (unless (equal raw-catalog "") raw-catalog)))
+    (clutch-jdbc--metadata-scope-params
+     (clutch-jdbc--metadata-conn-for-scope conn schema catalog))))
+
 (cl-defmethod clutch-db-object-details ((conn clutch-jdbc-conn) entry)
   "Return detail plists for JDBC object ENTRY on CONN."
-  (let* ((type (upcase (or (plist-get entry :type) ""))))
+  (let* ((type (upcase (or (plist-get entry :type) "")))
+         (scope (clutch-jdbc--entry-metadata-scope conn entry)))
     (pcase type
       ("INDEX"
        (let ((result
@@ -2843,7 +2871,7 @@ With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
                  (index   . ,(plist-get entry :name))
                  ,@(when (plist-get entry :target-table)
                      `((table . ,(plist-get entry :target-table))))
-                 ,@(clutch-jdbc--metadata-scope-params conn)))))
+                 ,@scope))))
          (plist-get result :columns)))
       ((or "PROCEDURE" "FUNCTION")
        (let ((result
@@ -2855,14 +2883,15 @@ With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
                  (name     . ,(plist-get entry :name))
                  ,@(when (plist-get entry :identity)
                      `((identity . ,(plist-get entry :identity))))
-                 ,@(clutch-jdbc--metadata-scope-params conn)))))
+                 ,@scope))))
          (plist-get result :params)))
       (_ nil))))
 
 (cl-defmethod clutch-db-object-definition ((conn clutch-jdbc-conn) entry)
   "Return definition or source text for JDBC object ENTRY on CONN."
   (let ((type (upcase (or (plist-get entry :type) "")))
-        (name (plist-get entry :name)))
+        (name (plist-get entry :name))
+        (scope (clutch-jdbc--entry-metadata-scope conn entry)))
     (pcase type
       ((guard (clutch-jdbc--cassandra-conn-p conn)) nil)
       ((or "PROCEDURE" "FUNCTION" "TRIGGER")
@@ -2873,7 +2902,7 @@ With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
                         (type    . ,(plist-get entry :type))
                         ,@(when (plist-get entry :identity)
                             `((identity . ,(plist-get entry :identity))))
-                        ,@(clutch-jdbc--metadata-scope-params conn)))))
+                        ,@scope))))
          (plist-get result :source)))
       ((or "TABLE" "COLLECTION")
        (let ((oracle (clutch-jdbc--oracle-conn-p conn))
@@ -2913,7 +2942,7 @@ With CALLBACK, send the same search asynchronously and pass errors to ERRBACK."
                          (type    . ,(plist-get entry :type))
                          ,@(when (plist-get entry :identity)
                              `((identity . ,(plist-get entry :identity))))
-                         ,@(clutch-jdbc--metadata-scope-params conn)))))
+                         ,@scope))))
          (plist-get result :ddl))))))
 
 (cl-defmethod clutch-db-table-comment ((conn clutch-jdbc-conn) table
@@ -3166,19 +3195,29 @@ Only PostgreSQL and MySQL URLs have plans."
 
 (defun clutch-jdbc--download-agent-jar ()
   "Download the agent jar from GitHub Releases and verify its checksum."
-  (let ((jar (clutch-jdbc--agent-jar))
-        (url (format
-              "https://github.com/LuciusChen/clutch-jdbc-agent/releases/download/v%s/clutch-jdbc-agent-%s.jar"
-              clutch-jdbc-agent-version
-              clutch-jdbc-agent-version)))
+  (let* ((jar (clutch-jdbc--agent-jar))
+         (url (format
+               "https://github.com/LuciusChen/clutch-jdbc-agent/releases/download/v%s/clutch-jdbc-agent-%s.jar"
+               clutch-jdbc-agent-version
+               clutch-jdbc-agent-version))
+         tmp)
     (make-directory clutch-jdbc-agent-dir t)
     (make-directory (clutch-jdbc--drivers-dir) t)
-    (message "Downloading clutch-jdbc-agent %s..." clutch-jdbc-agent-version)
-    (url-copy-file url jar t)
-    (unless (clutch-jdbc--agent-jar-valid-p jar)
-      (error "Downloaded clutch-jdbc-agent checksum mismatch: %s" jar))
-    (clutch-jdbc--cleanup-stale-agent-jars)
-    (message "Downloaded to %s" jar)))
+    (setq tmp (make-temp-file (expand-file-name ".clutch-jdbc-agent-"
+                                                clutch-jdbc-agent-dir)
+                              nil ".jar.part"))
+    (unwind-protect
+        (progn
+          (message "Downloading clutch-jdbc-agent %s..." clutch-jdbc-agent-version)
+          (url-copy-file url tmp t)
+          (unless (clutch-jdbc--agent-jar-valid-p tmp)
+            (error "Downloaded clutch-jdbc-agent checksum mismatch: %s" jar))
+          (rename-file tmp jar t)
+          (setq tmp nil)
+          (clutch-jdbc--cleanup-stale-agent-jars)
+          (message "Downloaded to %s" jar))
+      (when (and tmp (file-exists-p tmp))
+        (ignore-errors (delete-file tmp))))))
 
 ;;;###autoload
 (defun clutch-jdbc-ensure-agent ()

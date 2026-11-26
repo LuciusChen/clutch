@@ -288,14 +288,29 @@ With PROPAGATE-REJECTION, signal the server's error after consuming it."
       (unless (string-empty-p sig)
         (list :sig sig :desc desc)))))
 
-(defun clutch-db-mysql--unique-not-null-identities (conn table)
-  "Return unique-not-null row identity candidates for TABLE on CONN."
+(defun clutch-db-mysql--qualified-identifier (name &optional schema)
+  "Return backtick-quoted NAME, qualified by SCHEMA when non-empty."
+  (if (and schema (not (string-empty-p schema)))
+      (format "%s.%s"
+              (mysql-escape-identifier schema)
+              (mysql-escape-identifier name))
+    (mysql-escape-identifier name)))
+
+(defun clutch-db-mysql--entry-schema (entry)
+  "Return non-empty schema name for MySQL object ENTRY, or nil."
+  (let ((schema (or (plist-get entry :schema)
+                    (plist-get entry :source-schema))))
+    (unless (or (null schema) (string-empty-p schema))
+      schema)))
+
+(defun clutch-db-mysql--unique-not-null-identities (conn table &optional schema)
+  "Return unique-not-null row identity candidates for TABLE in SCHEMA on CONN."
   (clutch-db--translate-library-error mysql-error
     (let ((result
            (clutch-db-mysql--metadata-query
             conn
             (format "SHOW KEYS FROM %s WHERE Non_unique = 0 AND Key_name <> 'PRIMARY'"
-                    (mysql-escape-identifier table))))
+                    (clutch-db-mysql--qualified-identifier table schema))))
           (indexes (make-hash-table :test 'equal))
           (invalid (make-hash-table :test 'equal))
           order)
@@ -534,9 +549,10 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
               (mysql-escape-literal schema) (mysql-escape-literal table))
     (format "SHOW COLUMNS FROM %s" (mysql-escape-identifier table))))
 
-(defun clutch-db-mysql--table-comment-sql (table)
-  "Return the current-database comment query for TABLE."
-  (format "SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
+(defun clutch-db-mysql--table-comment-sql (table &optional schema)
+  "Return the comment query for TABLE in optional SCHEMA."
+  (format "SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+          (clutch-db-mysql--schema-literal schema)
           (mysql-escape-literal table)))
 
 (defun clutch-db-mysql--foreign-key-sql (table schema)
@@ -791,7 +807,7 @@ Decline when the installed mysql.el cannot execute asynchronously."
           (condition-case err
               (mysql-stmt-close stmt)
             (mysql-error
-             (unless pending-error
+             (unless (or pending-error result)
                (setq pending-error err)))))))
     (when timeout-error
       (clutch-db-mysql--handle-query-timeout conn timeout-error stmt))
@@ -860,12 +876,12 @@ missed a USE or a DROP that changed the database."
     ((conn mysql-conn) schema callback &optional errback)
   "Fetch MySQL table and view names in SCHEMA on CONN asynchronously."
   (when (fboundp 'mysql-query-async)
-    (mysql-query-async
-     conn (format "SHOW TABLES FROM %s" (mysql-escape-identifier schema))
-     (lambda (result error)
-       (if error
-           (when errback (funcall errback (clutch-db--error-message error)))
-         (funcall callback (mapcar #'car (mysql-result-rows result))))))
+    (clutch-db--metadata-request-series
+     (lambda (sql outcome) (clutch-db-mysql--send-metadata conn sql outcome t))
+     (list (format "SHOW TABLES FROM %s" (mysql-escape-identifier schema)))
+     (lambda (results) (mapcar #'car (car results)))
+     (clutch-db--metadata-outcome callback errback)
+     (lambda () (clutch-db-live-p conn)))
     t))
 
 (cl-defmethod clutch-db-list-schemas ((conn mysql-conn))
@@ -970,7 +986,8 @@ FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND "
 (cl-defmethod clutch-db-object-details ((conn mysql-conn) entry)
   "Return detail plists for MySQL object ENTRY on CONN."
   (clutch-db--translate-library-error mysql-error
-    (let ((type (upcase (or (plist-get entry :type) ""))))
+    (let ((type (upcase (or (plist-get entry :type) "")))
+          (schema (clutch-db-mysql--entry-schema entry)))
         (pcase type
           ("INDEX"
            (let* ((name (plist-get entry :name))
@@ -982,10 +999,11 @@ FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND "
                            conn
                            (format "SELECT COLUMN_NAME, SEQ_IN_INDEX, COLLATION
 FROM INFORMATION_SCHEMA.STATISTICS
-WHERE TABLE_SCHEMA = DATABASE()
+WHERE TABLE_SCHEMA = %s
   AND TABLE_NAME = %s
   AND INDEX_NAME = %s
 ORDER BY SEQ_IN_INDEX"
+                                   (clutch-db-mysql--schema-literal schema)
                                    (mysql-escape-literal table)
                                    (mysql-escape-literal name)))))
              (mapcar
@@ -1002,9 +1020,10 @@ ORDER BY SEQ_IN_INDEX"
                            (format "SELECT PARAMETER_NAME, DTD_IDENTIFIER,
        COALESCE(PARAMETER_MODE, 'RETURN'), ORDINAL_POSITION
 FROM INFORMATION_SCHEMA.PARAMETERS
-WHERE SPECIFIC_SCHEMA = DATABASE()
+WHERE SPECIFIC_SCHEMA = %s
   AND SPECIFIC_NAME = %s
 ORDER BY ORDINAL_POSITION"
+                                   (clutch-db-mysql--schema-literal schema)
                                    (mysql-escape-literal specific-name)))))
              (mapcar
               (lambda (row)
@@ -1016,19 +1035,15 @@ ORDER BY ORDINAL_POSITION"
 (cl-defmethod clutch-db-object-definition ((conn mysql-conn) entry)
   "Return definition or source text for MySQL object ENTRY on CONN."
   (clutch-db--translate-library-error mysql-error
-    (let ((type (upcase (or (plist-get entry :type) "")))
-          (name (plist-get entry :name)))
+    (let* ((type (upcase (or (plist-get entry :type) "")))
+           (name (plist-get entry :name))
+           (schema (clutch-db-mysql--entry-schema entry))
+           (qualified (clutch-db-mysql--qualified-identifier name schema)))
       (pcase type
         ("TABLE"
          (let* ((result (clutch-db-mysql--metadata-query
                          conn
-                         (format "SHOW CREATE TABLE %s"
-                                 (mapconcat
-                                  #'mysql-escape-identifier
-                                  (delq nil (list (or (plist-get entry :schema)
-                                                      (plist-get entry :source-schema))
-                                                  name))
-                                  "."))))
+                         (format "SHOW CREATE TABLE %s" qualified)))
                 (rows (mysql-result-rows result)))
            (unless rows
              (signal 'clutch-db-error
@@ -1040,13 +1055,11 @@ ORDER BY ORDINAL_POSITION"
          (nth 2 (car (mysql-result-rows
                       (clutch-db-mysql--metadata-query
                        conn
-                       (format "SHOW CREATE %s %s" type
-                               (mysql-escape-identifier name)))))))
+                       (format "SHOW CREATE %s %s" type qualified))))))
         ("VIEW"
          (let* ((result (clutch-db-mysql--metadata-query
                          conn
-                         (format "SHOW CREATE VIEW %s"
-                                 (mysql-escape-identifier name))))
+                         (format "SHOW CREATE VIEW %s" qualified)))
                 (row (car (mysql-result-rows result))))
            (nth 1 row)))
         ("INDEX"
@@ -1061,16 +1074,17 @@ ORDER BY ORDINAL_POSITION"
            (format "CREATE %sINDEX %s ON %s (%s);"
                    (if (plist-get entry :unique) "UNIQUE " "")
                    (mysql-escape-identifier name)
-                   (mysql-escape-identifier (plist-get entry :target-table))
+                   (clutch-db-mysql--qualified-identifier
+                    (plist-get entry :target-table) schema)
                    columns)))
         (_ nil)))))
 
-(cl-defmethod clutch-db-table-comment ((conn mysql-conn) table &optional _schema)
-  "Return the comment for TABLE on MySQL CONN, or nil if empty."
+(cl-defmethod clutch-db-table-comment ((conn mysql-conn) table &optional schema)
+  "Return the comment for TABLE in optional SCHEMA on MySQL CONN, or nil."
   (clutch-db--translate-library-error mysql-error
     (let ((comment (caar (mysql-result-rows
                           (clutch-db-mysql--metadata-query
-                           conn (clutch-db-mysql--table-comment-sql table))))))
+                           conn (clutch-db-mysql--table-comment-sql table schema))))))
       (unless (string-empty-p (or comment "")) comment))))
 
 (cl-defmethod clutch-db-table-comment-async
@@ -1101,10 +1115,12 @@ ORDER BY ORDINAL_POSITION"
               rows))))
 
 (cl-defmethod clutch-db-row-identity-candidates ((conn mysql-conn) table
-                                                 &optional _schema _catalog)
-  "Return row identity candidates for TABLE on MySQL CONN."
+                                                 &optional schema _catalog)
+  "Return row identity candidates for TABLE in optional SCHEMA on MySQL CONN."
   (or (cl-call-next-method)
-      (clutch-db-mysql--unique-not-null-identities conn table)))
+      (if schema
+          (clutch-db-mysql--unique-not-null-identities conn table schema)
+        (clutch-db-mysql--unique-not-null-identities conn table))))
 
 (cl-defmethod clutch-db-plan-sql ((conn mysql-conn) sql analyze)
   "Return SQL asking MySQL CONN for the plan of SQL.
