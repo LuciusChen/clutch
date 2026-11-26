@@ -60,7 +60,8 @@ Functions receive the connection object as their sole argument.")
 
 (defvar clutch--table-metadata-updated-hook nil
   "Hook run after table-scoped metadata is updated.
-Functions receive CONN, TABLE, and KIND.")
+Functions receive CONN, TABLE, and KIND.  A nil table with kind
+`invalidated' means the current scope's table definitions have expired.")
 
 (defconst clutch--schema-dependent-cache-symbols
   '(clutch--table-metadata-cache
@@ -485,6 +486,8 @@ schema switching, and any statement that returns no result set."
         (puthash tbl (and current (gethash tbl current)) schema))
       (puthash conn schema clutch--schema-cache)
       (clutch--set-schema-status conn 'ready (hash-table-count schema))
+      (when (eq (car ticket) 'refresh)
+        (run-hook-with-args 'clutch--table-metadata-updated-hook conn nil 'invalidated))
       (clutch--notify-schema-cache-updated conn 'ready)
       t)))
 
