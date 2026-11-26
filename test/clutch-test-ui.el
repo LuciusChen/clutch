@@ -1542,8 +1542,9 @@ table with its schema."
 
 (ert-deftest clutch-test-source-column-metadata-match-is-safe ()
   "Canonical source lookup should prefer exact names and reject ambiguity."
-  (let ((clutch-connection 'fake-conn)
+  (let ((clutch-connection (make-clutch-test-conn :table "items" :columns '((:name "NAME"))))
         (clutch--result-columns '("display"))
+        (clutch--row-identity '(:source-token "items"))
         (clutch--result-column-defs '((:source-column "Foo"))))
     (should
      (equal (plist-get
@@ -1562,7 +1563,15 @@ table with its schema."
              (clutch-result--writable-source-detail
               "items" 0 "test" '((:name "NAME")))
              :name)
-            "NAME"))))
+            "NAME"))
+    ;; A physical name from SELECT * cannot be rebound to a near match.
+    (setq clutch--result-column-defs
+          (clutch--apply-row-identity-column-metadata
+           '((:name "name")) '(:table "items" :writable-projection star) clutch-connection))
+    (should (string-search "name is missing from table metadata"
+                           (error-message-string
+                            (should-error (clutch-result--update-source-columns "items" '(0) "copy UPDATE")
+                                          :type 'user-error))))))
 
 (ert-deftest clutch-test-row-identity-finalize-separates-hidden-and-source-pk ()
   "Hidden locator indices and visible source PK indices should stay distinct."

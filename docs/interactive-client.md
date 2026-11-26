@@ -78,7 +78,7 @@ Without an explicit SQL row limit, paged query export and all-row result export 
 | `s` | Cycle current-column sort: unsorted / ASC / DESC |
 | `C` | Jump to visible column |
 | `{` / `}` | First visible data column / last visible data column |
-| `?` | Show column type info at point |
+| `?` | Show the source column’s type and nullability, including through an alias |
 | `R` | Add a relation from the column at point (see [Relations added by hand](#relations-added-by-hand)) |
 | `g` | Re-execute query |
 | `C-c '` | Edit / re-edit at point |
