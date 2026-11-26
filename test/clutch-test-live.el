@@ -2293,22 +2293,34 @@ throughout."
               (clutch-db-query
                admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
             (clutch-test--with-live-console params
-              (cl-flet ((describe-on (schema)
-                          (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 schema)
-                                                       "SELECT memo, id FROM t")
+              (cl-flet ((describe-after (statement)
+                          (erase-buffer)
+                          (insert statement ";\nSELECT memo, id FROM t;")
+                          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                            (clutch-execute-buffer))
+                          (clutch-test--await-queries)
                           (with-current-buffer (clutch-result--buffer-name)
                             (clutch-test--await
-                             (lambda () (and (gethash clutch-connection clutch--schema-cache)
-                                             (not (clutch-db-in-use-p clutch-connection)))))
+                             (lambda ()
+                               (and (clutch--foreign-keys-cached-p clutch-connection "t")
+                                    (not (clutch-db-in-use-p clutch-connection)))))
                             (clutch--goto-cell 0 0)
                             (clutch-result-column-info)
                             (list (plist-get (car clutch--result-column-details) :type)
-                                  (and (assq 0 clutch--fk-info) t)))))
+                                  (plist-get (cdr (assq 0 clutch--fk-info)) :ref-schema)))))
                 (clutch-test--with-live-result-buffer result-name
-                  (should (equal (describe-on s2) '("integer" t)))
+                  (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s2))
+                                 (list "integer" s2)))
+                  (clutch-test--run-in-console "BEGIN")
+                  (should (equal (describe-after
+                                  (format "ALTER TABLE t DROP CONSTRAINT t_memo_fkey, ADD FOREIGN KEY (memo) REFERENCES %s.t" s3))
+                                 (list "integer" s3)))
+                  (should (equal (describe-after "ROLLBACK") (list "integer" s2)))
                   (clutch-test--with-live-result-buffer (concat result-name "-other")
-                    (should (equal (describe-on s3) '("date" nil))))
-                  (with-current-buffer result-name (should (assq 0 clutch--fk-info))))))
+                    (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s3))
+                                   '("date" nil))))
+                  (with-current-buffer result-name
+                    (should (equal (plist-get (cdr (assq 0 clutch--fk-info)) :ref-schema) s2))))))
             (dolist (action '(console submit edit copy))
               (clutch-test--with-live-console params
                 (clutch-toggle-auto-commit)

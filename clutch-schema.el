@@ -309,7 +309,6 @@ ERROR-MESSAGE is stored when STATE is \\='failed."
 (defun clutch--begin-schema-refresh (conn)
   "Mark CONN as refreshing and return a unique ticket for its table list."
   (let* ((replacing (or (clutch--schema-status-entry conn)
-                        (gethash conn clutch--schema-cache)
                         (cl-some (lambda (cache) (gethash conn (symbol-value cache)))
                                  clutch--schema-dependent-cache-symbols)))
          (ticket (list (if replacing 'refresh 'initial))))
@@ -476,21 +475,26 @@ schema switching, and any statement that returns no result set."
 (defun clutch--install-schema-cache (conn table-names ticket)
   "Install TABLE-NAMES for CONN if its refresh TICKET is still current."
   (when (clutch--schema-refresh-ticket-current-p conn ticket)
-    (let ((schema (make-hash-table :test 'equal)))
-      ;; On the first load, metadata fetched in the meantime is already current.
+    (let ((schema (make-hash-table :test 'equal))
+          (current (and (eq (car ticket) 'initial) (gethash conn clutch--schema-cache))))
+      ;; After invalidation, lookups made while listing tables are current.
       (when (eq (car ticket) 'refresh)
         (clutch--notify-schema-cache-updated conn 'invalidated)
         (clutch--clear-schema-dependent-caches conn))
       (dolist (tbl table-names)
-        (puthash tbl nil schema))
+        (puthash tbl (and current (gethash tbl current)) schema))
       (puthash conn schema clutch--schema-cache)
       (clutch--set-schema-status conn 'ready (hash-table-count schema))
       (clutch--notify-schema-cache-updated conn 'ready)
       t)))
 
-(defun clutch--clear-connection-metadata-caches (conn)
-  "Clear schema-scoped metadata caches for CONN."
-  (remhash conn clutch--schema-cache)
+(defun clutch--clear-connection-metadata-caches (conn &optional keep-table-names)
+  "Invalidate schema metadata for CONN.
+After DDL, KEEP-TABLE-NAMES retains the last listing until it is refreshed."
+  (if keep-table-names
+      (when-let* ((schema (gethash conn clutch--schema-cache)))
+        (maphash (lambda (table columns) (when columns (puthash table nil schema))) schema))
+    (remhash conn clutch--schema-cache))
   (clutch--clear-schema-dependent-caches conn)
   (remhash conn clutch--schema-status-cache)
   (remhash conn clutch--schema-refresh-tickets)
@@ -659,7 +663,8 @@ With ASYNC-ONLY, skip backends that decline background loading."
               #'clutch-db-list-columns-async
               (lambda (columns)
                 (when-let* ((live-schema
-                             (gethash conn clutch--schema-cache)))
+                             (gethash conn clutch--schema-cache))
+                            ((not (eq (gethash table live-schema 'missing) 'missing))))
                   (puthash table columns live-schema)
                   (clutch--set-metadata-status
                    conn table :columns-status 'ready))))))
