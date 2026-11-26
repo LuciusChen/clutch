@@ -396,14 +396,14 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
 (ert-deftest clutch-test-foreign-keys-async-caches-and-refreshes-results ()
   "Foreign-key async callbacks should cache metadata and notify listeners."
   (clutch-test--with-isolated-metadata-caches
-   (let ((conn (make-clutch-test-conn)) callback notified)
+   (let ((conn (make-clutch-test-conn)) callback fail notified)
      (let ((clutch--table-metadata-updated-hook
             (list (lambda (conn table kind)
                     (should-not (clutch--metadata-status conn table :foreign-keys-status))
                     (setq notified (list conn table kind))))))
        (cl-letf (((symbol-function 'clutch-db-foreign-keys-async)
-                  (lambda (_conn _table cb &optional _errback)
-                    (setq callback cb)
+                  (lambda (_conn _table cb &optional errback)
+                    (setq callback cb fail errback)
                     t)))
          (clutch--ensure-foreign-keys-async conn "users")
          (run-at-time 0 nil callback '(("account_id" :ref-table "accounts" :ref-column "id")))
@@ -411,7 +411,11 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
                         '(("account_id" :ref-table "accounts"
                            :ref-column "id"))))
          (should (equal notified (list conn "users" 'foreign-keys)))
-         (should-not (clutch--metadata-status conn "users" :foreign-keys-status)))))))
+         (should-not (clutch--metadata-status conn "users" :foreign-keys-status))
+         (clutch--ensure-foreign-keys-async conn "broken")
+         (funcall fail "catalog timed out")
+         (should (equal (should-error (clutch--ensure-foreign-keys conn "broken"))
+                        '(clutch-db-error "catalog timed out"))))))))
 
 (ert-deftest clutch-test-foreign-keys-async-unsupported-caches-empty-result ()
   "Backends without async foreign-key metadata should not be retried on each render."

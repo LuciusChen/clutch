@@ -854,19 +854,19 @@ Returns a string or nil."
 
 (defun clutch--ensure-foreign-keys (conn table)
   "Return foreign-key metadata for TABLE on CONN, loading it now if needed.
-A failure signals `clutch-db-error' and leaves the cache as it was."
+Reuse a background lookup's result or error until metadata is refreshed."
   (when-let* (((not (clutch--foreign-keys-cached-p conn table)))
-              (status (clutch--metadata-status conn table :foreign-keys-status))
-              ((eq (plist-get status :state) 'loading)))
+              (status (clutch--metadata-status conn table :foreign-keys-status)))
     (if (when-let* ((cancel (plist-get status :cancel))) (funcall cancel))
         ;; An idle-only backend has not sent anything; the foreground owns it.
         (clutch--clear-metadata-status conn table :foreign-keys-status)
-      (with-timeout (clutch-read-idle-timeout-seconds
-                     (signal 'clutch-db-error '("Timed out waiting for foreign keys")))
-        (while (and (eq status (clutch--metadata-status conn table :foreign-keys-status))
-                    (not (clutch--foreign-keys-cached-p conn table)))
-          (unless (clutch-db-live-p conn) (signal 'clutch-db-error '("Connection closed")))
-          (accept-process-output nil 0.05)))
+      (when (eq (plist-get status :state) 'loading)
+        (with-timeout (clutch-read-idle-timeout-seconds
+                       (signal 'clutch-db-error '("Timed out waiting for foreign keys")))
+          (while (and (eq status (clutch--metadata-status conn table :foreign-keys-status))
+                      (not (clutch--foreign-keys-cached-p conn table)))
+            (unless (clutch-db-live-p conn) (signal 'clutch-db-error '("Connection closed")))
+            (accept-process-output nil 0.05))))
       (unless (clutch--foreign-keys-cached-p conn table)
         (signal 'clutch-db-error
                 (list (or (plist-get (clutch--metadata-status conn table :foreign-keys-status) :error)

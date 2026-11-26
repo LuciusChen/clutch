@@ -1930,7 +1930,7 @@ projection labels for editing and importing."
                     (clutch--ensure-column-details clutch-connection table)))
          (rows (and clone-index (clutch--result-display-rows)))
          (row (and clone-index (nth clone-index rows)))
-         (values (and row (clutch-result-insert--row-values-with-pending-edits row)))
+         (values (and row (clutch-result--row-values-with-pending-edits row)))
          (staged (if (and clone-index (not row))
                      (or (nth (- clone-index (length rows)) clutch--pending-inserts)
                          (user-error "No staged insert at this row"))
@@ -2021,11 +2021,11 @@ once the connection moved from where the result's query ran."
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
 
-(defun clutch-result-insert--row-values-with-pending-edits (row)
+(defun clutch-result--row-values-with-pending-edits (row)
   "Return ROW as a list, applying any staged edits in the current result buffer."
   (let* ((values (append row nil))
          (row-identity clutch--row-identity)
-         (identity-vec (and row-identity
+         (identity-vec (and clutch--pending-edits row-identity
                             (clutch-db-row-identity-values
                              row row-identity))))
     (when identity-vec

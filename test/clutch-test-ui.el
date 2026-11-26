@@ -2726,8 +2726,11 @@ Point left behind made the next cell command scroll back to it."
     (unwind-protect
         (progn
           (with-current-buffer result-buf
-            (setq-local clutch--result-column-defs
-                        '((:name "payload" :type-category json))
+            (setq-local clutch-connection (make-clutch-test-conn)
+                        clutch--result-source-table "users"
+                        clutch--result-columns '("payload")
+                        clutch--result-column-defs
+                        '((:name "payload" :type-category json :source-column nil))
                         clutch--fk-info nil
                         clutch--result-rows '(("payload"))))
           (with-temp-buffer
@@ -2743,7 +2746,9 @@ Point left behind made the next cell command scroll back to it."
                         clutch-record--expanded-fields nil)
             (let (followed
                   (render-count 0))
-              (cl-letf (((symbol-function 'clutch-record--render)
+              (cl-letf (((symbol-function 'clutch--ensure-foreign-keys)
+                         (lambda (&rest _) (ert-fail "Local field waited for foreign keys")))
+                        ((symbol-function 'clutch-record--render)
                          (lambda () (cl-incf render-count)))
                         ((symbol-function 'clutch-record--follow-column)
                          (lambda (source cidx ridx)
