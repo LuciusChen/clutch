@@ -1119,6 +1119,30 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (user-error "No staged change at point"))))))))
 
 ;;;###autoload
+(defun clutch-result-edit-cell ()
+  "Edit or re-edit the value at point in a dedicated buffer."
+  (interactive)
+  (let* ((return-buffer (current-buffer))
+         (result-buffer
+          (if (derived-mode-p 'clutch-record-mode)
+              (or (and (buffer-live-p clutch-record--result-buffer)
+                       clutch-record--result-buffer)
+                  (user-error "Result buffer no longer exists"))
+            (current-buffer))))
+    (with-current-buffer result-buffer
+      (clutch-edit--require-sql-staged-mutation "Edit / re-edit"))
+    (if (eq result-buffer return-buffer)
+        (clutch-result-edit--open-cell
+         (or (clutch--cell-at-point) (user-error "No cell at point")) return-buffer)
+      (let* ((cell (clutch-record--editable-cell-at-point))
+             (opened (with-current-buffer result-buffer
+                       (clutch-result-edit--open-cell cell return-buffer
+                                                      #'clutch--result-source-column-names))))
+        (when (and (buffer-live-p opened) (not (eq (current-buffer) opened)))
+          (pop-to-buffer opened))
+        opened))))
+
+;;;###autoload
 (defun clutch-result-discard-pending-at-point ()
   "Discard the staged change at point."
   (interactive)
