@@ -808,6 +808,7 @@ the selected window."
             ('null nil)
             ('default clutch--cell-default-placeholder)
             (_ (cdr new-state))))
+         (changed (not (equal new-state clutch-result-edit--initial-value-state)))
          (cb clutch-result--edit-callback)
          (return-buf clutch-result-edit--return-buffer)
          (result-buf clutch-result--edit-result-buffer)
@@ -830,13 +831,11 @@ the selected window."
        clutch-result-edit--column-def
        clutch-result-edit--column-detail))
     (setq-local clutch-result-edit--error-message nil)
-    (when (and cb
-               (not (equal new-state
-                           clutch-result-edit--initial-value-state)))
+    (when (and cb changed)
       (funcall cb new-value))
     (clutch-result-edit--close-buffer kill-buffer-directly)
     ;; `quit-window' restores its saved point, so refresh the Record afterward.
-    (when (and target-cell (buffer-live-p result-buf))
+    (when (and changed target-cell (buffer-live-p result-buf))
       (with-current-buffer result-buf
         (let ((record (unless (eq return-buf result-buf) return-buf)))
           (clutch-result--refresh-record
@@ -1056,6 +1055,29 @@ FOR-DISPLAY so each can show its own draft; an action reports the conflict."
                             (nth (car first) clutch--result-columns)
                             (nth (car conflict) clutch--result-columns))
              unless conflict collect (cons name first))))
+
+(defun clutch-result--row-edits (identity)
+  "Return the staged (INDEX . VALUE) edits for IDENTITY."
+  (cl-loop for ((id . idx) . val) in clutch--pending-edits
+           when (equal id identity) collect (cons idx val)))
+
+(defun clutch-result--field-edits (row columns &optional required)
+  "Return staged edits in result order for ROW, shared by aliases.
+COLUMNS lists the source names in result order.
+REQUIRED lists the source names used by an action as alist keys.  Edits
+to those columns must agree.  For display, aliases keep conflicting drafts."
+  (when-let* (clutch--pending-edits clutch--row-identity
+              (id (clutch-db-row-identity-values row clutch--row-identity))
+              (edits (clutch-result--row-edits id)))
+    (let* ((names (or required (mapcar #'list columns)))
+           (shared (clutch-result--source-edits
+                    (clutch--result-source-key) id edits
+                    (lambda (idx)
+                      (car (clutch-db-assoc-column clutch-connection (nth idx columns) names)))
+                    (not required))))
+      (cl-loop for name in columns for idx from 0
+               collect (or (assq idx edits)
+                           (cdr (clutch-db-assoc-column clutch-connection name shared)))))))
 
 (defun clutch-result--build-update-stmt
     (table identity-vec edits row-identity columns)
@@ -1941,12 +1963,11 @@ projection labels for editing and importing."
                     (clutch--ensure-column-details clutch-connection table)))
          (rows (and clone-index (clutch--result-display-rows)))
          (row (and clone-index (nth clone-index rows)))
-         (values (and row (clutch-result--row-values-with-pending-edits row)))
          (staged (if (and clone-index (not row))
                      (or (nth (- clone-index (length rows)) clutch--pending-inserts)
                          (user-error "No staged insert at this row"))
                    fields))
-         names sources)
+         labels columns)
     (when details
       (clutch-result--bind-source-columns clutch--result-column-defs
                                          (clutch-result--insert-target clutch-connection table clutch--last-query)
@@ -1957,25 +1978,34 @@ projection labels for editing and importing."
              for source = (plist-get def :source-column)
              for detail = (and source (clutch-db-source-column-detail source details "insert"))
              for name = (or (plist-get detail :name) source)
-             when (and name (not (member name sources)))
-             collect
-             (let ((cell (and (or (not clone-index)
-                                   (clutch-result-insert--clone-copy-column-p detail idx))
-                               (if values
-                                   (let ((v (nth idx values)))
-                                     (unless (eq v clutch--cell-default-placeholder)
-                                       (cons name (and v (clutch-result--editable-field-string
-                                                         v def detail)))))
-                                 (assoc name staged)))))
-               (when (member label names)
-                 (user-error "Cannot insert: result label %s names two source columns" label))
-               (push label names)
-               (push name sources)
-               (list :name label :source-column name :column-def def :detail detail
-                     :value (or (cdr cell) "") :provided (and cell t)
-                     :special-value (and cell (null (cdr cell)) 'null)
-                     :special-overlay nil :value-marker nil :end-marker nil
-                     :error-overlay nil :error-message nil)))))
+             when (and name (not (assoc name columns)))
+             do (when (member label labels)
+                  (user-error "Cannot insert: result label %s names two source columns" label))
+                (push label labels)
+                (let ((copy-index (and clone-index
+                                       (clutch-result-insert--clone-copy-column-p detail idx)
+                                       idx)))
+                  (push (list name copy-index label def detail) columns)))
+    (let ((edits (when-let* (row clutch--pending-edits (copied (seq-filter #'cadr columns)))
+                   (clutch-result--field-edits
+                    row (mapcar (lambda (def) (plist-get def :source-column))
+                                clutch--result-column-defs)
+                    copied))))
+      (cl-loop for (name idx label def detail) in (nreverse columns)
+               for cell = (cond
+                           ((and clone-index (null idx)) nil)
+                           (row
+                            (let* ((edit (nth idx edits))
+                                   (v (if edit (cdr edit) (nth idx row))))
+                              (unless (eq v clutch--cell-default-placeholder)
+                                (cons name (and v (clutch-result--editable-field-string
+                                                  v def detail))))))
+                           (t (assoc name staged)))
+               collect (list :name label :source-column name :column-def def :detail detail
+                             :value (or (cdr cell) "") :provided (and cell t)
+                             :special-value (and cell (null (cdr cell)) 'null)
+                             :special-overlay nil :value-marker nil :end-marker nil
+                             :error-overlay nil :error-message nil)))))
 
 (defun clutch-result-insert--open-buffer
     (table result-buf &optional fields reedit clone-index)
@@ -2031,20 +2061,6 @@ once the connection moved from where the result's query ran."
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
-
-(defun clutch-result--row-edits (identity)
-  "Return the staged (INDEX . VALUE) edits for IDENTITY."
-  (cl-loop for ((id . idx) . val) in clutch--pending-edits
-           when (equal id identity) collect (cons idx val)))
-
-(defun clutch-result--row-values-with-pending-edits (row)
-  "Return ROW as a list, applying any staged edits in the current result buffer."
-  (let ((values (append row nil)))
-    (when-let* (clutch--pending-edits clutch--row-identity
-                (id (clutch-db-row-identity-values row clutch--row-identity)))
-      (pcase-dolist (`(,idx . ,val) (clutch-result--row-edits id))
-        (setcar (nthcdr idx values) val)))
-    values))
 
 ;;;###autoload
 (defun clutch-clone-row-to-insert ()

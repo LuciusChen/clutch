@@ -1095,16 +1095,18 @@ If the result has columns, shows a table; otherwise shows DML summary."
              (identity-vec (when row-identity
                              (clutch-db-row-identity-values
                               row row-identity)))
-             (edit-key (and identity-vec cidx (cons identity-vec cidx)))
-             (was-edit (and edit-key
-                            (cl-assoc edit-key clutch--pending-edits :test #'equal)))
+             (edit-index (if (and record cidx clutch--pending-edits)
+                             (car (nth cidx (clutch-result--field-edits
+                                             row (clutch--result-source-column-names))))
+                           cidx))
+             (edit-key (and edit-index identity-vec (cons identity-vec edit-index)))
+             (was-edit (assoc edit-key clutch--pending-edits))
              (was-delete (and identity-vec
                               (cl-find identity-vec clutch--pending-deletes
                                        :test #'equal))))
         (cond
          (was-edit
-          (setq clutch--pending-edits
-                (cl-remove edit-key clutch--pending-edits :test #'equal :key #'car))
+          (setq clutch--pending-edits (delq was-edit clutch--pending-edits))
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
@@ -4500,25 +4502,6 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--field-edits (row &optional columns key)
-  "Return staged edits in result order for ROW, shared by aliases.
-COLUMNS lists the source names; use the cached result mapping by default.
-For navigation, KEY lists the relation's column pairs: conflicting edits
-to its columns must be resolved before following it."
-  (when-let* (clutch--pending-edits clutch--row-identity
-              (id (clutch-db-row-identity-values row clutch--row-identity))
-              (edits (clutch-result--row-edits id)))
-    (let* ((columns (or columns (clutch--result-source-column-names)))
-           (names (or key (mapcar #'list columns)))
-           (shared (clutch-result--source-edits
-                    (clutch--result-source-key) id edits
-                    (lambda (idx)
-                      (car (clutch-db-assoc-column clutch-connection (nth idx columns) names)))
-                    (not key))))
-      (cl-loop for name in columns for idx from 0
-               collect (or (assq idx edits)
-                           (cdr (clutch-db-assoc-column clutch-connection name shared)))))))
-
 (defun clutch-record--render-field (name cidx val col-def edited ridx
                                         fk-info expanded-fields max-name-w)
   "Insert one field line for column NAME at CIDX of row RIDX.
@@ -4590,7 +4573,9 @@ supply its links, expansion state and label width."
                 (list #'clutch--header-with-disconnect-badge
                       'clutch-record--header-base)))
     (let* ((row (nth ridx rows))
-           (edits (with-current-buffer result-buf (clutch-record--field-edits row)))
+           (edits (with-current-buffer result-buf
+                    (when clutch--pending-edits
+                      (clutch-result--field-edits row (clutch--result-source-column-names)))))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (setq clutch-record--row row)
       (cl-loop for name in col-names
@@ -4612,7 +4597,7 @@ table retains its catalog and schema qualification."
   (let* ((conn clutch-connection)
          (row (nth ridx (clutch--result-display-rows)))
          (pairs (plist-get relation :pairs))
-         (edits (clutch-record--field-edits row columns pairs))
+         (edits (clutch-result--field-edits row columns pairs))
          (values (cl-loop for name in columns for value in row
                           for edit = (pop edits)
                           when name collect (cons name (if edit (cdr edit) value)))))

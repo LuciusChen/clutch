@@ -2568,33 +2568,27 @@ Point left behind made the next cell command scroll back to it."
             (should-not clutch--pending-edits)))))))
 
 (ert-deftest clutch-test-record-discard-pending-edit-at-field ()
-  "Record buffers should discard the staged edit for the field at point."
-  (clutch-test--with-result-state-buffer result-buf
-      (:columns '("id" "name")
-       :column-defs '((:name "id" :type-category numeric)
-                      (:name "name" :type-category text))
-       :rows '((1 "alice"))
-       :row-identity (clutch-test--primary-row-identity
-                      "users" '("id") '(0))
-       :pending-edits '((([1] . 1) . "ann")))
-    (with-temp-buffer
-      (clutch-record-mode)
-      (setq-local clutch-record--result-buffer result-buf
-                  clutch-record--row-idx 0
-                  clutch-record--expanded-fields nil)
-      (clutch-record--render)
-      (should (string-match-p "name\\s-*:\\s-*ann" (buffer-string)))
-      (goto-char (point-min))
-      (search-forward "name")
-      (goto-char (match-beginning 0))
-      (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
-                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result-discard-pending-at-point))
-      (should (string-match-p "name\\s-*:\\s-*alice" (buffer-string)))
-      (should (eq (get-text-property (point) 'clutch-col-idx) 1)))
-    (with-current-buffer result-buf
-      (should-not clutch--pending-edits))))
+  "Discard a shared edit through its other alias, keeping a staged deletion."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO users VALUES (1, NULL)")
+      "SELECT id, name AS a, name AS b FROM users"
+    (clutch--goto-cell 0 2)
+    (with-current-buffer (clutch-result-edit-cell)
+      (insert "ann")
+      (clutch-result-edit-finish))
+    (clutch-result-delete-rows)
+    (clutch-result-open-record)
+    (unwind-protect
+        (progn
+          (forward-line 1)
+          (clutch-result-discard-pending-at-point)
+          (should (eq (get-text-property (point) 'clutch-col-idx) 1))
+          (should-not (get-text-property (point) 'clutch-full-value))
+          (with-current-buffer result
+            (should-not clutch--pending-edits)
+            (should (equal clutch--pending-deletes '([1])))))
+      (kill-buffer (current-buffer)))))
 
 (ert-deftest clutch-test-record-open-renders-visible-row ()
   "Opening record view should render the visible row at point."
