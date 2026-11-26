@@ -22,7 +22,7 @@
 
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
 
-- Clutch pins JDBC agent 0.2.33. SQL Server can look up a result column's source while a query is running. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
+- Clutch pins JDBC agent 0.2.34. If SQL Server disconnects after executing a statement, Clutch preserves the returned result or original SQL error and marks the connection closed. SQL Server can look up a result column's source while a query is running. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
 
 - Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
 
