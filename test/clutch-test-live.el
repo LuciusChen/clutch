@@ -2315,18 +2315,20 @@ throughout."
                             (clutch--goto-cell 0 0)
                             (clutch-result-column-info)
                             (list (plist-get (car clutch--result-column-details) :type)
-                                  (plist-get (cdr (assq 0 clutch--fk-info)) :ref-schema)))))
+                                  (plist-get (cdr (assq 0 clutch--fk-info)) :schema)))))
                 (clutch-test--with-live-result-buffer result-name
                   (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s2))
                                  (list "integer" s2)))
                   (clutch-toggle-auto-commit)
-                  (clutch-test--run-in-console "BEGIN")
+                  (clutch-test--run-in-console "BEGIN" (format "SET LOCAL search_path TO %s" s2))
                   (should (equal (describe-after
                                   (format "ALTER TABLE t DROP CONSTRAINT t_memo_fkey, ADD FOREIGN KEY (memo) REFERENCES %s.t" s3))
                                  (list "integer" s3)))
                   (with-current-buffer result-name (clutch-result-open-record))
+                  (with-current-buffer "*clutch-record*" (clutch-rollback))
+                  (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) s2)))
+                    (call-interactively #'clutch-switch-schema))
                   (with-current-buffer "*clutch-record*"
-                    (clutch-rollback)
                     (should-not (string-search (format "→ %s.t.id" s3) (buffer-string)))
                     (clutch-test--with-live-result-buffer (concat result-name "-parent")
                       (call-interactively #'clutch-record-toggle-expand)
@@ -2339,7 +2341,7 @@ throughout."
                     (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s3))
                                    '("date" nil))))
                   (with-current-buffer result-name
-                    (should (equal (plist-get (cdr (assq 0 clutch--fk-info)) :ref-schema) s2))))))
+                    (should (equal (plist-get (cdr (assq 0 clutch--fk-info)) :schema) s2))))))
             (dolist (action '(console submit edit copy))
               (clutch-test--with-live-console params
                 (clutch-toggle-auto-commit)

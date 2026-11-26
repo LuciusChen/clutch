@@ -299,6 +299,17 @@ needing a database lookup, leaving nil at other positions."
                            (and (not (plist-member def :source-column))
                                 (not (cdr matches)) (cdar matches)))))))
 
+(defun clutch--foreign-key-column-info (conn table col-names)
+  "Index CONN's cached TABLE relations by the result fields in COL-NAMES."
+  (when-let* ((keys (clutch--cached-foreign-keys conn table)))
+    (let ((by-column
+           (cl-loop for relation in (clutch-er--relations keys nil)
+                    append (cl-loop for (column . target) in (plist-get relation :pairs)
+                                    collect (cons column (cons :ref-column (cons target relation)))))))
+      (cl-loop for name in col-names for idx from 0
+               for link = (cdr (clutch-db-assoc-column conn name by-column))
+               when link collect (cons idx link)))))
+
 (defun clutch--update-fk-info (conn table refresh)
   "Show CONN's cached foreign keys for TABLE, redrawing the grid if REFRESH."
   (let ((links (clutch--foreign-key-column-info conn table (clutch--result-source-column-names))))
@@ -4514,7 +4525,7 @@ the label column width."
                            cell-props)))
     (when fk
       (let ((target (string-join
-                     (delq nil (list (plist-get fk :ref-schema) (plist-get fk :ref-table)
+                     (delq nil (list (plist-get fk :schema) (plist-get fk :table)
                                      (plist-get fk :ref-column)))
                      ".")))
         (insert (apply #'propertize (concat "  → " target) 'face 'shadow cell-props))))
@@ -4609,12 +4620,14 @@ there are several."
     (clutch--refuse-while-running clutch-connection)
     (clutch-result--refuse-if-moved)
     (let* ((table (clutch--result-source-key))
-           (outgoing (clutch-er-outgoing-relations
-                      clutch-connection clutch--connection-params
-                      (list :name (or clutch--result-source-table
-                                      (user-error "This result does not show one table"))
-                            :type "TABLE" :schema clutch--result-source-schema
-                            :catalog clutch--result-source-catalog))))
+           (displayed (and (not ask) (cdr (assq cidx clutch--fk-info))))
+           (outgoing (if displayed (list displayed)
+                       (clutch-er-outgoing-relations
+                        clutch-connection clutch--connection-params
+                        (list :name (or clutch--result-source-table
+                                        (user-error "This result does not show one table"))
+                              :type "TABLE" :schema clutch--result-source-schema
+                              :catalog clutch--result-source-catalog)))))
       (when (and outgoing (clutch--result-unbound-star))
         (clutch--ensure-column-details clutch-connection table))
       (when-let* (outgoing (names (delete-dups (delq nil (clutch--result-source-column-names t)))))
@@ -4705,8 +4718,8 @@ result's table; see `clutch-er-add-relation'."
     (with-current-buffer clutch-record--result-buffer
       (when-let* ((table (clutch--result-source-key))
                   ((clutch--result-metadata-current-p))
-                  ((eq (plist-get (clutch--metadata-status clutch-connection table :foreign-keys-status)
-                                  :state) 'loading)))
+                  ((not (clutch--foreign-keys-cached-p clutch-connection table)))
+                  ((clutch-db-live-p clutch-connection)))
         (clutch--ensure-connection)
         (clutch--ensure-foreign-keys clutch-connection table))))
   (if-let* ((context (clutch-record--field-action-context)))

@@ -415,14 +415,6 @@ schema switching, and any statement that returns no result set."
   "Return non-nil when TABLE has cached foreign-key metadata on CONN."
   (plist-member (clutch--table-metadata conn table) :foreign-keys))
 
-(defun clutch--foreign-key-column-info (conn table col-names)
-  "Return cached foreign-key metadata indexed by COL-NAMES for CONN/TABLE."
-  (when-let* ((keys (clutch--cached-foreign-keys conn table)))
-    (cl-loop for name in col-names
-             for idx from 0
-             for ref = (cdr (clutch-db-assoc-column conn name keys))
-             when ref collect (cons idx ref))))
-
 (defun clutch--cache-table-entry-comments (conn entries)
   "Prime CONN's table-comment cache from ENTRIES with explicit comments."
   (when conn
@@ -562,13 +554,15 @@ Only loads table names (fast).  Column info is loaded lazily."
        (clutch--remember-schema-refresh-error conn (clutch-db--error-message err))
        nil))))
 
-(defun clutch--prime-schema-cache (conn)
-  "Kick off the appropriate schema refresh strategy for CONN."
-  (if (clutch-db-eager-schema-refresh-p conn)
-      (clutch--refresh-schema-cache conn)
-    (unless (clutch--refresh-schema-cache-async
-             conn clutch-schema-refresh-idle-delay-seconds)
-      (clutch--refresh-schema-cache conn))))
+(defun clutch--prime-schema-cache (conn &optional immediate)
+  "Prime CONN's schema and rebind open results in its current scope.
+IMMEDIATE starts background discovery without the initial idle delay."
+  (prog1 (if (clutch-db-eager-schema-refresh-p conn)
+             (clutch--refresh-schema-cache conn)
+           (unless (clutch--refresh-schema-cache-async
+                    conn (unless immediate clutch-schema-refresh-idle-delay-seconds))
+             (clutch--refresh-schema-cache conn)))
+    (run-hook-with-args 'clutch--table-metadata-updated-hook conn nil 'invalidated)))
 
 (defun clutch--ensure-columns (conn schema table)
   "Ensure column info for TABLE is loaded in SCHEMA for CONN.
@@ -861,6 +855,22 @@ Returns a string or nil."
 (defun clutch--ensure-foreign-keys (conn table)
   "Return foreign-key metadata for TABLE on CONN, loading it now if needed.
 A failure signals `clutch-db-error' and leaves the cache as it was."
+  (when-let* (((not (clutch--foreign-keys-cached-p conn table)))
+              (status (clutch--metadata-status conn table :foreign-keys-status))
+              ((eq (plist-get status :state) 'loading)))
+    (if (when-let* ((cancel (plist-get status :cancel))) (funcall cancel))
+        ;; An idle-only backend has not sent anything; the foreground owns it.
+        (clutch--clear-metadata-status conn table :foreign-keys-status)
+      (with-timeout (clutch-read-idle-timeout-seconds
+                     (signal 'clutch-db-error '("Timed out waiting for foreign keys")))
+        (while (and (eq status (clutch--metadata-status conn table :foreign-keys-status))
+                    (not (clutch--foreign-keys-cached-p conn table)))
+          (unless (clutch-db-live-p conn) (signal 'clutch-db-error '("Connection closed")))
+          (accept-process-output nil 0.05)))
+      (unless (clutch--foreign-keys-cached-p conn table)
+        (signal 'clutch-db-error
+                (list (or (plist-get (clutch--metadata-status conn table :foreign-keys-status) :error)
+                          "Foreign-key metadata was invalidated"))))))
   (if (clutch--foreign-keys-cached-p conn table)
       (clutch--cached-foreign-keys conn table)
     (let ((fks (apply #'clutch-db-foreign-keys
@@ -893,9 +903,13 @@ A failure signals `clutch-db-error' and leaves the cache as it was."
                  conn "foreign-key metadata"
                  `(clutch-db-error ,message)
                  `(:table ,(clutch--table-key-label table)))))))
-        (unless started
+        (cond
+         ((functionp started)
+          (when-let* ((status (clutch--metadata-status conn table :foreign-keys-status)))
+            (plist-put status :cancel started)))
+         ((not started)
           (clutch--set-table-metadata conn table :foreign-keys nil)
-          (clutch--clear-metadata-status conn table :foreign-keys-status)))
+          (clutch--clear-metadata-status conn table :foreign-keys-status))))
       t)))
 
 (defun clutch--format-help-doc (doc)

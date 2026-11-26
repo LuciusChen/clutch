@@ -2119,9 +2119,8 @@ Filtering the category listing ran a schema-wide query per describe."
                  (lambda (_secs _repeat fn &rest _args)
                    (setq timer-fn fn)
                    'fake-timer)))
-        (should (eq (clutch-db-foreign-keys-async
-                     conn "users" (lambda (value) (setq result value)))
-                    'fake-timer))
+        (should (clutch-db-foreign-keys-async
+                 conn "users" (lambda (value) (setq result value))))
         (funcall timer-fn)
         (should (equal result
                        '(("account_id" :ref-table "accounts"
@@ -2475,27 +2474,25 @@ order, and a table is found as referenced however its name is cased."
                        (should (eq category 'indexes))
                        '((:name "users_pkey" :type "INDEX")))))
             (should
-             (eq
-              (pcase op
-                ('refresh-schema
-                 (clutch-db-refresh-schema-async
-                  conn (lambda (value) (setq callback-result value))))
-                ('list-columns
-                 (clutch-db-list-columns-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('column-details
-                 (clutch-db-column-details-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('table-comment
-                 (clutch-db-table-comment-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('foreign-keys
-                 (clutch-db-foreign-keys-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('list-objects
-                 (clutch-db-list-objects-async
-                  conn 'indexes (lambda (value) (setq callback-result value)))))
-              'fake-timer))
+             (pcase op
+               ('refresh-schema
+                (clutch-db-refresh-schema-async
+                 conn (lambda (value) (setq callback-result value))))
+               ('list-columns
+                (clutch-db-list-columns-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('column-details
+                (clutch-db-column-details-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('table-comment
+                (clutch-db-table-comment-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('foreign-keys
+                (clutch-db-foreign-keys-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('list-objects
+                (clutch-db-list-objects-async
+                 conn 'indexes (lambda (value) (setq callback-result value))))))
             (should (equal scheduled '(0 nil)))
             (should (equal callback-result expected))))))))
 
@@ -2563,15 +2560,9 @@ order, and a table is found as referenced however its name is cased."
                      (should (equal table "users"))
                      (cl-incf query-count)
                      '("id" "name"))))
-          (should (eq (clutch-db--schedule-idle-metadata-call
-                       conn
-                       (lambda (columns)
-                         (setq callback-result columns))
-                       nil
-                       #'clutch-db-list-columns
-                       nil
-                       "users")
-                      'fake-timer))
+          (should (clutch-db--schedule-idle-metadata-call
+                   conn (lambda (columns) (setq callback-result columns))
+                   nil #'clutch-db-list-columns nil "users"))
           (should (= (length timers) 1))
           (funcall (pop timers))
           (should-not callback-result)
