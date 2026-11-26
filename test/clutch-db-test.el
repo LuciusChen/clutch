@@ -2000,7 +2000,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
                (lambda (_context _table) nil))
               ((symbol-function 'clutch-db-mysql--unique-not-null-identities)
-               (lambda (context table)
+               (lambda (context table &optional _schema)
                  (should (eq context conn))
                  (should (equal table "demo"))
                  '((:kind unique-key :name "uq_code" :columns ("code"))))))
@@ -2039,7 +2039,7 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
                  (should (equal table "demo"))
                  '("id")))
               ((symbol-function 'clutch-db-mysql--unique-not-null-identities)
-               (lambda (_context _table)
+               (lambda (_context _table &optional _schema)
                  (setq unique-scan-called t)
                  '((:kind unique-key :name "uq_code" :columns ("code"))))))
       (should (equal (clutch-db-row-identity-candidates conn "demo")
@@ -11097,20 +11097,31 @@ that file, or in a new, empty in-memory database, without a word."
       (should (equal closed-cursors '(55))))))
 
 (ert-deftest clutch-db-test-jdbc-limit-offset-and-type-categories ()
-  "Generic JDBC should use LIMIT/OFFSET for MySQL/MariaDB/SQLite/PG and classify types accurately."
+  "Generic JDBC should use LIMIT/OFFSET with dialect quoting and classify types accurately."
   (dolist (url '("jdbc:mysql://db/app"
-                 "jdbc:mariadb://db/app"
-                 "jdbc:sqlite:/tmp/app.db"
+                 "jdbc:mariadb://db/app"))
+    (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
+      (should (string-match-p
+               "ORDER BY `id` DESC LIMIT 10 OFFSET 20\\'"
+               (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))
+      (should (equal (clutch-db-escape-literal conn "a\\b") "'a\\\\b'"))))
+  (dolist (url '("jdbc:sqlite:/tmp/app.db"
                  "jdbc:postgresql://db/app"))
     (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
-      (should (string-match-p "LIMIT 10 OFFSET 20\\'"
-                              (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10)))))
+      (should (string-match-p
+               "ORDER BY \"id\" DESC LIMIT 10 OFFSET 20\\'"
+               (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))))
   (should (eq (clutch-jdbc--type-category "BYTEA") 'blob))
   (should (eq (clutch-jdbc--type-category "INTERVAL") 'text))
+  (should (eq (clutch-jdbc--type-category "INTERVAL YEAR TO MONTH") 'text))
   (should (eq (clutch-jdbc--type-category "POINT") 'text))
   (should (eq (clutch-jdbc--type-category "TIMETZ") 'time))
   (should (eq (clutch-jdbc--type-category "TIME WITH TIME ZONE") 'time))
   (should (eq (clutch-jdbc--type-category "INT4") 'numeric))
+  (should (eq (clutch-jdbc--type-category "HUGEINT") 'numeric))
+  (should (eq (clutch-jdbc--type-category "UHUGEINT") 'numeric))
+  (should (eq (clutch-jdbc--type-category "UTINYINT") 'numeric))
+  (should (eq (clutch-jdbc--type-category "UBIGINT") 'numeric))
   (should (eq (clutch-jdbc--type-category "BINARY_DOUBLE") 'numeric)))
 
 (ert-deftest clutch-db-test-jdbc-object-definition-and-details-honor-entry-schema ()
@@ -11280,6 +11291,7 @@ that file, or in a new, empty in-memory database, without a word."
       (should (string-match-p "n\\.nspname = 'other'" (nth 0 queries)))
       (should (string-match-p "idx\\.relkind IN ('i', 'I')" (nth 1 queries)))
       (should (string-match-p "n\\.nspname = 'other'" (nth 1 queries)))
+      (should (string-match-p "CREATE OR REPLACE VIEW %I\\.%I AS" (nth 2 queries)))
       (should (string-match-p "schemaname = 'other'" (nth 2 queries)))
       (should (string-match-p "schemaname = 'other'" (nth 3 queries))))))
 

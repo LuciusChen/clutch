@@ -1347,7 +1347,7 @@ WHERE idx.relkind IN ('i', 'I')
          (caar (clutch-db-pg--metadata-rows
                 (clutch-db-pg--exec
                  conn
-                 (format "SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(viewname) || E' AS\n' ||
+                 (format "SELECT format('CREATE OR REPLACE VIEW %%I.%%I AS', schemaname, viewname) || E'\n' ||
        pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(format('%%I.%%I', schemaname, viewname)), true)
 FROM pg_views
 WHERE schemaname = %s

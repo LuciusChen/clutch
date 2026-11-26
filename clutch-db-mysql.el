@@ -1118,9 +1118,7 @@ ORDER BY ORDINAL_POSITION"
                                                  &optional schema _catalog)
   "Return row identity candidates for TABLE in optional SCHEMA on MySQL CONN."
   (or (cl-call-next-method)
-      (if schema
-          (clutch-db-mysql--unique-not-null-identities conn table schema)
-        (clutch-db-mysql--unique-not-null-identities conn table))))
+      (clutch-db-mysql--unique-not-null-identities conn table schema)))
 
 (cl-defmethod clutch-db-plan-sql ((conn mysql-conn) sql analyze)
   "Return SQL asking MySQL CONN for the plan of SQL.

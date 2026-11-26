@@ -1218,16 +1218,20 @@ as is, or 0, meaning none, when CONN has no positive limit."
   "Return non-nil when CONN is a DuckDB JDBC connection."
   (clutch-jdbc--url-prefix-p conn "jdbc:duckdb:"))
 
+(defun clutch-jdbc--mysql-family-conn-p (conn)
+  "Return non-nil for a MySQL or MariaDB JDBC CONN."
+  (or (clutch-jdbc--url-prefix-p conn "jdbc:mysql:")
+      (clutch-jdbc--url-prefix-p conn "jdbc:mariadb:")))
+
 (defun clutch-jdbc--limit-offset-conn-p (conn)
   "Return non-nil when JDBC CONN should use LIMIT/OFFSET pagination."
   (let ((driver (clutch-jdbc--conn-driver conn)))
     (or (memq driver '(redshift clickhouse))
         (clutch-jdbc--mongodb-conn-p conn)
         (clutch-jdbc--duckdb-conn-p conn)
+        (clutch-jdbc--mysql-family-conn-p conn)
         (clutch-jdbc--url-prefix-p conn "jdbc:redshift:")
         (clutch-jdbc--url-prefix-p conn "jdbc:clickhouse:")
-        (clutch-jdbc--url-prefix-p conn "jdbc:mysql:")
-        (clutch-jdbc--url-prefix-p conn "jdbc:mariadb:")
         (clutch-jdbc--url-prefix-p conn "jdbc:sqlite:")
         (clutch-jdbc--url-prefix-p conn "jdbc:postgresql:"))))
 
@@ -1540,10 +1544,8 @@ The agent returns cursor-style :rows batches."
   "Map JDBC-TYPE-NAME to a `clutch-db' type-category symbol."
   (let ((t-upper (upcase (or jdbc-type-name ""))))
     (cond
-     ((string-match-p
-       "\\(?:\\`\\|[^A-Z]\\)\\(?:U?INT\\(?:EGER\\|[0-9]*\\)\\|SMALLINT\\|BIGINT\\|TINYINT\\|MEDIUMINT\\|NUMBER\\|NUMERIC\\|DECIMAL\\|FLOAT\\|DOUBLE\\|REAL\\)\\(?:\\'\\|[^A-Z]\\)"
-       t-upper)
-      'numeric)
+     ((string-match-p "\\`INTERVAL\\b\\|POINT\\b" t-upper)      'text)
+     ((string-match-p "INT\\|NUMBER\\|NUMERIC\\|DECIMAL\\|FLOAT\\|DOUBLE\\|REAL" t-upper) 'numeric)
      ((string-match-p "BOOL" t-upper)                           'text)
      ((string-match-p "JSON\\|DOCUMENT\\|ARRAY" t-upper)        'json)
      ((string-match-p "BLOB\\|BINARY\\|VARBINARY\\|BYTEA\\|RAW\\|IMAGE\\|BINDATA" t-upper) 'blob)
@@ -2043,10 +2045,16 @@ Other databases use SQL:2011 OFFSET/FETCH (Oracle 12c+, SQL Server
 ;;;; SQL dialect methods
 
 (cl-defmethod clutch-db-escape-identifier ((conn clutch-jdbc-conn) name)
-  "Escape NAME as a SQL identifier for CONN using double quotes (ANSI standard)."
-  (if (clutch-jdbc--clickhouse-conn-p conn)
-      (clutch-jdbc--clickhouse-escape-identifier name)
-    (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name))))
+  "Escape NAME as a SQL identifier for CONN.
+MySQL and MariaDB JDBC URLs use backticks; ClickHouse uses its own rules;
+other JDBC databases use ANSI double quotes."
+  (cond
+   ((clutch-jdbc--clickhouse-conn-p conn)
+    (clutch-jdbc--clickhouse-escape-identifier name))
+   ((clutch-jdbc--mysql-family-conn-p conn)
+    (format "`%s`" (replace-regexp-in-string "`" "``" name)))
+   (t
+    (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" name)))))
 
 (cl-defmethod clutch-db-identifier-case ((conn clutch-jdbc-conn))
   "Return how JDBC CONN's database folds unquoted names, or nil.
@@ -2174,7 +2182,8 @@ since doubling the quote alone would leave a trailing backslash escaping
 the closing quote there, while elsewhere doubling it would store a
 character the user never typed."
   (let ((escaped (replace-regexp-in-string "'" "''" value)))
-    (when (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
+    (when (or (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
+              (clutch-jdbc--mysql-family-conn-p conn))
       (setq escaped (replace-regexp-in-string "\\\\" "\\\\\\\\" escaped)))
     (format "'%s'" escaped)))
 

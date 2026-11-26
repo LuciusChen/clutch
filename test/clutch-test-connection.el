@@ -4262,6 +4262,23 @@ them in place."
                  (:backend jdbc
                   :diag (:category "cancel"
                          :sql-state "70100"
-                         :vendor-code 1317))))))))
+                         :vendor-code 1317)))))
+      ;; MySQL Connector/J Statement.cancel() throws MySQLStatementCancelledException
+      ;; with nil SQLState and vendor code 0.
+      (should (clutch--confirmed-query-cancellation-p
+               conn
+               '(clutch-db-error "Statement cancelled due to client request"
+                 (:backend jdbc
+                  :diag (:category "cancel"
+                         :exception-class "com.mysql.cj.jdbc.exceptions.MySQLStatementCancelledException"
+                         :raw-message "Statement cancelled due to client request")))))
+      ;; MySQL Connector/J timeout must NOT confirm user cancellation.
+      (should-not (clutch--confirmed-query-cancellation-p
+                   conn
+                   '(clutch-db-error "Statement cancelled due to timeout or client request"
+                     (:backend jdbc
+                      :diag (:category "cancel"
+                             :exception-class "com.mysql.cj.jdbc.exceptions.MySQLTimeoutException"
+                             :raw-message "Statement cancelled due to timeout or client request"))))))))
 
 ;;; clutch-test-connection.el ends here
