@@ -319,15 +319,18 @@ needing a database lookup, leaving nil at other positions."
         (clutch--refresh-display)
         (clutch-result--refresh-record (clutch--result-display-rows))))))
 
-(defun clutch--resolve-result-column-names (conn table names callback &optional sync)
+(cl-defun clutch--resolve-result-column-names (conn table names callback &optional sync)
   "Resolve NAMES for this result, sharing outstanding lookups for TABLE on CONN.
-Call CALLBACK in the requesting result if it is still current.  With SYNC,
-wait for an outstanding lookup or use the primary connection."
+Skip empty and repeated names.  Call CALLBACK if this result is still current.
+With SYNC, wait for an outstanding lookup or use the primary connection."
+  (unless (setq names (delq nil names))
+    (cl-return-from clutch--resolve-result-column-names nil))
   (let* ((buffer (current-buffer))
          (prep clutch--result-query-prep)
-         (names (if (memq 'star names)
-                    (append (delete-dups (seq-filter #'stringp (plist-get prep :mixed-star))) '(star))
-                  names))
+         (names (delete-dups
+                 (if (memq 'star names)
+                     (append (seq-filter #'stringp (plist-get prep :mixed-star)) '(star))
+                   names)))
          (target (clutch-result--insert-target conn table clutch--last-query))
          (bindings (or (plist-get (clutch--table-metadata conn table) :catalog-columns)
                        (let ((index (make-hash-table :test 'equal)))
@@ -404,8 +407,7 @@ wait for an outstanding lookup or use the primary connection."
         (if (and (clutch--result-unbound-star)
                  (not (clutch--column-details-cached-p conn table)))
             (clutch--ensure-column-details-async conn table)
-          (when-let* ((names (delete-dups (delq nil (clutch--result-source-column-names t)))))
-            (clutch--resolve-result-column-names conn table names nil)))))))
+          (clutch--resolve-result-column-names conn table (clutch--result-source-column-names t) nil))))))
 
 (defun clutch--reload-result-links-on-display (_window)
   "Load invalidated links when this result is displayed again."
@@ -4683,10 +4685,10 @@ there are several."
                                         (user-error "This result does not show one table"))
                               :type "TABLE" :schema clutch--result-source-schema
                               :catalog clutch--result-source-catalog)))))
-      (when (and outgoing (clutch--result-unbound-star))
-        (clutch--ensure-column-details clutch-connection table))
-      (when-let* (outgoing (names (delete-dups (delq nil (clutch--result-source-column-names t)))))
-        (clutch--resolve-result-column-names clutch-connection table names nil t))
+      (when outgoing
+        (when (clutch--result-unbound-star)
+          (clutch--ensure-column-details clutch-connection table))
+        (clutch--resolve-result-column-names clutch-connection table (clutch--result-source-column-names t) nil t))
       (let* ((source-columns (clutch--result-source-column-names))
              (column (nth cidx source-columns))
              (relations (cl-remove-if-not
