@@ -2903,17 +2903,23 @@ throughout."
                                          "id,body\n1,\"中文,a\"\n2,b\n3,\"\"\n4,\n5,NULL\n"
                                        "id,body\n1,\"中文,a\"\n2,b\n3,\n4,NULL\n5,\"NULL\"\n"))))))))
             (when (eq clutch-test-backend 'pg)
+              (clutch-db-query conn (format "UPDATE %s SET body='a'||chr(13)||chr(10)||'b' WHERE id=2" table))
               (clutch-test--with-live-result-buffer " *grid-file-export*"
                 (clutch-test--execute-live-select
                  conn (format "SELECT id AS x, body, body AS x FROM %s ORDER BY id" table))
                 (with-current-buffer " *grid-file-export*"
                   (cl-callf plist-put (nth 1 clutch--result-column-defs) :hidden t)
-                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
-                    (clutch-test--with-minibuffer-answers '("utf-8")
-                      (clutch--export-result 'csv 'file))
-                    (clutch-test--await-queries))
-                  (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
-                                 "x,x\n1,\"中文,a\"\n2,b\n3,\"\"\n4,\n5,NULL\n"))))))
+                  (dolist (changed '(nil t))
+                    (when changed
+                      (clutch-db-query conn (format "ALTER TABLE %s ALTER body TYPE boolean USING (id=1)" table)))
+                    (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+                      (clutch-test--with-minibuffer-answers '("utf-8")
+                        (clutch--export-result 'csv 'file))
+                      (clutch-test--await-queries))
+                    (let ((coding-system-for-read 'utf-8-unix))
+                      (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                                     (if changed "x,x\n1,true\n2,false\n3,false\n4,false\n5,false\n"
+                                       "x,x\n1,\"中文,a\"\n2,\"a\nb\"\n3,\"\"\n4,\n5,NULL\n")))))))))
         (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))
         (delete-file path)))))
 

@@ -1938,14 +1938,13 @@ Return nil, calling neither, when CONN cannot stream SQL.")
   "Return nil because this backend cannot stream delimited text."
   nil)
 
-(cl-defgeneric clutch-db-grid-export-async
-    (conn sql columns delimiter header null-text emit callback)
-  "Stream visible COLUMNS of SQL on CONN with the grid's file formatting.
-DELIMITER, HEADER, NULL-TEXT, EMIT and CALLBACK follow
-`clutch-db-delimited-export-async'.  Decline when grid values differ.")
+(cl-defgeneric clutch-db-stream-rows-async (conn sql function callback)
+  "Stream SQL on CONN, calling FUNCTION with each batch of decoded rows.
+CALLBACK receives the final result without accumulated rows, or an error,
+as in `clutch-db-query-async'.  Return nil to decline before starting.")
 
-(cl-defmethod clutch-db-grid-export-async ((_conn t) &rest _)
-  "Use the grid's row formatter by default."
+(cl-defmethod clutch-db-stream-rows-async ((_conn t) &rest _)
+  "Use ordinary query pages by default."
   nil)
 
 (cl-defgeneric clutch-db-result-query-p (conn sql)

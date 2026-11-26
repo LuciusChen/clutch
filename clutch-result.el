@@ -3813,13 +3813,15 @@ Call FUNCTION once with nil for an empty result.  Each batch has its own
 list spine, so consumers may collect batches without mutating cached
 rows.  DONE gets nil after the last batch, or the error that stopped the
 export.  Pages are fetched without blocking, as statements run, so DONE
-may run after this function returns.  STREAM may start a file export of
-the prepared SQL when no interactive sort needs applying."
+may run after this function returns.  Non-nil STREAM also allows the backend to
+deliver decoded rows from one execution when no grid sort is pending."
   (clutch--ensure-connection)
-  (let* ((effective-sql (clutch-result--effective-query))
+  (let* ((buffer (current-buffer))
+         (effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
-                  (clutch-result--emit-export-batches rows page-size function)))
+                  (with-current-buffer buffer
+                    (clutch-result--emit-export-batches rows page-size function))))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
           (progn
@@ -3836,7 +3838,7 @@ the prepared SQL when no interactive sort needs applying."
            #'emit done
            (when (and stream (not clutch--order-by))
              (lambda (outcome)
-               (funcall stream query outcome)))))))))
+               (clutch-db-stream-rows-async clutch-connection query #'emit outcome)))))))))
 
 (defconst clutch-result--export-gc-threshold (* 32 1024 1024)
   "Garbage collection threshold in bytes while an export runs.
@@ -4050,7 +4052,9 @@ so writing each part of a stream, as small as a network read, is slow.")
 
 (cl-defun clutch-result--write-export-file
     (kind spec path done &key coding omit-header columns col-indices
-          (map-batches #'clutch-result--map-export-batches))
+          (map-batches (lambda (emit finish)
+                         (clutch-result--map-export-batches
+                          emit finish (memq kind '(csv tsv))))))
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
 Format one batch at a time, write the text whenever
 `clutch-result--export-write-size' characters of it have collected and
@@ -4258,18 +4262,7 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
                    (append (list row-count (if (= row-count 1) "" "s") path)
                            (when coding (list coding)))))
           :coding coding :omit-header omit-header
-          :columns columns :col-indices col-indices
-          :map-batches
-          (if (and delimited col-indices clutch--result-column-defs)
-              (lambda (emit done)
-                (clutch-result--map-export-batches
-                 emit done
-                 (lambda (sql outcome)
-                   (clutch-db-grid-export-async
-                    clutch-connection sql clutch--result-column-defs
-                    (if (eq kind 'tsv) ?\t clutch-csv-delimiter)
-                    (not omit-header) clutch-export-null-value-text emit outcome))))
-            #'clutch-result--map-export-batches)))))))
+          :columns columns :col-indices col-indices))))))
 
 ;;;; Column navigation and metadata
 

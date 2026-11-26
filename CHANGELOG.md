@@ -4,7 +4,7 @@
 
 ### Changed
 
-- PostgreSQL result-grid CSV and TSV files use a single COPY when the visible columns have the same text representation as the grid.
+- PostgreSQL result-grid CSV and TSV files can stream decoded rows from one query with a recent pgsql.el.
 - Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
 
 ### Fixed

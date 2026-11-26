@@ -803,6 +803,16 @@ does."
    (lambda ()
      (clutch-db-pg--wrap-result conn (clutch-db-pg--exec conn sql)))))
 
+(defun clutch-db-pg--query-callback (conn callback &optional sql)
+  "Return a pgsql callback that delivers a Clutch outcome to CALLBACK.
+When SQL may change the search path, follow it on CONN after success."
+  (lambda (result error)
+    (when (and sql result)
+      (clutch-db-pg--follow-search-path conn sql result))
+    (funcall callback
+             (and result (clutch-db-pg--wrap-result conn result))
+             (and error (cons 'clutch-db-error (clutch-db--error-data error))))))
+
 (cl-defmethod clutch-db-query-async
     ((conn clutch-db-pg--connection) sql callback)
   "Start SQL on PostgreSQL CONN and pass the outcome to CALLBACK.
@@ -811,16 +821,22 @@ Decline when the installed pgsql.el cannot execute asynchronously."
     (clutch-db-pg--run-query-with-transaction-state
      conn sql
      (lambda ()
-       (pgsql-exec-async
+       (pgsql-exec-async (clutch-db-pg--connection-client conn) sql
+                         (clutch-db-pg--query-callback conn callback sql))))
+    t))
+
+(cl-defmethod clutch-db-stream-rows-async
+    ((conn clutch-db-pg--connection) sql function callback)
+  "Run SQL once on CONN and pass its normalized row batches to FUNCTION."
+  (when (fboundp 'pgsql-exec-rows-async)
+    (clutch-db-pg--run-query-with-transaction-state
+     conn sql
+     (lambda ()
+       (pgsql-exec-rows-async
         (clutch-db-pg--connection-client conn) sql
-        (lambda (result error)
-          (when result
-            (clutch-db-pg--follow-search-path conn sql result))
-          (funcall callback
-                   (and result (clutch-db-pg--wrap-result conn result))
-                   (and error
-                        (cons 'clutch-db-error
-                              (clutch-db--error-data error))))))))
+        (lambda (batch)
+          (funcall function (clutch-db-result-rows (clutch-db-pg--wrap-result conn batch))))
+        (clutch-db-pg--query-callback conn callback sql))))
     t))
 
 (cl-defmethod clutch-db-delimited-export-async
@@ -850,39 +866,8 @@ COPY."
                          (progn (setq header-pending nil)
                                 (1- (length rows)))
                        (length rows))))
-          (lambda (result error)
-            (funcall callback
-                     (and result (clutch-db-pg--wrap-result conn result))
-                     (and error
-                          (cons 'clutch-db-error
-                                (clutch-db--error-data error))))))))
+          (clutch-db-pg--query-callback conn callback))))
       t)))
-
-(cl-defmethod clutch-db-grid-export-async
-    ((conn clutch-db-pg--connection) sql columns delimiter header null-text emit callback)
-  "Stream SQL on CONN when COPY matches the visible grid COLUMNS.
-DELIMITER, HEADER, NULL-TEXT, EMIT and CALLBACK follow the generic."
-  (when (and (memq delimiter '(?, ?\t)) (string-empty-p null-text))
-    (let (aliases projection)
-      (catch 'decline
-        (cl-loop for column in columns for i from 0
-                 for alias = (format "c%d" i)
-                 do (push alias aliases)
-                 unless (plist-get column :hidden) do
-                 (unless (member (plist-get column :backend-type)
-                                 '("int2" "int4" "int8" "text" "varchar"))
-                   (throw 'decline nil))
-                 (push (concat alias " AS " (clutch-db-escape-identifier
-                                             conn (plist-get column :name)))
-                       projection))
-        ;; Older servers quote a lone backslash-dot in single-column CSV.
-        (when (cdr projection)
-          (clutch-db-delimited-export-async
-           conn (format "SELECT %s FROM (%s\n) AS t(%s)"
-                        (mapconcat #'identity (nreverse projection) ", ")
-                        (clutch-db-sql-trim-end sql)
-                        (mapconcat #'identity (nreverse aliases) ", "))
-           delimiter header null-text emit callback))))))
 
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
@@ -1724,6 +1709,10 @@ the first catalog query would otherwise make it read-only."
 (cl-defmethod clutch-db-namespace-switch-p
     ((_conn clutch-db-pg--xtdb-connection) _sql)
   "Return nil, since XTDB has no search_path to switch."
+  nil)
+
+(cl-defmethod clutch-db-stream-rows-async ((_conn clutch-db-pg--xtdb-connection) &rest _)
+  "Use XTDB's paged grid export."
   nil)
 
 (cl-defmethod clutch-db-delimited-export-async
