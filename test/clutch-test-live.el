@@ -1218,12 +1218,19 @@ though the server had rolled it back with the transaction."
                 (clutch-test--run-in-console
                  "BEGIN" (format "SET search_path TO %s" moved))
                 (should (equal (path-after-a-lost-connection) default-path))
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console
+                 "BEGIN" (format "SET search_path TO %s" schema)
+                 "CREATE TABLE marker (id int)")
+                (clutch-commit)
+                (should (equal (path-after-a-lost-connection) schema))
+                (clutch-toggle-auto-commit)
                 (clutch-test--run-in-console
                  "BEGIN" (format "SET search_path TO %s" moved)
                  "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last in its buffer")
                 (should (equal (path-after-a-lost-connection) moved))))
           (ignore-errors
-            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))
 
 (ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
   "Transaction commands should show and reconnect to PostgreSQL's kept path.
@@ -2291,7 +2298,8 @@ throughout."
                admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text, memo %s)" schema
                              (if (equal schema s2) (format "int REFERENCES %s.t" s2) "date")))
               (clutch-db-query
-               admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
+               admin (format "INSERT INTO %s.t VALUES (1, 'orig', %s)" schema
+                             (if (equal schema s2) "1" "NULL"))))
             (clutch-test--with-live-console params
               (cl-flet ((describe-after (statement)
                           (erase-buffer)
@@ -2311,11 +2319,22 @@ throughout."
                 (clutch-test--with-live-result-buffer result-name
                   (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s2))
                                  (list "integer" s2)))
+                  (clutch-toggle-auto-commit)
                   (clutch-test--run-in-console "BEGIN")
                   (should (equal (describe-after
                                   (format "ALTER TABLE t DROP CONSTRAINT t_memo_fkey, ADD FOREIGN KEY (memo) REFERENCES %s.t" s3))
                                  (list "integer" s3)))
-                  (should (equal (describe-after "ROLLBACK") (list "integer" s2)))
+                  (with-current-buffer result-name (clutch-result-open-record))
+                  (with-current-buffer "*clutch-record*"
+                    (clutch-rollback)
+                    (should-not (string-search (format "→ %s.t.id" s3) (buffer-string)))
+                    (clutch-test--with-live-result-buffer (concat result-name "-parent")
+                      (call-interactively #'clutch-record-toggle-expand)
+                      (clutch-test--await-queries)
+                      (with-current-buffer (clutch-result--buffer-name)
+                        (should (equal clutch--result-source-schema s2))
+                        (should (equal (seq-take (car clutch--result-rows) 3) '(1 "orig" 1)))))
+                    (should (string-search (format "→ %s.t.id" s2) (buffer-string))))
                   (clutch-test--with-live-result-buffer (concat result-name "-other")
                     (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s3))
                                    '("date" nil))))

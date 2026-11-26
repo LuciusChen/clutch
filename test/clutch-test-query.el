@@ -2997,7 +2997,7 @@ the cached tables of the database left."
                     scope new-scope
                     cleared 0
                     primed 0)
-              (clutch--note-namespace-switch 'ns-conn before))
+              (clutch--sync-statement-metadata 'ns-conn nil before t))
             (should (equal (plist-get clutch--connection-params :search-path)
                            new-schema))
             (should (= cleared (if moved 1 0)))
@@ -3007,8 +3007,8 @@ the cached tables of the database left."
                    (lambda (_conn _params)
                      (signal 'clutch-db-error '("connection lost"))))
                   ((symbol-function 'message) #'ignore))
-          (clutch--note-namespace-switch
-           'ns-conn (clutch--namespace-before 'ns-conn)))
+          (clutch--sync-statement-metadata
+           'ns-conn nil (clutch--namespace-before 'ns-conn) t))
         (should (equal (plist-get clutch--connection-params :search-path)
                        "main"))))))
 

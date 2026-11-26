@@ -362,17 +362,34 @@ With SYNC use the primary connection.  CALLBACK may be nil."
           (when-let* ((names (delete-dups (delq nil (clutch--result-source-column-names t)))))
             (clutch--resolve-result-column-names conn table names nil)))))))
 
+(defun clutch--reload-result-links-on-display (_window)
+  "Load invalidated links when this result is displayed again."
+  (remove-hook 'window-buffer-change-functions #'clutch--reload-result-links-on-display t)
+  (when (clutch-db-live-p clutch-connection)
+    (clutch--load-fk-info t)))
+
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND.
-TABLE is a metadata key from `clutch--table-key'."
+TABLE is a metadata key, or nil when the current scope is invalidated."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
-      (when (and (derived-mode-p 'clutch-result-mode)
-                 (eq clutch-connection conn)
-                 clutch--result-columns
-                 (equal (clutch--result-source-key) table)
-                 (clutch--result-metadata-current-p))
+      (when-let* (((derived-mode-p 'clutch-result-mode))
+                  ((eq clutch-connection conn))
+                  (clutch--result-columns)
+                  (source (clutch--result-source-key))
+                  ((or (null table) (equal source table)))
+                  ((clutch--result-metadata-current-p)))
         (pcase kind
+          ('invalidated
+           (setq-local clutch--result-column-details nil)
+           (clutch--update-fk-info conn source t)
+           (let ((record (get-buffer "*clutch-record*")))
+             (if (or (get-buffer-window buf t)
+                     (and record
+                          (eq buf (buffer-local-value 'clutch-record--result-buffer record))))
+                 (clutch--load-fk-info t)
+               (add-hook 'window-buffer-change-functions
+                         #'clutch--reload-result-links-on-display nil t))))
           ((or 'column-details 'source-columns)
            (setq-local clutch--result-column-details (clutch--result-column-details conn table))
            (if (eq kind 'source-columns)
@@ -4683,6 +4700,15 @@ result's table; see `clutch-er-add-relation'."
 (defun clutch-record-toggle-expand ()
   "Run the expand, collapse, foreign-key, or display action at point."
   (interactive)
+  ;; RET can arrive before an open Record's replacement keys have returned.
+  (when (buffer-live-p clutch-record--result-buffer)
+    (with-current-buffer clutch-record--result-buffer
+      (when-let* ((table (clutch--result-source-key))
+                  ((clutch--result-metadata-current-p))
+                  ((eq (plist-get (clutch--metadata-status clutch-connection table :foreign-keys-status)
+                                  :state) 'loading)))
+        (clutch--ensure-connection)
+        (clutch--ensure-foreign-keys clutch-connection table))))
   (if-let* ((context (clutch-record--field-action-context)))
       (pcase (plist-get context :action)
         ('follow-fk
