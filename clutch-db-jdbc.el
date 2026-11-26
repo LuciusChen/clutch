@@ -55,13 +55,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.33"
+(defcustom clutch-jdbc-agent-version "0.2.34"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "35e35bb0b37b6b4f92b54cf83c153280f48527ce040137fea567b2bd118937d0"
+  "0f16b9715d343f4cc8143f07fc388e31d6b21fd313f0c4794201f4f3a2956da6"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
@@ -390,16 +390,17 @@ Return non-nil when a request was waiting for it."
                            (gethash (clutch-jdbc-conn-conn-id conn)
                                     clutch-jdbc--connections-by-id)))
                (condition-case err
-                   (if (eq t (plist-get response :ok))
-                       (when callback
-                         (funcall callback (plist-get response :result)))
-                     (clutch-jdbc--remember-error-response conn op response)
+                   (progn
                      (when (clutch-jdbc--connection-invalidated-p response)
                        (clutch-jdbc--retire-invalidated-connection conn))
-                     (let ((message (clutch-jdbc--rpc-error-message op response)))
-                       (if errback
-                           (funcall errback message)
-                         (message "clutch-jdbc async error: %s" message))))
+                     (if (eq t (plist-get response :ok))
+                         (when callback
+                           (funcall callback (plist-get response :result)))
+                       (clutch-jdbc--remember-error-response conn op response)
+                       (let ((message (clutch-jdbc--rpc-error-message op response)))
+                         (if errback
+                             (funcall errback message)
+                           (message "clutch-jdbc async error: %s" message)))))
                  (error
                   (message "clutch-jdbc async callback failed: %s"
                            (error-message-string err))))))))))
@@ -676,7 +677,8 @@ When CONN is nil, return the details snapshot for the current failure."
 
 (defun clutch-jdbc--connection-invalidated-p (response)
   "Return non-nil if RESPONSE has an invalidated logical connection."
-  (eq t (plist-get (plist-get response :diag) :connection-invalidated)))
+  (or (eq t (plist-get response :connection-invalidated))
+      (eq t (plist-get (plist-get response :diag) :connection-invalidated))))
 
 (defun clutch-jdbc--retire-invalidated-connection (conn)
   "Retire invalidated JDBC CONN from local live-request state.
@@ -709,6 +711,8 @@ When CONN is non-nil, remember structured diagnostics on the connection."
   (when-let* ((conn) (catalog (plist-get response :catalog)))
     (setf (clutch-jdbc-conn-params conn)
           (plist-put (clutch-jdbc-conn-params conn) :catalog catalog)))
+  (when (clutch-jdbc--connection-invalidated-p response)
+    (clutch-jdbc--retire-invalidated-connection conn))
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
     (let* ((details (clutch-jdbc--remember-error-response conn op response))
@@ -722,8 +726,6 @@ When CONN is non-nil, remember structured diagnostics on the connection."
                  (equal (plist-get diag :op) op)
                  (eq t (plist-get diag :connection-invalidated))
                  (eq t (plist-get diag :execution-not-started)))))
-      (when (clutch-jdbc--connection-invalidated-p response)
-        (clutch-jdbc--retire-invalidated-connection conn))
       (signal (if execution-not-started
                   'clutch-db-execution-not-started
                 'clutch-db-error)
@@ -1101,17 +1103,18 @@ Returns a `clutch-jdbc-conn'."
             (unless switched
               (clutch-db-disconnect conn)))))
       (when (clutch-jdbc--sqlserver-conn-p conn)
-        (condition-case err
-            (let ((requested (plist-get conn-params :catalog))
-                  (opened (plist-get result :catalog)))
-              (cond
-               ((and requested (not (equal requested opened)))
-                (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn requested))))
-               (opened (setf (clutch-jdbc-conn-params conn) (plist-put conn-params :catalog opened)))
-               (t (clutch-jdbc--read-sqlserver-catalog conn))))
-          (clutch-db-error
-           (clutch-db-disconnect conn)
-           (signal (car err) (cdr err)))))
+        (let (ready)
+          (unwind-protect
+              (let ((requested (plist-get conn-params :catalog))
+                    (opened (plist-get result :catalog)))
+                (cond
+                 ((and requested (not (equal requested opened)))
+                  (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn requested))))
+                 (opened (setf (clutch-jdbc-conn-params conn) (plist-put conn-params :catalog opened)))
+                 (t (clutch-jdbc--read-sqlserver-catalog conn)))
+                (setq ready t))
+            (unless ready
+              (clutch-db-disconnect conn)))))
       conn)))
 
 ;;;; Register backend
@@ -2046,10 +2049,24 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
       (cl-call-next-method)
     ;; Browse mode 2 reports a view's own column names, also through a synonym.
     (let* ((select (clutch-db--column-binding-select conn names source-token))
-           (sql (format (concat "SELECT source_column FROM sys.dm_exec_describe_first_result_set"
-                                "(N%s, NULL, 2) WHERE is_hidden = 0 ORDER BY column_ordinal")
-                        (clutch-db-escape-literal conn select))))
-      (clutch-db--column-bindings names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
+           (sql (format (concat "SELECT source_column, error_number, error_message "
+                                "FROM sys.dm_exec_describe_first_result_set(N%s, NULL, 2) "
+                                "WHERE is_hidden = 0 OR error_number IS NOT NULL "
+                                "OR error_message IS NOT NULL ORDER BY column_ordinal")
+                        (clutch-db-escape-literal conn select)))
+           columns)
+      (dolist (row (clutch-db-result-rows (clutch-db-query conn sql)))
+        (pcase-let ((`(,source-column ,error-number ,error-message) row))
+          (let ((msg (and (stringp error-message)
+                          (not (string-empty-p (string-trim error-message)))
+                          error-message)))
+            (when (or msg error-number)
+              (signal 'clutch-db-error
+                      (list (or msg
+                                (format "Could not describe source columns (SQL Server error %s)"
+                                        error-number))))))
+          (push source-column columns)))
+      (clutch-db--column-bindings names (nreverse columns)))))
 
 (cl-defmethod clutch-db-resolve-column-names-async ((conn clutch-jdbc-conn) names source-token callback)
   "Resolve NAMES on SOURCE-TOKEN on CONN's metadata session and call CALLBACK."

@@ -1105,6 +1105,85 @@ or a USE the automatic reconnect lost the schema."
                                            :type 'clutch-db-error))
                        "Could not start in schema nope.main: Catalog Error: SET schema: No catalog + schema found"))))))
 
+(ert-deftest clutch-db-test-jdbc-sqlserver-connect-disconnects-on-quit-and-error ()
+  "SQL Server connect should release its connection when USE or DB_NAME quits or fails."
+  (dolist (case '((:label "USE quit" :catalog "reporting" :opened "master" :signal quit)
+                  (:label "USE error" :catalog "missing" :opened "master" :signal clutch-db-error)
+                  (:label "DB_NAME quit" :catalog nil :opened nil :signal quit)))
+    (ert-info ((plist-get case :label))
+      (let ((clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+            disconnected)
+        (cl-letf (((symbol-function 'clutch-jdbc--setup-prerequisites) #'ignore)
+                  ((symbol-function 'clutch-jdbc--ensure-agent) #'ignore)
+                  ((symbol-function 'clutch-jdbc--rpc)
+                   (lambda (_conn op _params &optional _timeout-seconds)
+                     (should (equal op "connect"))
+                     (if-let* ((opened (plist-get case :opened)))
+                         (list :conn-id 11 :catalog opened :describe-source-columns t)
+                       '(:conn-id 11))))
+                  ((symbol-function 'clutch-db-query)
+                   (lambda (_conn _sql)
+                     (if (eq (plist-get case :signal) 'quit)
+                         (signal 'quit nil)
+                       (signal 'clutch-db-error '("Database does not exist")))))
+                  ((symbol-function 'clutch-jdbc--rpc-on-conn)
+                   (lambda (_conn _op _params &optional _timeout-seconds)
+                     (if (eq (plist-get case :signal) 'quit)
+                         (signal 'quit nil)
+                       (signal 'clutch-db-error '("Database does not exist")))))
+                  ((symbol-function 'clutch-db-disconnect)
+                   (lambda (conn) (setq disconnected conn))))
+          (let ((params (append (when-let* ((cat (plist-get case :catalog)))
+                                  (list :catalog cat))
+                                '(:url "jdbc:sqlserver://localhost:1433;databaseName=master"
+                                  :driver-class "com.microsoft.sqlserver.jdbc.SQLServerDriver"))))
+            (if (eq (plist-get case :signal) 'quit)
+                (should (eq 'quit (condition-case nil
+                                      (clutch-db-jdbc-connect 'sqlserver params)
+                                    (quit 'quit))))
+              (should-error (clutch-db-jdbc-connect 'sqlserver params)
+                            :type 'clutch-db-error))
+            (should disconnected)
+            (should (= (clutch-jdbc-conn-conn-id disconnected) 11))))))))
+
+(ert-deftest clutch-db-test-jdbc-sqlserver-resolve-column-names-reports-errors ()
+  "Sync SQL Server column resolution should decode rows and signal describe errors."
+  (let ((conn (make-clutch-jdbc-conn :driver 'sqlserver :params '(:driver sqlserver)))
+        rows)
+    (cl-letf (((symbol-function 'clutch-db-query)
+               (lambda (_conn _sql)
+                 (make-clutch-db-result :rows rows))))
+      (setq rows '(("id" nil nil)
+                   (nil nil nil)
+                   ("café" nil nil)))
+      (should (equal (clutch-db-resolve-column-names conn '("id" "expr" "cafe") "[dbo].[users]")
+                     '(("id" . "id") ("expr" . nil) ("cafe" . "café"))))
+      (setq rows '((nil 207 "Invalid column name 'no_such_column'.")))
+      (should (equal (cadr (should-error
+                            (clutch-db-resolve-column-names conn '("no_such_column") "[dbo].[users]")
+                            :type 'clutch-db-error))
+                     "Invalid column name 'no_such_column'.")))))
+
+(ert-deftest clutch-db-test-jdbc-ok-reply-retires-invalidated-connection ()
+  "A successful reply with :connection-invalidated keeps its result and retires CONN."
+  (let* ((clutch-jdbc--agent-process 'live-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (conn (make-clutch-jdbc-conn :process 'live-proc :conn-id 2
+                                      :driver 'sqlserver
+                                      :params '(:driver sqlserver :catalog "master"))))
+    (puthash 2 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
+      (should (clutch-db-live-p conn))
+      (let ((result (clutch-jdbc--response-result-or-signal
+                     conn "execute"
+                     '(:id 9 :ok t :connection-invalidated t
+                           :result (:type "query" :columns ("n") :rows ((17)) :done t)))))
+        (should (equal (plist-get result :rows) '((17))))
+        (should-not (clutch-db-live-p conn))
+        (should-not (gethash 2 clutch-jdbc--connections-by-id))))))
+
 (ert-deftest clutch-db-test-jdbc-oracle-session-control-keeps-the-transaction ()
   "An Oracle ALTER SESSION or ALTER SYSTEM should keep the transaction's state.
 They commit nothing, but were taken for DDL, which commits on Oracle, so
@@ -9049,7 +9128,19 @@ key into another schema lost that schema."
               (clutch-db-query conn (format "ALTER TABLE %s.%s ADD %s" schema table
                                             (if case-insensitive "[État] INT" "[État] INT, [état] INT")))
               (should (equal (clutch-db-resolve-column-names conn '("État" "état") synonym)
-                             (list (cons "État" "État") (cons "état" (if case-insensitive "État" "état"))))))
+                             (list (cons "État" "État") (cons "état" (if case-insensitive "État" "état")))))
+              (should-error (clutch-db-resolve-column-names conn '("no_such_column") synonym)
+                            :type 'clutch-db-error)
+              (let (async-outcome)
+                (should (clutch-db-resolve-column-names-async
+                         conn '("no_such_column") synonym
+                         (lambda (pairs &optional err)
+                           (setq async-outcome (list pairs err)))))
+                (with-timeout (30 (error "No async resolve outcome"))
+                  (while (not async-outcome)
+                    (accept-process-output nil 0.05)))
+                (should-not (car async-outcome))
+                (should (stringp (cadr async-outcome)))))
             (should (equal (clutch-db-foreign-keys conn table schema)
                            `(("parent_id" :ref-table ,parents :ref-column "id"
                               :ref-schema ,schema :constraint ,key)))))

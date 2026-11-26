@@ -1436,6 +1436,11 @@ already confirmed SQL."
     (clutch--preserve-dead-connection-for-reconnect connection)
     (clutch-db-clear-error-details connection)))
 
+(defun clutch--retire-dead-query-connection (connection)
+  "Retire CONNECTION when it is no longer alive, keeping reconnect anchors."
+  (unless (clutch--connection-alive-p connection)
+    (clutch--retire-query-connection connection)))
+
 (defun clutch--handle-query-quit (connection)
   "Convert a raw quit on CONNECTION into an interrupt or disconnect."
   (let* ((source-buffer (current-buffer))
@@ -1526,7 +1531,8 @@ executed or failed."
            :result-context (plist-get outcome :result-context)
            :resolution-context (plist-get outcome :resolution-context)
            :source-buffer source-buffer)
-        (clutch-result--display result sql elapsed)))))
+        (clutch-result--display result sql elapsed))
+      (clutch--retire-dead-query-connection connection))))
 
 (defun clutch--statement-running-here-p ()
   "Return non-nil while a statement of this buffer is running on its connection.
@@ -1853,6 +1859,8 @@ Stops and reports on the first error."
                   (when region
                     (clutch--mark-executed-sql-region
                      (car region) (cdr region)))
+                  (clutch--retire-dead-query-connection
+                   (or (plist-get outcome :connection) connection))
                   (report-complete))))
              nil)
             (t
@@ -1868,7 +1876,9 @@ Stops and reports on the first error."
                ;; The cancel met this statement's result; stop the batch.
                (clutch--finish-query-activity
                 activity
-                (lambda () (report-complete ", then cancelled")))
+                (lambda ()
+                  (clutch--retire-dead-query-connection connection)
+                  (report-complete ", then cancelled")))
                nil))))
          (reply (outcome stmt region final-p continue)
            ;; A reply that came while its statement was dispatched counts
@@ -2274,7 +2284,9 @@ Accumulates input until a statement terminator ends it, then executes."
                           (when connection-lost
                             (clutch--retire-query-connection connection))
                           (output (clutch-repl--format-error display-summary)))
-                      (let ((result (plist-get outcome :result)))
+                      (let ((result (plist-get outcome :result))
+                            (connection (or (plist-get outcome :connection)
+                                            clutch-connection)))
                         (if (plist-get outcome :result-query-p)
                             (let* ((rows (clutch-db-result-rows result))
                                    (row-count
@@ -2282,7 +2294,7 @@ Accumulates input until a statement terminator ends it, then executes."
                                         (min (length rows) clutch-result-max-rows)
                                       (length rows))))
                               (clutch--present-statement-outcome
-                               sql clutch-connection outcome)
+                               sql connection outcome)
                               (output
                                (concat "\n"
                                        (mapconcat (lambda (message)
@@ -2299,7 +2311,8 @@ Accumulates input until a statement terminator ends it, then executes."
                                        "\n\n"
                                        (clutch-repl--prompt))))
                           (output
-                           (clutch-repl--format-dml-result result elapsed))))))))
+                           (clutch-repl--format-dml-result result elapsed))
+                          (clutch--retire-dead-query-connection connection)))))))
       (condition-case err
           (progn
             (clutch--ensure-connection)

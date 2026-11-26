@@ -286,7 +286,7 @@ The short `error` string and the optional `diag` payload serve different roles:
 - `diag`: richer request diagnostics for troubleshooting UI / logs / tests
 - `debug`: opt-in verbose debugging payload; may include redacted request context and a redacted stack trace, but is omitted unless the client sent `params.debug=true`
 
-`diag.connection-invalidated` is a lifecycle fact, not a retry hint. It is present only as JSON `true` when an error response references a logical connection the agent no longer owns, including a later request after the original invalidation response was ignored; clients must not infer the same state from JDBC exception classes, SQLState values, vendor codes, or error text.
+`diag.connection-invalidated` is a lifecycle fact, not a retry hint. It is present only as JSON `true` when an error response references a logical connection the agent no longer owns, including a later request after the original invalidation response was ignored; clients must not infer the same state from JDBC exception classes, SQLState values, vendor codes, or error text. When a foreground request succeeds and the agent retires the primary connection while finishing the reply, top-level `connection-invalidated: true` delivers the same lifecycle signal so Elisp preserves the result while retiring its local handle.
 
 `diag.execution-not-started` is a narrower execution fact and is present only together with authoritative invalidation during the idle preflight phase. The phase ends before `createStatement` or `prepareStatement`, because preparation itself may contact the server. Neither marker is inferred from exception text, vendor codes, SQLState, or a successful liveness check followed by a later failure.
 

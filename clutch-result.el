@@ -359,6 +359,7 @@ With SYNC, wait for an outstanding lookup or use the primary connection."
                          (signal 'clutch-db-error '("Timed out waiting for source columns")))
             (while (and (memq request (gethash :pending bindings))
                         (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
+              (unless (clutch-db-live-p conn) (signal 'clutch-db-error '("Connection closed")))
               (accept-process-output nil 0.05)))
           (unless (and (eq conn clutch-connection) (eq prep clutch--result-query-prep)
                        (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
