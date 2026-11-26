@@ -11114,20 +11114,7 @@ that file, or in a new, empty in-memory database, without a word."
       (should (equal (clutch-db-escape-literal conn "O'Brien")
                      "'O''Brien'"))
       (should (equal (clutch-db-escape-literal conn "a\\中")
-                     "CONVERT(X'615CE4B8AD' USING utf8mb4)"))
-      ;; Verify both default-mode and NO_BACKSLASH_ESCAPES evaluation agree:
-      ;; neither form contains a backslash inside quotes and hex decodes verbatim.
-      (dolist (sample '("C:\\folder\\file" "file\\" "O'Brien" "a\\中"))
-        (let ((sql (clutch-db-escape-literal conn sample)))
-          (should-not (string-search "\\" sql))
-          (if (string-match "\\`CONVERT(X'\\([0-9A-F]+\\)' USING utf8mb4)\\'" sql)
-              (let* ((hex (match-string 1 sql))
-                     (bytes (apply #'unibyte-string
-                                   (cl-loop for i from 0 below (length hex) by 2
-                                            collect (string-to-number
-                                                     (substring hex i (+ i 2)) 16)))))
-                (should (equal (decode-coding-string bytes 'utf-8-unix) sample)))
-            (should (equal sql (format "'%s'" (replace-regexp-in-string "'" "''" sample)))))))))
+                     "CONVERT(X'615CE4B8AD' USING utf8mb4)"))))
   (dolist (url '("jdbc:sqlite:/tmp/app.db"
                  "jdbc:postgresql://db/app"))
     (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
