@@ -2778,9 +2778,8 @@ BEFORE is the namespace and metadata scope before the statement."
       (clutch--clear-connection-metadata-caches conn t)
       (if (clutch-db-eager-schema-refresh-p conn)
           (clutch--set-schema-status conn 'stale)
-        (clutch--refresh-schema-cache-async conn))))
-    (when definitions
-      (run-hook-with-args 'clutch--table-metadata-updated-hook conn nil 'invalidated))))
+        (clutch--refresh-schema-cache-async conn))
+      (run-hook-with-args 'clutch--table-metadata-updated-hook conn nil 'invalidated)))))
 
 ;;;###autoload (autoload 'clutch-switch-schema "clutch" nil t)
 (defun clutch-switch-schema ()
@@ -2824,7 +2823,7 @@ BEFORE is the namespace and metadata scope before the statement."
                     (clutch--clear-connection-problem-capture conn)
                     (clutch--remember-connection-namespace conn)
                     (clutch--clear-connection-metadata-caches conn)
-                    (clutch--refresh-current-schema t)
+                    (clutch--prime-schema-cache conn t)
                     (message "Current schema/database: %s" namespace))
                 (clutch-db-error
                  (let ((summary

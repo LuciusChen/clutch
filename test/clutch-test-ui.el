@@ -2696,7 +2696,7 @@ Point left behind made the next cell command scroll back to it."
                                'clutch-full-value "{\"id\":1}")
             (should (equal (clutch-record--field-action-description) "Show value"))
             (with-current-buffer result-buf
-              (setq-local clutch--fk-info '((0 . (:ref-table "users")))))
+              (setq-local clutch--fk-info '((0 . (:table "users")))))
             (should (equal (clutch-record--field-action-description) "Follow FK"))
             (put-text-property (point-min) (point-max) 'clutch-full-value
                                clutch--cell-default-placeholder)
@@ -2746,7 +2746,7 @@ Point left behind made the next cell command scroll back to it."
                 (should (= render-count 2))
                 (with-current-buffer result-buf
                   (setq-local clutch--fk-info
-                              '((0 . (:ref-table "users"
+                              '((0 . (:table "users"
                                       :ref-column "id")))))
                 (clutch-record-toggle-expand)
                 (should (equal followed (list result-buf 0 0)))))))

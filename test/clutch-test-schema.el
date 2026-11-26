@@ -410,9 +410,8 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
                     (setq callback cb)
                     t)))
          (clutch--ensure-foreign-keys-async conn "users")
-         (funcall callback '(("account_id" :ref-table "accounts"
-                              :ref-column "id")))
-         (should (equal (clutch--cached-foreign-keys conn "users")
+         (run-at-time 0 nil callback '(("account_id" :ref-table "accounts" :ref-column "id")))
+         (should (equal (clutch--ensure-foreign-keys conn "users")
                         '(("account_id" :ref-table "accounts"
                            :ref-column "id"))))
          (should (equal notified (list conn "users" 'foreign-keys)))

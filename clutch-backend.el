@@ -1862,8 +1862,9 @@ nil when unsupported.")
   "Start an asynchronous foreign-key fetch for TABLE on CONN.
 CALLBACK receives the foreign-key alist on success.  ERRBACK receives an
 error message string on failure.  SCHEMA and CATALOG qualify TABLE as in
-`clutch-db-column-details'.  Return non-nil when async fetch was started,
-nil when unsupported.")
+`clutch-db-column-details'.  Return nil when unsupported.  An idle fetch
+returns a function that cancels it before dispatch and returns non-nil
+on success.  Other backends return non-nil when started.")
 
 (cl-defmethod clutch-db-foreign-keys-async ((_conn t) _table _callback
                                              &optional _errback _schema _catalog)
@@ -1876,24 +1877,33 @@ nil when unsupported.")
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
 ERRBACK receives an error-message string when the work fails.
-INITIAL-DELAY, when positive, is the idle delay before the first attempt."
-  (cl-labels
-      ((run ()
-         (if (clutch-db-live-p conn)
-             (if (or (clutch-db-in-use-p conn)
-                     (gethash conn clutch-db--idle-metadata-connections))
-                 (run-with-idle-timer 0.1 nil #'run)
-               (puthash conn t clutch-db--idle-metadata-connections)
-               (unwind-protect
-                   (condition-case err
-                       (funcall callback (apply fn conn args))
-                     (error
-                      (when errback
-                        (funcall errback (clutch-db--error-message err)))))
-                 (remhash conn clutch-db--idle-metadata-connections)))
-           (when errback
-             (funcall errback "Connection closed")))))
-    (run-with-idle-timer (or initial-delay 0) nil #'run)))
+INITIAL-DELAY, when positive, is the idle delay before the first attempt.
+Return a function that cancels the call if it is still queued."
+  (let (timer)
+    (cl-labels
+        ((schedule (delay)
+           (setq timer (run-with-idle-timer delay nil #'run)))
+         (run ()
+           (setq timer nil)
+           (if (clutch-db-live-p conn)
+               (if (or (clutch-db-in-use-p conn)
+                       (gethash conn clutch-db--idle-metadata-connections))
+                   (schedule 0.1)
+                 (puthash conn t clutch-db--idle-metadata-connections)
+                 (unwind-protect
+                     (condition-case err
+                         (funcall callback (apply fn conn args))
+                       (error
+                        (when errback
+                          (funcall errback (clutch-db--error-message err)))))
+                   (remhash conn clutch-db--idle-metadata-connections)))
+             (when errback (funcall errback "Connection closed")))))
+      (schedule (or initial-delay 0))
+      (lambda ()
+        (when timer
+          (cancel-timer timer)
+          (setq timer nil)
+          t)))))
 
 ;; Query
 

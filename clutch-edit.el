@@ -32,7 +32,7 @@
 (defvar clutch-record--result-buffer)
 
 (defvar-local clutch--fk-info nil
-  "Foreign key info for the current result.")
+  "Outgoing relations by result index, with each target column in :ref-column.")
 (defvar-local clutch--pending-deletes nil
   "List of row identity vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
