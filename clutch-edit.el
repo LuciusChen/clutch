@@ -684,17 +684,28 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields t))))
 
+(defun clutch-record--editable-cell-at-point ()
+  "Return (ROW FIELD VALUE DRAFT-COLUMN) for the current Record field.
+FIELD keeps the editor on the selected alias.  DRAFT-COLUMN identifies
+the staged edit that supplied VALUE, or FIELD for a new edit."
+  (let ((pos (line-beginning-position)))
+    (pcase-let ((`(,_ ,field ,value) (or (clutch--cell-at pos)
+                                         (user-error "No field at point"))))
+      (list (clutch-record--resolve-row-index) field value
+            (get-text-property pos 'clutch-draft-column)))))
+
 (defun clutch-result-edit--open-cell (cell return-buffer)
   "Open an edit buffer for CELL using the current result buffer state.
-RETURN-BUFFER is the buffer that invoked the edit command."
-  (pcase-let* ((`(,ridx ,cidx ,val) cell))
+RETURN-BUFFER is the buffer that invoked the edit command.  A Record cell
+also names the column owning its displayed draft."
+  (cl-destructuring-bind (ridx cidx val &optional (draft-column cidx)) cell
     (if (>= ridx (length (clutch--result-display-rows)))
         (clutch-result--edit-pending-insert ridx)
       (let* ((op "edit cell")
              (table (clutch--result-source-table-or-user-error op))
              (_ (clutch-result--row-identity-or-user-error table op))
              (display-row (nth ridx (clutch--result-display-rows)))
-             (original (nth cidx display-row))
+             (original (nth draft-column display-row))
              (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
              (detail
@@ -766,7 +777,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                           (user-error "Result buffer no longer exists"))
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit
-                           ridx cidx new-value display-row original-state))))
+                           ridx draft-column new-value display-row original-state))))
           (with-current-buffer result-buf
             (setq-local clutch--active-edit-cell target-cell)
             (clutch-result-edit--refresh-target-row ridx)))
@@ -789,17 +800,15 @@ RETURN-BUFFER is the buffer that invoked the edit command."
             (current-buffer))))
     (with-current-buffer result-buffer
       (clutch-edit--require-sql-staged-mutation "Edit / re-edit"))
-    (let ((cell (or (clutch--cell-at-point)
-                    (user-error "No cell at point"))))
-      (if (eq result-buffer return-buffer)
-          (clutch-result-edit--open-cell cell return-buffer)
-        (setcar cell (clutch-record--resolve-row-index))
-        (let ((opened (with-current-buffer result-buffer
-                        (clutch-result-edit--open-cell cell return-buffer))))
-          (when (and (buffer-live-p opened)
-                     (not (eq (current-buffer) opened)))
-            (pop-to-buffer opened))
-          opened)))))
+    (if (eq result-buffer return-buffer)
+        (clutch-result-edit--open-cell
+         (or (clutch--cell-at-point) (user-error "No cell at point")) return-buffer)
+      (let* ((cell (clutch-record--editable-cell-at-point))
+             (opened (with-current-buffer result-buffer
+                       (clutch-result-edit--open-cell cell return-buffer))))
+        (when (and (buffer-live-p opened) (not (eq (current-buffer) opened)))
+          (pop-to-buffer opened))
+        opened))))
 
 ;;;###autoload
 (defun clutch-result-edit-finish ()
