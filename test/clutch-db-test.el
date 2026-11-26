@@ -10020,13 +10020,17 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (should (equal outcomes
                        '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
         (should-not (gethash 42 clutch-jdbc--async-callbacks))
-        ;; A reply clears only its own request's busy marker.
-        (start "UPDATE t SET n = 2")
+        ;; SET NOEXEC ON can give an exported SELECT no result set.
+        ;; Completing it clears only its own request's busy marker.
+        (clutch-db-delimited-export-async
+         conn "SELECT 1" ?, t "" #'ignore
+         (lambda (result error) (push (list result error) outcomes)))
         (let ((id (gethash conn clutch-jdbc--busy-request-ids)))
           (puthash conn 'later-request clutch-jdbc--busy-request-ids)
           (clutch-jdbc--dispatch-async-response
-           `(:id ,id :ok t :result (:type "dml" :affected-rows 1)))
+           `(:id ,id :ok t :result (:type "dml" :affected-rows -1)))
           (run-timers))
+        (should (= (clutch-db-result-affected-rows (caar outcomes)) -1))
         (should (eq (gethash conn clutch-jdbc--busy-request-ids)
                     'later-request))))))
 

@@ -1796,9 +1796,10 @@ each batch of normalized rows, nil and the column names."
                (funcall callback result error))))
          (receive (raw error)
            (if (and (not error)
-                    (or emit (and (plist-get raw :cursor-id)
-                                  (not (eq t (plist-get raw :done)))
-                                  (not (clutch-jdbc--cassandra-conn-p conn)))))
+                    (or (and emit (equal (plist-get raw :type) "query"))
+                        (and (plist-get raw :cursor-id)
+                             (not (eq t (plist-get raw :done)))
+                             (not (clutch-jdbc--cassandra-conn-p conn)))))
                (clutch-jdbc--collect-cursor-async
                 conn raw
                 (lambda (params outcome)
