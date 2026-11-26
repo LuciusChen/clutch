@@ -55,13 +55,13 @@
   :type 'directory
   :group 'clutch-jdbc)
 
-(defcustom clutch-jdbc-agent-version "0.2.32"
+(defcustom clutch-jdbc-agent-version "0.2.33"
   "Version of clutch-jdbc-agent to use."
   :type 'string
   :group 'clutch-jdbc)
 
 (defcustom clutch-jdbc-agent-sha256
-  "164c4ac1235fbaf30ac1c36ab8584f2c2b50ad0dcb8d4d4527ff31fe5a312ccd"
+  "35e35bb0b37b6b4f92b54cf83c153280f48527ce040137fea567b2bd118937d0"
   "Expected SHA-256 for the configured clutch-jdbc-agent jar.
 Set this to nil to disable checksum verification for a locally built jar."
   :type '(choice (const :tag "Disable verification" nil) string)
