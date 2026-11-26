@@ -1209,13 +1209,6 @@ its CASE or MERGE clauses belong to that statement until the semicolon."
                            (truncate-string-to-width (string-trim statement) 80)))
             (user-error "Query cancelled")))))))
 
-(defun clutch--note-schema-affecting-query (sql connection)
-  "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
-  (when (clutch-db-sql-schema-affecting-p sql)
-    (if (clutch-db-eager-schema-refresh-p connection)
-        (clutch--set-schema-status connection 'stale)
-      (clutch--refresh-schema-cache-async connection))))
-
 (defun clutch--query-debug-summary (result)
   "Return a compact summary string for RESULT."
   (if-let* ((rows (clutch-db-result-rows result)))

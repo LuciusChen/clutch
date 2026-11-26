@@ -452,6 +452,9 @@ transaction is still open."
 Entries are `dirty' for known uncommitted work or `uncertain' when atomic-batch
 recovery failed or commit outcome is unknown.  Missing entries are clean.")
 
+(defvar clutch--transactional-ddl (make-hash-table :test 'eq :weakness 'key)
+  "Connections whose transaction may still change the visible table definitions.")
+
 (defvar-local clutch--query-buffer-local-p nil
   "Non-nil when the current buffer is a clutch query console.")
 
@@ -2753,11 +2756,34 @@ outcome must still arrive."
      (message "Could not read the current schema or database back: %s"
               (clutch-db--error-message err)))))
 
+(defun clutch--note-schema-affecting-query (sql conn)
+  "Invalidate CONN's metadata after a change in visible table definitions.
+SQL is the statement that succeeded.  Where the server reports no
+transaction status, DDL can still be undone by an explicit rollback."
+  (when (cond
+         ((clutch-db-sql-schema-affecting-p sql)
+          (if (and (clutch-db-transaction-open-p conn)
+                   (not (eq (clutch-db-schema-transaction-effect conn sql) 'clear)))
+              (puthash conn t clutch--transactional-ddl)
+            (remhash conn clutch--transactional-ddl))
+          t)
+         ((gethash conn clutch--transactional-ddl)
+          (if (or (not (clutch-db-transaction-open-p conn))
+                  (clutch--transaction-end-query-p sql))
+              (progn (remhash conn clutch--transactional-ddl) t)
+            ;; A savepoint can undo DDL and leave earlier DDL pending.
+            (equal (clutch-db-sql-leading-keyword sql) "ROLLBACK"))))
+    (clutch--clear-connection-metadata-caches conn t)
+    (if (clutch-db-eager-schema-refresh-p conn)
+        (clutch--set-schema-status conn 'stale)
+      (clutch--refresh-schema-cache-async conn))))
+
 (defun clutch--follow-transaction-end (conn sql before)
   "Follow CONN's namespace after it ended a transaction as SQL does.
 BEFORE is what `clutch--namespace-before' returned before.  PostgreSQL
 undoes a search_path set inside a transaction it rolls back, and one set
 with SET LOCAL when the transaction ends either way."
+  (clutch--note-schema-affecting-query sql conn)
   (when (clutch-db-namespace-switch-p conn sql)
     (clutch--note-namespace-switch conn before)))
 
