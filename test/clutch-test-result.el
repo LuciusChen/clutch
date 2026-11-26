@@ -1933,45 +1933,58 @@ It orders exponent floats, infinity, and NaN as well."
 ;;;; Foreign-key navigation
 
 (ert-deftest clutch-test-qualified-sqlite-result-follows-keys-in-its-schema ()
-  "Following a foreign key of aux.children should open aux.parents.
-SQLite finds main.parents first for the bare name, with a row of the same key."
-  (require 'clutch-db-sqlite)
-  (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
-        result-buf)
-    (unwind-protect
-        (progn
-          (dolist (sql '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
-                         "INSERT INTO main.parents VALUES (1, 'main')"
-                         "ATTACH DATABASE ':memory:' AS aux"
-                         "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
-                         "INSERT INTO aux.parents VALUES (1, 'aux')"
-                         "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
-                         "INSERT INTO aux.children VALUES (1, 1)"))
-            (clutch-db-query conn sql))
-          (with-temp-buffer
-            (clutch-mode)
-            (setq-local clutch-connection conn)
-            (let ((source (current-buffer)))
-              (clutch-test--execute-and-present "SELECT * FROM aux.children" conn)
-              (setq result-buf
-                    (buffer-local-value 'clutch--last-result-buffer source))))
-          (ert-run-idle-timers)
-          (with-current-buffer result-buf
-            (let ((clutch-er-relations-directory
-                   (make-temp-name (expand-file-name "clutch-er-none-"
-                                                     temporary-file-directory))))
-              (clutch-record--follow-column result-buf 1 0))
-            (clutch-test--await-queries)
-            (should (equal clutch--last-query
-                           "SELECT * FROM \"aux\".\"parents\" WHERE \"id\" = 1"))
-            ;; The followed row is the aux parent, its hidden row identity
-            ;; after its columns.
-            (should (equal (mapcar (lambda (row) (cl-subseq row 0 2))
-                                   clutch--result-rows)
-                           '((1 "aux"))))))
-      (when (buffer-live-p result-buf)
-        (kill-buffer result-buf))
-      (clutch-db-disconnect conn))))
+  "Two aliases of one staged key show and follow the value written to aux."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE main.parents (id INTEGER PRIMARY KEY, label TEXT)"
+        "INSERT INTO main.parents VALUES (2, 'main')"
+        "ATTACH DATABASE ':memory:' AS aux"
+        "CREATE TABLE aux.parents (id INTEGER PRIMARY KEY, label TEXT)"
+        "INSERT INTO aux.parents VALUES (2, 'aux')"
+        "CREATE TABLE aux.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))"
+        "INSERT INTO aux.children VALUES (1, NULL)")
+      "SELECT id, PARENT_ID AS a, parent_id AS b FROM aux.children"
+    (ert-run-idle-timers)
+    (let ((destination (clutch-result--buffer-name)) parent record)
+      ;; Keep the child and its staged edit while RET opens the parent.
+      (rename-buffer " *clutch-child*" t)
+      (unwind-protect
+          (progn
+            (clutch--goto-cell 0 2)
+            (save-current-buffer
+              (clutch-result-open-record)
+              (setq record (current-buffer)))
+            (with-current-buffer (clutch-result-edit-cell)
+              (insert "1")
+              (clutch-result-edit-finish))
+            (with-current-buffer record
+              (goto-char (point-min))
+              (forward-line 1)
+              (with-current-buffer (clutch-result-edit-cell)
+                (erase-buffer)
+                (insert "2")
+                (clutch-result-edit-finish)))
+            (dolist (idx '(1 2))
+              (with-current-buffer record
+                (goto-char (point-min))
+                (forward-line idx)
+                (should (looking-at-p "[ab] +: 2  → "))
+                (clutch-record-toggle-expand))
+              (clutch-test--await-queries)
+              (setq parent (clutch--connection-view-buffer conn destination))
+              (with-current-buffer parent
+                (should (equal (seq-take (car clutch--result-rows) 2) '(2 "aux"))))
+              (kill-buffer parent))
+            (with-current-buffer record
+              (clutch-clone-row-to-insert)
+              (clutch-result-insert-stage))
+            (with-current-buffer result
+              (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                (clutch-result-submit)))
+            (should (equal (clutch-db-result-rows
+                            (clutch-db-query conn "SELECT id, parent_id FROM aux.children ORDER BY id"))
+                           '((1 2) (2 2)))))
+        (when (buffer-live-p record) (kill-buffer record))
+        (when (buffer-live-p parent) (kill-buffer parent))))))
 
 (ert-deftest clutch-test-sqlite-record-follows-whole-keys-and-stored-relations ()
   "Following a key over two columns names both, so it finds one row.  A
@@ -1979,14 +1992,14 @@ relation added by hand starts at the same field, offered after the key."
   (require 'clutch-db-sqlite)
   (let ((conn (clutch-db-connect 'sqlite '(:database ":memory:")))
         (clutch-er-relations-directory (make-temp-file "clutch-er-" t))
-        result-buf)
-    (cl-flet ((show-shops ()
+        result-buf record-buf)
+    (cl-flet ((show (projection &optional table)
                 (with-temp-buffer
                   (clutch-mode)
                   (setq-local clutch-connection conn)
                   (let ((source (current-buffer)))
                     (clutch-test--execute-and-present
-                     "SELECT id, code AS region_code, country AS region_country FROM shops" conn)
+                     (format "SELECT %s FROM %s" projection (or table "shops")) conn)
                     (setq result-buf
                           (buffer-local-value 'clutch--last-result-buffer
                                               source))))
@@ -1996,30 +2009,59 @@ relation added by hand starts at the same field, offered after the key."
             (dolist (sql '("CREATE TABLE regions (code TEXT, country TEXT, name TEXT, PRIMARY KEY (code, country))"
                            "INSERT INTO regions VALUES ('n', 'a', 'north a'), ('n', 'b', 'north b')"
                            "CREATE TABLE notes (code TEXT PRIMARY KEY, body TEXT)"
-                           "INSERT INTO notes VALUES ('n', 'note n')"
-                           "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, FOREIGN KEY (code, country) REFERENCES regions)"
+                           "INSERT INTO notes VALUES ('n', 'note n'), ('x', 'note x')"
+                           "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, label TEXT GENERATED ALWAYS AS (upper(code)) STORED, FOREIGN KEY (code, country) REFERENCES regions)"
                            "INSERT INTO shops VALUES (1, 'n', 'b')"))
               (clutch-db-query conn sql))
             (clutch-er--write-relations
              (clutch-er--relations-file conn nil)
              '(((from . ((table . "shops"))) (to . ((table . "notes")))
                 (columns . [["code" "code"]]))))
-            (show-shops)
+            (show "*, upper(code) AS extra")
             (with-current-buffer result-buf
-              (clutch-record--follow-column result-buf 1 0)
+              (should (assq 1 clutch--fk-info))
+              (should-not (assq 4 clutch--fk-info))
+              (clutch--goto-cell 0 1)
+              (save-window-excursion
+                (clutch-result-open-record)
+                (setq record-buf (current-buffer))
+                (goto-char (1- (search-forward "regions.code")))
+                (clutch-record-toggle-expand)))
+            (with-current-buffer result-buf
               (clutch-test--await-queries)
               (should (equal clutch--last-query
                              "SELECT * FROM \"regions\" WHERE \"code\" = 'n' AND \"country\" = 'b'"))
               (should (equal (mapcar (lambda (row) (cl-subseq row 0 3))
                                      clutch--result-rows)
                              '(("n" "b" "north b")))))
-            (show-shops)
+            (show "id, CODE AS region_code, COUNTRY AS region_country, label, code AS other_code")
             (with-current-buffer result-buf
+              (clutch--goto-cell 0 3)
+              (should-error (clutch-result-edit-cell) :type 'user-error)
+              (clutch--goto-cell 0 4)
+              (with-current-buffer (clutch-result-edit-cell)
+                (erase-buffer)
+                (insert "x")
+                (clutch-result-edit-finish))
               (clutch-test--with-minibuffer-answers '("notes (code) from code")
-                (clutch-record--follow-column result-buf 1 0 t))
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-record--follow-column result-buf 1 0 t)))
               (clutch-test--await-queries)
               (should (equal clutch--last-query
-                             "SELECT * FROM \"notes\" WHERE \"code\" = 'n'"))))
+                             "SELECT * FROM \"notes\" WHERE \"code\" = 'x'"))
+              (should (equal (caar clutch--result-rows) "x")))
+            ;; A stored relation can be the only relation on a cold table.
+            (clutch-er--write-relations
+             (clutch-er--relations-file conn nil)
+             '(((from . ((table . "notes"))) (to . ((table . "shops")))
+                (columns . [["code" "code"]]))))
+            (show "*, length(body) AS size" "notes")
+            (with-current-buffer result-buf
+              (clutch-record--follow-column result-buf 0 0)
+              (clutch-test--await-queries)
+              (should (equal (caar clutch--result-rows) 1))))
+        (when (buffer-live-p record-buf)
+          (kill-buffer record-buf))
         (when (buffer-live-p result-buf)
           (kill-buffer result-buf))
         (delete-directory clutch-er-relations-directory t)

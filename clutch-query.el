@@ -474,7 +474,7 @@ Keep quoting until CONN resolves the base column, including through aliases."
 (defun clutch--writable-select-projection (conn sql &optional base-table)
   "Describe the direct source columns in SQL on CONN.
 Return `star' for the table's star or one source token or nil per item.
-A single BASE-TABLE star can also be expanded among direct columns."
+A single BASE-TABLE star can also occur among other items."
   (if-let* ((items (clutch--select-list-items sql)))
       (let* ((qualifiers (when (cl-some (lambda (item) (string-search "." item)) items)
                            (mapcar #'clutch-db-sql--table-raw-parts
@@ -486,7 +486,7 @@ A single BASE-TABLE star can also be expanded among direct columns."
         (cond
          ((equal sources '(star)) 'star)
          ((not (memq 'star sources)) sources)
-         ((and base-table (= (cl-count 'star sources) 1) (not (memq nil sources))
+         ((and base-table (= (cl-count 'star sources) 1)
                (clutch-db-sql-source-table sql t))
           sources)
          (t 'none)))
@@ -915,6 +915,8 @@ key would change the current row instead of the one shown."
               (clutch-db-error
                (setq identity-error (or identity-error err))
                'none)))
+           (mixed-star (and (consp projection) (memq 'star projection)
+                            (memq nil projection) projection))
            (identity-status (cond
                              (identity-error 'error)
                              (candidate 'candidate)
@@ -932,7 +934,8 @@ key would change the current row instead of the one shown."
             :source-catalog source-catalog
             :candidate candidate
             :hidden-aliases (and augment-p aliases)
-            :writable-projection projection
+            :writable-projection (if mixed-star 'none projection)
+            :mixed-star mixed-star
             :cte (and chain t)
             :augmented (and augment-p t)
             :identity-status identity-status
@@ -982,6 +985,14 @@ same-named projection with Clutch's hidden values."
                :hidden-aliases aliases)
          candidate)))))
 
+(defun clutch--expand-projection-star (items count)
+  "Expand the single table star in projection ITEMS to fit COUNT fields."
+  (let ((star (and (consp items) (memq 'star items))))
+    (if (and star (<= (length items) count))
+        (append (butlast items (length star)) (make-list (1+ (- count (length items))) 'star)
+                (cdr star))
+      items)))
+
 (defun clutch--apply-row-identity-column-metadata (columns prep &optional conn)
   "Mark hidden keys and writable origins on COLUMNS from PREP for CONN."
   (let* ((aliases (plist-get prep :hidden-aliases))
@@ -991,12 +1002,7 @@ same-named projection with Clutch's hidden values."
          (projection-present-p (plist-member prep :writable-projection))
          (items (plist-get prep :writable-projection))
          (visible-count (- (length columns) (length hidden-indices)))
-         (wildcard (and (consp items) (memq 'star items)))
-         (projection (if (and wildcard (<= (length items) visible-count))
-                         (append (butlast items (length wildcard))
-                                 (make-list (1+ (- visible-count (length items))) 'star)
-                                 (cdr wildcard))
-                       items))
+         (projection (clutch--expand-projection-star items visible-count))
          (projection-aligned-p
           (or (eq projection 'star)
               (and (listp projection)
@@ -1026,6 +1032,9 @@ same-named projection with Clutch's hidden values."
                                         ((eq source 'star) (plist-get column :name))
                                         (t source))))
                  do (when hidden-p (setq copy (plist-put copy :hidden t)))
+                 when (and (plist-get prep :mixed-star) (not (plist-get prep :cte))
+                           (or physical (plist-member column :source-column)))
+                 do (setq copy (plist-put copy :read-source (and (not hidden-p) physical)))
                  when projection-present-p
                  do (setq copy (plist-put copy :source-column name))
                  when (and name (not case-rule) (not physical) (stringp source)
@@ -1200,13 +1209,6 @@ its CASE or MERGE clauses belong to that statement until the semicolon."
                            (truncate-string-to-width (string-trim statement) 80)))
             (user-error "Query cancelled")))))))
 
-(defun clutch--note-schema-affecting-query (sql connection)
-  "Refresh or invalidate cached schema metadata after SQL on CONNECTION."
-  (when (clutch-db-sql-schema-affecting-p sql)
-    (if (clutch-db-eager-schema-refresh-p connection)
-        (clutch--set-schema-status connection 'stale)
-      (clutch--refresh-schema-cache-async connection))))
-
 (defun clutch--query-debug-summary (result)
   "Return a compact summary string for RESULT."
   (if-let* ((rows (clutch-db-result-rows result)))
@@ -1303,6 +1305,8 @@ and signal `clutch-query-interrupted'."
                   (cl-flet ((finish (result err &optional cancelled)
                               (release)
                               (let* ((elapsed (- (float-time) start))
+                                     (moved (not (equal (cadr before)
+                                                        (clutch-db-metadata-scope connection))))
                                      (outcome
                                       (if (or err (eq cancelled 'confirmed))
                                           (list :error err
@@ -1320,13 +1324,7 @@ and signal `clutch-query-interrupted'."
                                          connection "success" sql source-buffer
                                          (clutch--query-debug-summary result) elapsed)
                                         (unless result-query-p
-                                          (clutch--forget-row-identities connection)
-                                          (clutch--note-schema-affecting-query
-                                           sql connection))
-                                        (when (clutch-db-namespace-switch-p
-                                               connection sql)
-                                          (clutch--note-namespace-switch
-                                           connection before))
+                                          (clutch--forget-row-identities connection))
                                         (list :result result
                                               :connection connection
                                               :elapsed elapsed
@@ -1334,13 +1332,18 @@ and signal `clutch-query-interrupted'."
                                               :resolution-context
                                               (and result-query-p
                                                    present-result-p
-                                                   (clutch--read-resolution-context
-                                                    connection))
+                                                   ;; A batch can return rows before switching database.
+                                                   (if moved 'unknown
+                                                     (clutch--read-resolution-context connection)))
                                               :row-identity-prep row-identity-prep
                                               :server-pageable server-pageable
                                               :result-context result-context
                                               :source-buffer source-buffer
                                               :cancelled cancelled))))
+                                ;; A batch can change database before a later statement fails.
+                                (clutch--sync-statement-metadata
+                                 connection (unless (or err (eq cancelled 'confirmed)) sql)
+                                 before moved)
                                 (if dispatching
                                     (setq inline-outcome outcome)
                                   (funcall k outcome)))))

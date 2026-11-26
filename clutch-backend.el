@@ -1862,8 +1862,9 @@ nil when unsupported.")
   "Start an asynchronous foreign-key fetch for TABLE on CONN.
 CALLBACK receives the foreign-key alist on success.  ERRBACK receives an
 error message string on failure.  SCHEMA and CATALOG qualify TABLE as in
-`clutch-db-column-details'.  Return non-nil when async fetch was started,
-nil when unsupported.")
+`clutch-db-column-details'.  Return nil when unsupported.  An idle fetch
+returns a function that cancels it before dispatch and returns non-nil
+on success.  Other backends return non-nil when started.")
 
 (cl-defmethod clutch-db-foreign-keys-async ((_conn t) _table _callback
                                              &optional _errback _schema _catalog)
@@ -1876,24 +1877,33 @@ nil when unsupported.")
   "Schedule metadata FN for CONN on the main thread once Emacs is idle.
 CALLBACK receives the result of calling FN with CONN and ARGS.
 ERRBACK receives an error-message string when the work fails.
-INITIAL-DELAY, when positive, is the idle delay before the first attempt."
-  (cl-labels
-      ((run ()
-         (if (clutch-db-live-p conn)
-             (if (or (clutch-db-in-use-p conn)
-                     (gethash conn clutch-db--idle-metadata-connections))
-                 (run-with-idle-timer 0.1 nil #'run)
-               (puthash conn t clutch-db--idle-metadata-connections)
-               (unwind-protect
-                   (condition-case err
-                       (funcall callback (apply fn conn args))
-                     (error
-                      (when errback
-                        (funcall errback (clutch-db--error-message err)))))
-                 (remhash conn clutch-db--idle-metadata-connections)))
-           (when errback
-             (funcall errback "Connection closed")))))
-    (run-with-idle-timer (or initial-delay 0) nil #'run)))
+INITIAL-DELAY, when positive, is the idle delay before the first attempt.
+Return a function that cancels the call if it is still queued."
+  (let (timer)
+    (cl-labels
+        ((schedule (delay)
+           (setq timer (run-with-idle-timer delay nil #'run)))
+         (run ()
+           (setq timer nil)
+           (if (clutch-db-live-p conn)
+               (if (or (clutch-db-in-use-p conn)
+                       (gethash conn clutch-db--idle-metadata-connections))
+                   (schedule 0.1)
+                 (puthash conn t clutch-db--idle-metadata-connections)
+                 (unwind-protect
+                     (condition-case err
+                         (funcall callback (apply fn conn args))
+                       (error
+                        (when errback
+                          (funcall errback (clutch-db--error-message err)))))
+                   (remhash conn clutch-db--idle-metadata-connections)))
+             (when errback (funcall errback "Connection closed")))))
+      (schedule (or initial-delay 0))
+      (lambda ()
+        (when timer
+          (cancel-timer timer)
+          (setq timer nil)
+          t)))))
 
 ;; Query
 
@@ -2015,6 +2025,13 @@ the backend has no fixed rule.")
 (cl-defmethod clutch-db-identifier-case ((_conn t))
   "Return nil for an unspecified identifier case rule."
   nil)
+
+(defun clutch-db-assoc-column (conn name alist)
+  "Find resolved column NAME in ALIST using CONN's identifier case rule."
+  (when name
+    (if (eq (clutch-db-identifier-case conn) 'ascii-insensitive)
+        (with-case-table ascii-case-table (assoc-string name alist t))
+      (assoc name alist))))
 
 (defun clutch-db-sql-fold-identifier (conn token)
   "Return identifier TOKEN as named in the catalog of CONN's database.
@@ -2227,8 +2244,8 @@ CONN's current schema then names the namespace that CONN is in, and
 
 (cl-defgeneric clutch-db-metadata-scope (conn)
   "Return the scope of CONN's metadata when its current schema is not all of it.
-Return an alist with catalog and schema entries when applicable, as CONN
-last reported them, without asking the server.  It is read before each
+Return an alist of catalog, schema or search-path entries, as applicable,
+from the last server reply without asking again.  It is read before each
 statement to tell whether the statement moved CONN.")
 
 (cl-defmethod clutch-db-metadata-scope ((_conn t))
@@ -2700,20 +2717,35 @@ Signal ambiguity for a write operation OP."
 (defun clutch-db--column-binding-select (conn names source-token)
   "Select identifiers NAMES directly from SQL SOURCE-TOKEN on CONN."
   (format "SELECT %s FROM %s"
-          (mapconcat (lambda (name) (clutch-db-escape-identifier conn name)) names ", ")
+          (mapconcat (lambda (name) (if (eq name 'star) "*" (clutch-db-escape-identifier conn name)))
+                     names ", ")
           source-token))
+
+(defun clutch-db--column-bindings (names columns)
+  "Pair requested NAMES with COLUMNS in result order.
+A trailing `star' represents all remaining columns in the projection."
+  (cl-loop for name in names while columns
+           collect (cons name (if (eq name 'star) columns (pop columns)))))
 
 (cl-defgeneric clutch-db-resolve-column-names (conn names source-token)
   "Resolve competing spellings in NAMES on CONN against SQL SOURCE-TOKEN.
-Return an alist mapping each resolved spelling to its physical column name.")
+Return an alist mapping each resolved spelling to its physical column name.
+A trailing `star' asks for the ordered column names SELECT * actually returns.")
+
+(cl-defgeneric clutch-db-resolve-column-names-async (conn names source-token callback)
+  "Resolve NAMES on SOURCE-TOKEN for display using CONN's metadata session.
+Call CALLBACK with the bindings, or nil and an error message on failure.
+Return nil if unsupported."
+  (:method ((_conn t) _names _source-token _callback) nil))
 
 (cl-defmethod clutch-db-resolve-column-names ((conn t) names source-token)
   "Match NAMES to the columns of SOURCE-TOKEN visible in CONN's session."
   (let ((columns (clutch-db-result-columns
                   (clutch-db-query conn (format "SELECT * FROM %s WHERE 1=0" source-token)))))
     (cl-loop for name in names
-             for detail = (clutch-db-source-column-detail name columns)
-             when detail collect (cons name (plist-get detail :name)))))
+             if (eq name 'star) collect (cons name (clutch-db-result-column-names columns))
+             else append (when-let* ((detail (clutch-db-source-column-detail name columns)))
+                           (list (cons name (plist-get detail :name)))))))
 
 ;; Re-entrancy guard
 

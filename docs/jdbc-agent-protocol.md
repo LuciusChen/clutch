@@ -18,7 +18,7 @@ Separate sessions let SQL and metadata proceed independently. On Oracle, a long 
 
 A lookup or listing that fails because its metadata or bulk session is unusable (for example, Oracle reports `ORA-12592`) is retried once on a replacement session with the remembered schema. If the retry also invalidates its session, the next request gets a fresh one. Cursors keep fetching on the session that opened them. If that session fails during a metadata fetch, the agent invalidates it and its cursors, and the listing must start again. These recovery paths leave the primary session and its transaction alone.
 
-The agent's `set-current-schema` operation, currently used by Oracle, updates the primary and metadata sessions together so one logical Clutch connection still presents one effective schema, and drops the bulk session (ending any listing still paging on it), which the next listing reopens with the remembered schema.  Product-specific namespace paths remain explicit: DuckDB switches the primary session with `USE` and synchronizes catalog/schema metadata parameters, while ClickHouse reconnects with a different database.
+The agent's `set-current-schema` operation, currently used by Oracle, updates the primary and metadata sessions together so one logical Clutch connection still presents one effective schema, and drops the bulk session (ending any listing still paging on it), which the next listing reopens with the remembered schema.  Product-specific namespace paths remain explicit: DuckDB and SQL Server scope metadata to the namespace reported by the primary session after `USE`. ClickHouse reconnects with a different database. SQL Server can return the initial database in the connect result’s `catalog` field. When advertised this way, foreground responses carry the driver’s current `catalog` at the top level, including fetches and errors. With older agents Clutch reads back `DB_NAME()` after a possible `USE`.
 
 The stdin reader submits decoded requests to a pool. The dispatcher serializes operations on each JDBC session with separate foreground, metadata and bulk locks. Schema changes and normal disconnect acquire all applicable locks in that order.
 
@@ -103,6 +103,7 @@ Schema and object metadata:
 - `search-tables`
 - `get-columns`
 - `search-columns`
+- `describe-source-columns` when advertised by SQL Server connections
 - `get-primary-keys`
 - `get-foreign-keys`
 - `get-referencing-keys` (agent 0.2.28+)
@@ -236,6 +237,8 @@ Generic JDBC rows contain:
 ## Column metadata payload
 
 `get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
+
+A SQL Server `connect` reply can advertise `describe-source-columns: true`. The operation takes `conn-id` and a `projection` SELECT (optionally preceded by `USE`), describes it on the metadata session without executing it, and returns `columns` in projection order. An entry is null when SQL Server cannot identify a source column.
 
 On DuckDB and SQL Server, `get-columns` forwards schema and table as JDBC LIKE patterns. Clutch escapes literal underscores, percent signs and backslashes for both column names and details, including the connection's default schema; catalog remains an exact name. Primary-key and foreign-key operations take exact schema/table names and do not use that escaping. Oracle's direct column metadata queries also use exact names.
 

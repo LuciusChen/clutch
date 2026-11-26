@@ -15,6 +15,7 @@
 (require 'clutch-schema)
 (require 'clutch-sql)
 (require 'clutch-ui)
+(require 'clutch-viz)
 (require 'seq)
 (require 'sql)
 (require 'subr-x)
@@ -1026,8 +1027,8 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
   (member (clutch--object-type-string entry)
           '("SYNONYM" "INDEX" "TRIGGER")))
 
-(defun clutch--object-summary-pairs (entry)
-  "Return summary label/value pairs for object ENTRY."
+(defun clutch--object-summary-rows (entry)
+  "Return summary label/value rows for object ENTRY."
   (let* ((type (clutch--object-type-string entry))
          (target-schema (plist-get entry :target-schema))
          (target-name (plist-get entry :target-name))
@@ -1040,57 +1041,45 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
                   (t nil))))
     (delq nil
           (list
-           (cons "Name" (or (plist-get entry :name) ""))
-           (cons "Type" type)
+           (list "Name" (or (plist-get entry :name) ""))
+           (list "Type" type)
            (and (plist-get entry :source-schema)
-                (cons "Source schema" (plist-get entry :source-schema)))
+                (list "Source schema" (plist-get entry :source-schema)))
            (and (plist-get entry :schema)
                 (not (equal (plist-get entry :schema)
                             (plist-get entry :source-schema)))
-                (cons "Schema" (plist-get entry :schema)))
+                (list "Schema" (plist-get entry :schema)))
            (and target
-                (cons (if (string= type "SYNONYM") "Target object" "Target")
+                (list (if (string= type "SYNONYM") "Target object" "Target")
                       target))
            (and (plist-get entry :status)
-                (cons "Status" (plist-get entry :status)))
+                (list "Status" (plist-get entry :status)))
            (and (plist-get entry :timing)
-                (cons "Timing" (plist-get entry :timing)))
+                (list "Timing" (plist-get entry :timing)))
            (and (plist-get entry :event)
-                (cons "Event" (plist-get entry :event)))
+                (list "Event" (plist-get entry :event)))
            (and (eq (plist-get entry :unique) t)
-                (cons "Unique" "yes"))
+                (list "Unique" "yes"))
            (and (string= type "SEQUENCE")
-                (cons "Range"
+                (list "Range"
                       (format "%s -> %s"
                               (or (plist-get entry :min) "?")
                               (or (plist-get entry :max) "?"))))
            (and (string= type "SEQUENCE")
-                (cons "Increment"
+                (list "Increment"
                       (format "%s" (or (plist-get entry :increment) "?"))))
            (and (string= type "SEQUENCE")
-                (cons "Last value"
+                (list "Last value"
                       (format "%s" (or (plist-get entry :last) "?"))))
            (and (plist-get entry :identity)
-                (cons "Identity" (plist-get entry :identity)))))))
-
-(defun clutch--object-summary-lines (entry)
-  "Return formatted summary lines for object ENTRY."
-  (let* ((pairs (clutch--object-summary-pairs entry))
-         (width (if pairs
-                    (apply #'max (mapcar (lambda (pair) (length (car pair))) pairs))
-                  0)))
-    (mapcar (lambda (pair)
-              (format (format "  %%-%ds  %%s" width)
-                      (car pair)
-                      (cdr pair)))
-            pairs)))
+                (list "Identity" (plist-get entry :identity)))))))
 
 (defun clutch--object-tag-string (parts)
   "Return a compact display string for non-empty PARTS."
   (string-join (seq-remove #'string-empty-p (delq nil parts)) ", "))
 
-(defun clutch--object-format-column (column)
-  "Return a display line for COLUMN."
+(defun clutch--object-column-cells (column)
+  "Return describe cells for COLUMN."
   (let* ((name (or (plist-get column :name) ""))
          (type (or (plist-get column :type) ""))
          (fk (plist-get column :foreign-key))
@@ -1106,34 +1095,20 @@ TITLE-SUFFIX, when non-nil, disambiguates the generated buffer name."
                       (and (plist-get column :default)
                            (format "default %s" (plist-get column :default)))
                       (plist-get column :comment)))))
-    (string-trim-right
-     (format "  %-18s  %-18s%s"
-             name
-             type
-             (if (string-empty-p tags)
-                 ""
-               (format "  %s" tags))))))
+    (if (string-empty-p tags) (list name type) (list name type tags))))
 
-(defun clutch--object-format-index-column (column)
-  "Return a display line for index COLUMN."
-  (string-trim-right
-   (format "  %-18s  #%s  %s"
-           (or (plist-get column :name) "")
-           (or (plist-get column :position) "?")
-           (or (plist-get column :descend) "ASC"))))
+(defun clutch--object-index-column-cells (column)
+  "Return describe cells for an index COLUMN."
+  (list (or (plist-get column :name) "")
+        (format "#%s" (or (plist-get column :position) "?"))
+        (or (plist-get column :descend) "ASC")))
 
-(defun clutch--object-format-routine-param (param)
-  "Return a display line for routine PARAM."
-  (string-trim-right
-   (format "  %-18s  %-18s%s"
-           (or (plist-get param :name)
-               (plist-get param :mode)
-               "")
-           (or (plist-get param :type) "")
-           (if-let* ((mode (plist-get param :mode))
-                     ((not (string-empty-p mode))))
-               (format "  %s" mode)
-             ""))))
+(defun clutch--object-routine-param-cells (param)
+  "Return describe cells for routine PARAM."
+  (let ((mode (plist-get param :mode)))
+    (delq nil (list (or (plist-get param :name) mode "")
+                    (or (plist-get param :type) "")
+                    (and mode (not (string-empty-p mode)) mode)))))
 
 (defun clutch--object-related-entries (conn entry type &optional refresh)
   "Return related TYPE entries for table-like ENTRY on CONN.
@@ -1156,14 +1131,11 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
                      (downcase name))))
      objects)))
 
-(defun clutch--object-index-lines (indexes)
-  "Return describe lines for INDEXES."
+(defun clutch--object-index-rows (indexes)
+  "Return describe rows for INDEXES."
   (mapcar (lambda (index)
-            (format "  %-18s%s"
-                    (or (plist-get index :name) "")
-                    (if (eq (plist-get index :unique) t)
-                        "  UNIQUE"
-                      "")))
+            (let ((name (or (plist-get index :name) "")))
+              (if (eq (plist-get index :unique) t) (list name "UNIQUE") (list name))))
           indexes))
 
 (defun clutch--object-describe-json-text (conn entry)
@@ -1186,7 +1158,7 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
           "document object description")))))
 
 (defun clutch--object-describe-sections (conn entry)
-  "Return describe sections for ENTRY on CONN."
+  "Return describe sections for ENTRY on CONN, each a title and rows of cells."
   (pcase (clutch--object-type-string entry)
     ((or "TABLE" "VIEW")
      (let* ((name (plist-get entry :name))
@@ -1197,25 +1169,24 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
               (when-let* ((comment (and (string= (clutch--object-type-string entry) "TABLE")
                                          (clutch--ensure-table-comment
                                           conn name schema))))
-                (cons "Comment" (list (format "  %s" comment))))
+                (list "Comment" (list comment)))
               (let ((details (or (clutch--ensure-column-details conn table t)
                                  (and (stringp table) (clutch-db-list-columns conn name)))))
                 (cons "Columns"
                       (mapcar (if (plist-get (car-safe details) :name)
-                                  #'clutch--object-format-column
-                                (lambda (column) (format "  %s" column)))
+                                  #'clutch--object-column-cells
+                                #'list)
                               details)))
               (when-let* ((indexes (clutch--object-related-entries conn entry "INDEX")))
-                (cons "Indexes" (clutch--object-index-lines indexes)))
+                (cons "Indexes" (clutch--object-index-rows indexes)))
               (when-let* ((triggers (clutch--object-related-entries conn entry "TRIGGER")))
                 (cons "Triggers"
                       (mapcar (lambda (trigger)
-                                (format "  %-18s  %s"
-                                        (or (plist-get trigger :name) "")
-                                        (clutch--object-tag-string
-                                         (list (plist-get trigger :timing)
-                                               (plist-get trigger :event)
-                                               (plist-get trigger :status)))))
+                                (list (or (plist-get trigger :name) "")
+                                      (clutch--object-tag-string
+                                       (list (plist-get trigger :timing)
+                                             (plist-get trigger :event)
+                                             (plist-get trigger :status)))))
                               triggers)))))))
     ("COLLECTION"
      (let ((name (plist-get entry :name)))
@@ -1225,25 +1196,25 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
                                        (clutch-db-list-columns conn name))))
                 (cons "Fields"
                       (mapcar (if (and details (plist-get (car-safe details) :name))
-                                  #'clutch--object-format-column
-                                (lambda (column) (format "  %s" column)))
+                                  #'clutch--object-column-cells
+                                #'list)
                               details)))
               (when-let* ((indexes (clutch--object-related-entries
                                     conn entry "INDEX" t)))
-                (cons "Indexes" (clutch--object-index-lines indexes)))))))
+                (cons "Indexes" (clutch--object-index-rows indexes)))))))
     ("KEY"
      (when-let* ((details (clutch-db-object-details conn entry)))
        (list
         (cons "Metadata"
               (mapcar (lambda (pair)
-                        (format "  %-18s  %s" (car pair) (cdr pair)))
+                        (list (format "%s" (car pair)) (format "%s" (cdr pair))))
                       details)))))
     ("INDEX"
      (when-let* ((details (clutch-db-object-details conn entry)))
-       (list (cons "Columns" (mapcar #'clutch--object-format-index-column details)))))
+       (list (cons "Columns" (mapcar #'clutch--object-index-column-cells details)))))
     ((or "PROCEDURE" "FUNCTION")
      (when-let* ((details (clutch-db-object-details conn entry)))
-       (list (cons "Parameters" (mapcar #'clutch--object-format-routine-param details)))))
+       (list (cons "Parameters" (mapcar #'clutch--object-routine-param-cells details)))))
     (_ nil)))
 
 (defun clutch--object-describe-text (conn entry &optional params)
@@ -1255,7 +1226,7 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
                            (clutch--object-type-string entry)))
            (sections (append
                       (list (cons "Summary"
-                                  (clutch--object-summary-lines entry)))
+                                  (clutch--object-summary-rows entry)))
                       (clutch--object-describe-sections conn entry))))
       (string-join
        (cons
@@ -1263,12 +1234,14 @@ schema is never listed.  When REFRESH is non-nil, list TYPE again."
         (mapcar
          (lambda (section)
            (let* ((title (car section))
-                  (lines (cdr section))
-                  (count (length lines))
+                  (rows (cdr section))
+                  (count (length rows))
                   (display-title (if (member title '("Summary" "Comment"))
                                      title
                                    (format "%s (%d)" title count))))
-             (format "%s\n%s" display-title (string-join lines "\n"))))
+             (concat display-title "\n"
+                     (mapconcat (lambda (line) (concat "  " line))
+                                (clutch-viz-columns rows 2) "\n"))))
          sections))
        "\n\n"))))
 

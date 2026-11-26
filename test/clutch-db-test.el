@@ -749,6 +749,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
   (dolist (case '((:label "sqlserver default"
                    :oracle-manual-commit t
                    :driver sqlserver
+                   :reply (:catalog "app")
                    :params (:host "db" :port 1433 :database "app"
                             :user "sa" :password "secret")
                    :driver-class "com.microsoft.sqlserver.jdbc.SQLServerDriver"
@@ -769,7 +770,7 @@ and a `?' inside a dollar-quoted function body is part of the body."
                   ((symbol-function 'clutch-jdbc--rpc)
                    (lambda (_conn _op params &optional _timeout-seconds)
                      (setq captured-params params)
-                     '(:conn-id 8))))
+                     (append '(:conn-id 8) (plist-get case :reply)))))
           (clutch-db-jdbc-connect
            (plist-get case :driver)
            (plist-get case :params))
@@ -2118,9 +2119,8 @@ Filtering the category listing ran a schema-wide query per describe."
                  (lambda (_secs _repeat fn &rest _args)
                    (setq timer-fn fn)
                    'fake-timer)))
-        (should (eq (clutch-db-foreign-keys-async
-                     conn "users" (lambda (value) (setq result value)))
-                    'fake-timer))
+        (should (clutch-db-foreign-keys-async
+                 conn "users" (lambda (value) (setq result value))))
         (funcall timer-fn)
         (should (equal result
                        '(("account_id" :ref-table "accounts"
@@ -2474,27 +2474,25 @@ order, and a table is found as referenced however its name is cased."
                        (should (eq category 'indexes))
                        '((:name "users_pkey" :type "INDEX")))))
             (should
-             (eq
-              (pcase op
-                ('refresh-schema
-                 (clutch-db-refresh-schema-async
-                  conn (lambda (value) (setq callback-result value))))
-                ('list-columns
-                 (clutch-db-list-columns-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('column-details
-                 (clutch-db-column-details-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('table-comment
-                 (clutch-db-table-comment-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('foreign-keys
-                 (clutch-db-foreign-keys-async
-                  conn "users" (lambda (value) (setq callback-result value))))
-                ('list-objects
-                 (clutch-db-list-objects-async
-                  conn 'indexes (lambda (value) (setq callback-result value)))))
-              'fake-timer))
+             (pcase op
+               ('refresh-schema
+                (clutch-db-refresh-schema-async
+                 conn (lambda (value) (setq callback-result value))))
+               ('list-columns
+                (clutch-db-list-columns-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('column-details
+                (clutch-db-column-details-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('table-comment
+                (clutch-db-table-comment-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('foreign-keys
+                (clutch-db-foreign-keys-async
+                 conn "users" (lambda (value) (setq callback-result value))))
+               ('list-objects
+                (clutch-db-list-objects-async
+                 conn 'indexes (lambda (value) (setq callback-result value))))))
             (should (equal scheduled '(0 nil)))
             (should (equal callback-result expected))))))))
 
@@ -2562,15 +2560,9 @@ order, and a table is found as referenced however its name is cased."
                      (should (equal table "users"))
                      (cl-incf query-count)
                      '("id" "name"))))
-          (should (eq (clutch-db--schedule-idle-metadata-call
-                       conn
-                       (lambda (columns)
-                         (setq callback-result columns))
-                       nil
-                       #'clutch-db-list-columns
-                       nil
-                       "users")
-                      'fake-timer))
+          (should (clutch-db--schedule-idle-metadata-call
+                   conn (lambda (columns) (setq callback-result columns))
+                   nil #'clutch-db-list-columns nil "users"))
           (should (= (length timers) 1))
           (funcall (pop timers))
           (should-not callback-result)
@@ -6315,9 +6307,9 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (cond
-                    ((equal sql "SELECT current_schemas(true)")
+                    ((equal sql "SELECT current_schema(), current_schemas(true)")
                      (cl-incf asked)
-                     (clutch-db-test--make-pg-result :rows `((,path))))
+                     (clutch-db-test--make-pg-result :rows `(("s1" ,path))))
                     ((string-match-p "TO s1, s3" sql)
                      (setq path "{pg_catalog,s1,s3}")
                      (clutch-db-test--make-pg-result :command-tag "SET"))
@@ -6325,10 +6317,10 @@ again after SQL that may change it, a rollback included."
                      (setq path "{pg_catalog,s1,s2}")
                      (clutch-db-test--make-pg-result :command-tag "ROLLBACK"))
                     (t (clutch-db-test--make-pg-result))))))
+        (should (equal (clutch-db-current-schema conn) "s1"))
         (should (equal (clutch-db-resolution-context conn)
                        '("app" "{pg_catalog,s1,s2}")))
-        (should (equal (clutch-db-resolution-context conn)
-                       '("app" "{pg_catalog,s1,s2}")))
+        (should (equal (alist-get 'search-path (clutch-db-metadata-scope conn)) path))
         (should (= asked 1))
         (clutch-db-query conn "SET search_path TO s1, s3")
         (should (equal (clutch-db-resolution-context conn)
@@ -6355,9 +6347,8 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (cond
-                    ((equal sql "SELECT current_schema()")
-                     (clutch-db-test--make-pg-result
-                      :rows `((,pgsql-null))))
+                    ((equal sql "SELECT current_schema(), current_schemas(true)")
+                     (clutch-db-test--make-pg-result :rows `((,pgsql-null ["pg_catalog"]))))
                     ((string-match-p "SELECT obj_description" sql)
                      (clutch-db-test--make-pg-result
                       :rows `((,pgsql-null))))
@@ -6374,10 +6365,11 @@ again after SQL that may change it, a rollback included."
       (cl-letf (((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq executed-sql sql)
-                   (clutch-db-test--make-pg-result))))
+                   (clutch-db-test--make-pg-result :rows '(("app" ["pg_catalog" "app"]))))))
         (should (equal (clutch-db-set-current-schema conn "app") "app"))
         (should (equal executed-sql "SET search_path TO \"app\""))
-        (should (equal (clutch-db-current-schema conn) "app"))))))
+        (should (equal (clutch-db-current-schema conn) "app"))
+        (should (equal (alist-get 'search-path (clutch-db-metadata-scope conn)) ["pg_catalog" "app"]))))))
 
 (ert-deftest clutch-db-test-pg-connect-applies-schema-via-search-path ()
   "PostgreSQL connect should restore a requested schema via search_path."
@@ -6393,7 +6385,7 @@ again after SQL that may change it, a rollback included."
                 ((symbol-function 'pgsql-exec)
                  (lambda (_client sql)
                    (setq executed-sql sql)
-                   (clutch-db-test--make-pg-result))))
+                   (clutch-db-test--make-pg-result :rows '(("app" ["pg_catalog" "app"]))))))
         (let ((conn (clutch-db-pg-connect
                      '(:host "127.0.0.1"
                        :port 54321
@@ -6422,12 +6414,12 @@ SET from being followed.  XTDB has no search_path to switch."
           (shown 0))
       (cl-flet ((server (sql)
                   (cond
-                   ((equal sql "SELECT current_schema()")
+                   ((equal sql "SELECT current_schema(), current_schemas(true)")
                     (cl-incf asked)
                     (clutch-db-test--make-pg-result
                      :rows `((,(if (equal path "nowhere")
                                    pgsql-null
-                                 (car (split-string path ", ")))))))
+                                 (car (split-string path ", "))) ,path))))
                    ((equal sql "SHOW search_path")
                     (cl-incf shown)
                     (clutch-db-test--make-pg-result :rows `((,path))))
@@ -6567,17 +6559,16 @@ but the console went on showing that SET's schema after clutch-rollback,
 as the adapter found no transaction to end and kept its cached path."
   (require 'clutch-db-pg)
   (clutch-db-test--with-pgsql-results
-    (let ((conn (clutch-db-test--make-pg-connection :database "test")))
-      (cl-letf (((symbol-function 'pgsql-exec)
-                 (lambda (_client sql)
-                   (clutch-db-test--make-pg-result
-                    :rows (and (equal sql "SELECT current_schema()")
-                               '(("public"))))))
-                ((symbol-function 'pgsql-transaction-status)
-                 (lambda (_client) 'idle)))
-        (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
-                              (lambda (conn) (clutch-db-set-auto-commit conn t))))
-          (clutch-db-pg--cache-current-schema conn "alt")
+    (dolist (finish (list #'clutch-db-rollback #'clutch-db-commit
+                          (lambda (conn) (clutch-db-set-auto-commit conn t))))
+      (let ((conn (clutch-db-test--make-pg-connection :database "test"))
+            (schema "alt"))
+        (cl-letf (((symbol-function 'pgsql-exec)
+                   (lambda (_client _sql)
+                     (clutch-db-test--make-pg-result :rows `((,schema [,schema])))))
+                  ((symbol-function 'pgsql-transaction-status) (lambda (_client) 'idle)))
+          (should (equal (clutch-db-current-schema conn) "alt"))
+          (setq schema "public")
           (should-not (funcall finish conn))
           (should (equal (clutch-db-current-schema conn) "public")))))))
 
@@ -8941,13 +8932,19 @@ Skips unless `clutch-db-test-sql-interface-mongodb-database' and either
     (should (equal (clutch-db-display-name conn) "SQL Server"))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-query ()
-  "SQL Server JDBC query should return one row for SELECT 1."
+  "SQL Server should return rows and report a database switch even on error."
   :tags '(:db-live :jdbc-live :mssql-live)
   (clutch-db-test--with-mssql conn
     (let ((result (clutch-db-query conn "SELECT 1 AS n")))
       (should (clutch-db-result-p result))
       (should (= (length (clutch-db-result-rows result)) 1))
-      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))))
+      (should (equal (format "%s" (caar (clutch-db-result-rows result))) "1")))
+    (should-error (clutch-db-query conn "USE tempdb; THROW 50000, 'after USE', 1")
+                  :type 'clutch-db-error)
+    (should (equal (clutch-db-database conn) "tempdb"))
+    (clutch-db-query conn "USE master; SET NOEXEC ON")
+    (clutch-db-query conn "SET NOEXEC OFF")
+    (should (equal (clutch-db-database conn) "master"))))
 
 (ert-deftest clutch-db-test-jdbc-mssql-live-release-invalidates-later-savepoints ()
   "Releasing a SQL Server savepoint should invalidate later local handles."
@@ -9344,17 +9341,25 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
           (should-not (gethash 42 clutch-jdbc--async-callbacks)))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-quit-forgets-the-request ()
-  "A quit while waiting should forget the request, so its late reply is dropped."
-  (let ((clutch-jdbc--agent-process 'fake-proc)
-        (clutch-jdbc--async-callbacks (make-hash-table :test 'eql)))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
-              ((symbol-function 'accept-process-output)
-               (lambda (&rest _) (signal 'quit nil))))
-      (should (eq (condition-case nil
-                      (clutch-jdbc--recv-response 5 10.0)
-                    (quit 'quit))
-                  'quit)))
-    (should-not (gethash 5 clutch-jdbc--async-callbacks))))
+  "An abandoned query drops its reply but keeps its own id for cancellation."
+  (dolist (reports-catalog '(nil t))
+    (let* ((clutch-jdbc--agent-process 'fake-proc)
+           (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+           (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+           (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+           (conn (make-clutch-jdbc-conn :process 'fake-proc :conn-id 7
+                                        :params (list :driver 'sqlserver :catalog "a" :rpc-timeout 10)
+                                        :reports-catalog reports-catalog))
+           (id 0))
+      (puthash 7 conn clutch-jdbc--connections-by-id)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'clutch-jdbc--send) (lambda (&rest _) (cl-incf id)))
+                ((symbol-function 'accept-process-output) (lambda (&rest _) (signal 'quit nil))))
+        (should (eq 'quit (condition-case nil (clutch-db-query conn "USE b")
+                            (quit 'quit))))
+        (should (eql (gethash conn clutch-jdbc--busy-request-ids) 1))
+        (should-not (gethash 1 clutch-jdbc--async-callbacks))
+        (should (eq (clutch-db-resolution-context conn) 'unknown))))))
 
 (ert-deftest clutch-db-test-jdbc-recv-response-timeout-cleans-state ()
   "When RPC timeout fires, agent and pending callback state are reset."

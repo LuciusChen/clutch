@@ -2449,13 +2449,12 @@ Point left behind made the next cell command scroll back to it."
               (call-interactively #'clutch-result-edit-cell)
               (setq edit-buf (current-buffer))
               (erase-buffer)
-              (insert "after")
               (call-interactively #'clutch-result-edit-finish)
               (should (eq (current-buffer) record-buf))
               (should (eq (get-text-property (point) 'clutch-col-idx) 2))
-              (should (string-match-p "note\\s-*:\\s-*after" (buffer-string)))
+              (should (string-match-p "note\\s-*:\\s-*<empty>" (buffer-string)))
               (with-current-buffer result-buf
-                (should (equal clutch--pending-edits '((([1] . 2) . "after"))))))
+                (should (equal clutch--pending-edits '((([1] . 2) . ""))))))
           (when (buffer-live-p edit-buf) (kill-buffer edit-buf))
           (when (buffer-live-p record-buf) (kill-buffer record-buf)))))))
 
@@ -2569,33 +2568,49 @@ Point left behind made the next cell command scroll back to it."
             (should-not clutch--pending-edits)))))))
 
 (ert-deftest clutch-test-record-discard-pending-edit-at-field ()
-  "Record buffers should discard the staged edit for the field at point."
-  (clutch-test--with-result-state-buffer result-buf
-      (:columns '("id" "name")
-       :column-defs '((:name "id" :type-category numeric)
-                      (:name "name" :type-category text))
-       :rows '((1 "alice"))
-       :row-identity (clutch-test--primary-row-identity
-                      "users" '("id") '(0))
-       :pending-edits '((([1] . 1) . "ann")))
-    (with-temp-buffer
-      (clutch-record-mode)
-      (setq-local clutch-record--result-buffer result-buf
-                  clutch-record--row-idx 0
-                  clutch-record--expanded-fields nil)
-      (clutch-record--render)
-      (should (string-match-p "name\\s-*:\\s-*ann" (buffer-string)))
-      (goto-char (point-min))
-      (search-forward "name")
-      (goto-char (match-beginning 0))
-      (cl-letf (((symbol-function 'clutch--replace-row-at-index) #'ignore)
-                ((symbol-function 'clutch--refresh-footer-line) #'ignore)
-                ((symbol-function 'message) #'ignore))
-        (clutch-result-discard-pending-at-point))
-      (should (string-match-p "name\\s-*:\\s-*alice" (buffer-string)))
-      (should (eq (get-text-property (point) 'clutch-col-idx) 1)))
-    (with-current-buffer result-buf
-      (should-not clutch--pending-edits))))
+  "An editor follows its alias's draft until that draft is discarded."
+  (clutch-test--with-sqlite-result (conn result)
+      '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+        "INSERT INTO users VALUES (1, NULL)")
+      "SELECT id, name AS a, name AS b FROM users"
+    (clutch--goto-cell 0 2)
+    (with-current-buffer (clutch-result-edit-cell)
+      (insert "ann")
+      (clutch-result-edit-finish))
+    (clutch-result-delete-rows)
+    (clutch-result-open-record)
+    (let ((record (current-buffer)) editor)
+      (unwind-protect
+          (progn
+            (forward-line 1)
+            (setq editor (clutch-result-edit-cell))
+            (clutch-result-edit-set-null)
+            (pop-to-buffer record)
+            (clutch-result-discard-pending-at-point)
+            (should (eq (get-text-property (point) 'clutch-col-idx) 1))
+            (should-not (get-text-property (point) 'clutch-full-value))
+            (with-current-buffer (clutch-result-edit-cell)
+              (insert "beth")
+              (clutch-result-edit-finish))
+            (pop-to-buffer editor)
+            (let ((err (should-error (clutch-result-edit-finish) :type 'user-error)))
+              (should (string-match-p "draft changed" (error-message-string err))))
+            (should (eq clutch-result-edit--special-value 'null))
+            (clutch-result-edit-cancel)
+            (with-current-buffer record
+              (goto-char (point-min))
+              (forward-line 2)
+              (with-current-buffer (clutch-result-edit-cell)
+                (should (equal (buffer-string) "beth"))
+                (clutch-result-edit-set-null)
+                (clutch-result-edit-finish))
+              (should (eq (get-text-property (point) 'clutch-col-idx) 2))
+              (should-not (get-text-property (point) 'clutch-full-value)))
+            (with-current-buffer result
+              (should-not clutch--pending-edits)
+              (should (equal clutch--pending-deletes '([1])))))
+        (when (buffer-live-p editor) (kill-buffer editor))
+        (when (buffer-live-p record) (kill-buffer record))))))
 
 (ert-deftest clutch-test-record-open-renders-visible-row ()
   "Opening record view should render the visible row at point."
@@ -2697,7 +2712,7 @@ Point left behind made the next cell command scroll back to it."
                                'clutch-full-value "{\"id\":1}")
             (should (equal (clutch-record--field-action-description) "Show value"))
             (with-current-buffer result-buf
-              (setq-local clutch--fk-info '((0 . (:ref-table "users")))))
+              (setq-local clutch--fk-info '((0 . (:table "users")))))
             (should (equal (clutch-record--field-action-description) "Follow FK"))
             (put-text-property (point-min) (point-max) 'clutch-full-value
                                clutch--cell-default-placeholder)
@@ -2718,8 +2733,11 @@ Point left behind made the next cell command scroll back to it."
     (unwind-protect
         (progn
           (with-current-buffer result-buf
-            (setq-local clutch--result-column-defs
-                        '((:name "payload" :type-category json))
+            (setq-local clutch-connection (make-clutch-test-conn)
+                        clutch--result-source-table "users"
+                        clutch--result-columns '("payload")
+                        clutch--result-column-defs
+                        '((:name "payload" :type-category json :source-column nil))
                         clutch--fk-info nil
                         clutch--result-rows '(("payload"))))
           (with-temp-buffer
@@ -2735,7 +2753,9 @@ Point left behind made the next cell command scroll back to it."
                         clutch-record--expanded-fields nil)
             (let (followed
                   (render-count 0))
-              (cl-letf (((symbol-function 'clutch-record--render)
+              (cl-letf (((symbol-function 'clutch--ensure-foreign-keys)
+                         (lambda (&rest _) (ert-fail "Local field waited for foreign keys")))
+                        ((symbol-function 'clutch-record--render)
                          (lambda () (cl-incf render-count)))
                         ((symbol-function 'clutch-record--follow-column)
                          (lambda (source cidx ridx)
@@ -2747,7 +2767,7 @@ Point left behind made the next cell command scroll back to it."
                 (should (= render-count 2))
                 (with-current-buffer result-buf
                   (setq-local clutch--fk-info
-                              '((0 . (:ref-table "users"
+                              '((0 . (:table "users"
                                       :ref-column "id")))))
                 (clutch-record-toggle-expand)
                 (should (equal followed (list result-buf 0 0)))))))
@@ -3380,9 +3400,7 @@ header string and column pixel widths, then reused."
           (let* ((capability (clutch--footer-mutation-capability-part))
                  (text (substring-no-properties capability))
                  (help (get-text-property 0 'help-echo capability)))
-            (should (string-match-p "row editing unavailable" text))
-            (should (string-match-p "E/D off" text))
-            (should-not (string-prefix-p "row editing unavailable" text))
+            (should (string-match-p "Update/delete unavailable" text))
             (should-not (string-match-p "ORA-12592\\|row identity error" text))
             (should (stringp help))
             (should-not (string-match-p "ORA-12592" help))

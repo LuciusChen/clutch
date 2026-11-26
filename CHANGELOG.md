@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Record view shows and follows a foreign key when the query gives its column an alias. Result metadata follows the current database after SQL Server `USE`, the full PostgreSQL search path after `SET search_path`, and table definitions changed or rolled back in the console.
+
 - The Redis console menu runs the current line intact, including semicolons in keys and values.
 
 - Insert forms preserve pasted line breaks, and PostgreSQL timestamps retain fractional seconds when cloned or written back.

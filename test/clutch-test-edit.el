@@ -96,7 +96,8 @@ the edit buffer behind it is killed with it."
       (should (string-match-p "\\[enum\\]" (format "%s" header-line-format)))
       (should (string-match-p "Set NULL.*Set DEFAULT"
                               (format "%s" header-line-format)))
-      (should-not (string-match-p "Editing row" (format "%s" header-line-format)))
+      (should (string-match-p (regexp-quote "Edit shipping_incidents.severity")
+                              (format "%s" header-line-format)))
       (pcase-let ((`(,beg ,end ,candidates . ,_)
                    (clutch-result-edit-completion-at-point)))
         (should (= beg (point-min)))
@@ -400,11 +401,17 @@ Text cells containing JSON objects should still use the JSON editor."
                          (kill-buffer (current-buffer))))))
             (clutch-test--with-pop-to-buffer-capture another
               (with-current-buffer result-buf (clutch-result-edit-cell))
-              (with-current-buffer another (clutch-result-edit-json-cancel)))
-            (with-current-buffer json-buf
-              (pcase case
-                ('cancel (clutch-result-edit-json-cancel))
-                ('finish (clutch-result-edit-json-finish)))))
+              (with-current-buffer json-buf
+                (pcase case
+                  ('cancel (clutch-result-edit-json-cancel))
+                  ('finish (clutch-result-edit-json-finish))))
+              (with-current-buffer another
+                (when (eq case 'finish)
+                  (erase-buffer)
+                  (insert "{\"another\":1}")
+                  (should-error (clutch-result-edit-json-finish) :type 'user-error)
+                  (should (and (buffer-live-p another) (equal (buffer-string) "{\"another\":1}"))))
+                (clutch-result-edit-json-cancel))))
           (should-not (buffer-live-p json-buf))
           (should-not (buffer-live-p parent-buf))
           (with-current-buffer result-buf

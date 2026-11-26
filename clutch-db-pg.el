@@ -329,18 +329,11 @@ The server's fields, the SQLSTATE among them, go to the diagnostics."
     (clutch-db-pg--follow-search-path conn sql result)
     result))
 
-(defun clutch-db-pg--cache-current-schema (conn schema)
-  "Cache SCHEMA as the current schema for CONN."
-  (setf (clutch-db-pg--connection-current-schema conn) schema)
-  schema)
-
 (defun clutch-db-pg--set-search-path (conn schema)
-  "Set CONN search_path to SCHEMA and update the local cache."
+  "Set CONN's search_path to SCHEMA."
   (let ((schema (string-trim schema)))
-    (clutch-db-pg--exec conn
-             (format "SET search_path TO %s"
-                     (pgsql-escape-identifier schema)))
-    (clutch-db-pg--cache-current-schema conn schema)))
+    (clutch-db-pg--exec conn (format "SET search_path TO %s" (pgsql-escape-identifier schema)))
+    schema))
 
 (defun clutch-db-pg--namespace-statement-p (sql)
   "Return non-nil for SQL after which the search_path may differ.
@@ -962,32 +955,28 @@ ORDER BY schema_name")))
       (mapcar #'car (clutch-db-pg--metadata-rows result)))))
 
 (cl-defmethod clutch-db-current-schema ((conn clutch-db-pg--connection))
-  "Return the current effective schema for PostgreSQL CONN.
-A path that names no existing schema gives nil, which is remembered too,
-so the mode line does not ask again until the path may change."
-  (let ((cached (clutch-db-pg--connection-current-schema conn)))
-    (if cached
-        (unless (eq cached 'none) cached)
-      (clutch-db--translate-library-error pgsql-error
-        (let* ((result (clutch-db-pg--exec conn "SELECT current_schema()"))
-               (schema (caar (clutch-db-pg--metadata-rows result))))
-          (setf (clutch-db-pg--connection-current-schema conn)
-                (or schema 'none))
-          schema)))))
+  "Return CONN's current schema and cache the effective path from the same reply.
+Remember an empty schema too, until the search path may have changed."
+  (unless (clutch-db-pg--connection-current-schema conn)
+    (clutch-db--translate-library-error pgsql-error
+      (let* ((sql (if (eq (clutch-db-backend-key conn) 'xtdb)
+                      "SELECT current_schema()"
+                    "SELECT current_schema(), current_schemas(true)"))
+             (row (car (clutch-db-pg--metadata-rows (clutch-db-pg--exec conn sql)))))
+        (setf (clutch-db-pg--connection-current-schema conn) (or (car row) 'none)
+              (clutch-db-pg--connection-schemas conn) (cadr row)))))
+  (let ((schema (clutch-db-pg--connection-current-schema conn)))
+    (unless (eq schema 'none) schema)))
 
 (cl-defmethod clutch-db-resolution-context ((conn clutch-db-pg--connection))
-  "Return CONN's database and the effective path that resolves its names.
-The path is `current_schemas(true)', with the schemas PostgreSQL searches
-implicitly.  It is asked once and again after SQL that may change it, as
-`clutch-db-pg--namespace-statement-p' picks, so a schema on the path
-that is created or dropped meanwhile shows only after such SQL."
-  (list (clutch-db-database conn)
-        (or (clutch-db-pg--connection-schemas conn)
-            (setf (clutch-db-pg--connection-schemas conn)
-                  (clutch-db--translate-library-error pgsql-error
-                    (caar (clutch-db-pg--metadata-rows
-                           (clutch-db-pg--exec
-                            conn "SELECT current_schemas(true)"))))))))
+  "Return CONN's database and effective search path, including implicit schemas."
+  (clutch-db-current-schema conn)
+  (list (clutch-db-database conn) (clutch-db-pg--connection-schemas conn)))
+
+(cl-defmethod clutch-db-metadata-scope ((conn clutch-db-pg--connection))
+  "Use CONN's last reported effective search path to identify its metadata."
+  (when-let* ((schemas (clutch-db-pg--connection-schemas conn)))
+    `((search-path . ,schemas))))
 
 (cl-defmethod clutch-db-set-current-schema ((conn clutch-db-pg--connection) schema)
   "Switch PostgreSQL CONN to SCHEMA via search_path."

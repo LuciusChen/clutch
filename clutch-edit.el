@@ -32,7 +32,7 @@
 (defvar clutch-record--result-buffer)
 
 (defvar-local clutch--fk-info nil
-  "Foreign key info for the current result.")
+  "Outgoing relations by result index, with each target column in :ref-column.")
 (defvar-local clutch--pending-deletes nil
   "List of row identity vectors staged for deletion.")
 (defvar-local clutch--pending-edits nil
@@ -101,6 +101,9 @@ where the result's query ran."
 
 (defvar-local clutch-result-edit--column-name nil
   "Column name for the current single-cell edit buffer.")
+
+(defvar-local clutch-result-edit--target-label nil
+  "Qualified write target captured when this cell editor was opened.")
 
 (defvar-local clutch-result-edit--column-def nil
   "Column definition plist for the current single-cell edit buffer.")
@@ -422,23 +425,25 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
         (select-window win)
       (pop-to-buffer return-buf))))
 
-(defun clutch-result-edit--refresh-record-return-buffer (return-buf cidx)
-  "Refresh RETURN-BUF when it is a Record buffer and keep point on CIDX."
-  (when (and (integerp cidx)
-             (buffer-live-p return-buf)
-             (with-current-buffer return-buf
-               (derived-mode-p 'clutch-record-mode)))
-    (with-current-buffer return-buf
+(defun clutch-result--refresh-record (rows &optional record field)
+  "Redraw the Record for this result when its row is among ROWS.
+Use RECORD when the command started there.  FIELD restores point after
+closing a cell editor; otherwise the Record keeps its current field."
+  (when-let* ((record (or record (get-buffer "*clutch-record*")))
+              ((buffer-live-p record))
+              ((eq (current-buffer) (buffer-local-value 'clutch-record--result-buffer record)))
+              ((memq (buffer-local-value 'clutch-record--row record) rows)))
+    (with-current-buffer record
       (revert-buffer t t)
-      (goto-char (point-min))
-      (when-let* ((match (text-property-search-forward
-                          'clutch-col-idx cidx #'eq)))
-        (goto-char (prop-match-beginning match))))))
+      (when field
+        (goto-char (point-min))
+        (when-let* ((match (text-property-search-forward 'clutch-col-idx field #'eq)))
+          (goto-char (prop-match-beginning match)))))))
 
 (defun clutch-result-edit--header-line ()
   "Build the edit-buffer header line."
   (let* ((tags (clutch-result-edit--metadata-tags))
-         (title (concat " Editing cell"
+         (title (concat " Edit " clutch-result-edit--target-label
                         (when tags
                           (format " [%s]" (string-join tags " ")))))
          (affordances nil))
@@ -451,9 +456,8 @@ VIEWPORT, when non-nil, restores the result window start and hscroll."
     (concat title
             (clutch--status-separator)
             (clutch--key-hints
-             (append (nreverse affordances)
-                     '(("C-c C-c" "Stage edit")
-                       ("C-c C-k" "Cancel"))
+             (append '(("C-c C-c" "Stage") ("C-c C-k" "Cancel"))
+                     (nreverse affordances)
                      (when (clutch-result-edit--null-available-p)
                        '(("C-c C-n" "Set NULL")))
                      (when (and clutch-result-edit--default-supported-p
@@ -627,15 +631,14 @@ When RESTORER is non-nil, run it in PARENT before switching back."
          (raw (string-trim (buffer-substring-no-properties (point-min) (point-max))))
          (value (clutch-result--json-normalize-string raw field-name)))
     (if clutch-result-edit-json--whole-edit-p
-        (progn
+        (let ((editor (current-buffer)))
           (unless (buffer-live-p parent)
             (user-error "Edit buffer no longer exists"))
-          (quit-window 'kill)
           (with-current-buffer parent
             (erase-buffer)
             (insert value)
             (goto-char (point-min))
-            (clutch-result-edit--finish-buffer t)))
+            (clutch-result-edit--finish-buffer editor)))
       (clutch--finish-json-sub-editor
        parent "Edit buffer no longer exists"
        (lambda ()
@@ -670,17 +673,40 @@ When RESTORER is non-nil, run it in PARENT before switching back."
           (fields (nth iidx clutch--pending-inserts)))
       (clutch-result-insert--open-buffer table (current-buffer) fields t))))
 
-(defun clutch-result-edit--open-cell (cell return-buffer)
+(defun clutch-record--editable-cell-at-point ()
+  "Return (ROW FIELD VALUE DRAFT-COLUMN) for the current Record field.
+FIELD keeps the editor on the selected alias.  DRAFT-COLUMN identifies
+the staged edit that supplied VALUE, or FIELD for a new edit."
+  (let ((pos (line-beginning-position)))
+    (pcase-let ((`(,_ ,field ,value) (or (clutch--cell-at pos)
+                                         (user-error "No field at point"))))
+      (list (clutch-record--resolve-row-index) field value
+            (get-text-property pos 'clutch-draft-column)))))
+
+(defun clutch-result-edit--draft-at (row column &optional source-columns)
+  "Find the staged entry for ROW and COLUMN.
+In Record, SOURCE-COLUMNS supplies the names used to display shared drafts."
+  (when clutch--pending-edits
+    (when-let* ((owner (if source-columns
+                           (car (nth column (clutch-result--field-edits row (funcall source-columns))))
+                         column)))
+      (assoc (cons (clutch-db-row-identity-values row clutch--row-identity) owner)
+             clutch--pending-edits))))
+
+(defun clutch-result-edit--open-cell (cell return-buffer &optional source-columns)
   "Open an edit buffer for CELL using the current result buffer state.
-RETURN-BUFFER is the buffer that invoked the edit command."
-  (pcase-let* ((`(,ridx ,cidx ,val) cell))
+RETURN-BUFFER is the buffer that invoked the edit command.  A Record cell
+also names the column owning its displayed draft.  SOURCE-COLUMNS resolves
+the Record projection when checking that draft at save time."
+  (cl-destructuring-bind (ridx cidx val &optional (draft-column cidx)) cell
     (if (>= ridx (length (clutch--result-display-rows)))
         (clutch-result--edit-pending-insert ridx)
       (let* ((op "edit cell")
              (table (clutch--result-source-table-or-user-error op))
              (_ (clutch-result--row-identity-or-user-error table op))
              (display-row (nth ridx (clutch--result-display-rows)))
-             (original (nth cidx display-row))
+             (opened-draft (clutch-result-edit--draft-at display-row draft-column))
+             (original (nth draft-column display-row))
              (col-name (nth cidx clutch--result-columns))
              (col-def (nth cidx clutch--result-column-defs))
              (detail
@@ -693,6 +719,10 @@ RETURN-BUFFER is the buffer that invoked the edit command."
               (clutch-backend-update-default-p
                (clutch-db-backend-key clutch-connection)))
              (source-column (plist-get detail :name))
+             (target-label (string-replace
+                            "%" "%%" ; Literal identifiers in a header-line format.
+                            (concat (clutch--table-key-label (clutch--result-source-key))
+                                    "." source-column)))
              (original-state
               (clutch-result-edit--state-for-value
                original
@@ -713,6 +743,7 @@ RETURN-BUFFER is the buffer that invoked the edit command."
         (with-current-buffer edit-buf
           (clutch--result-edit-mode 1)
           (setq-local clutch-result-edit--column-name col-name
+                      clutch-result-edit--target-label target-label
                       clutch-result-edit--column-def col-def
                       clutch-result-edit--column-detail detail
                       clutch-result-edit--blob-encoding
@@ -747,7 +778,10 @@ RETURN-BUFFER is the buffer that invoked the edit command."
                           (user-error "Result buffer no longer exists"))
                         (with-current-buffer result-buf
                           (clutch-result--apply-edit
-                           ridx cidx new-value display-row original-state))))
+                           ridx draft-column new-value display-row original-state
+                           (lambda ()
+                             (eq opened-draft (clutch-result-edit--draft-at
+                                               display-row cidx source-columns)))))))
           (with-current-buffer result-buf
             (setq-local clutch--active-edit-cell target-cell)
             (clutch-result-edit--refresh-target-row ridx)))
@@ -758,49 +792,25 @@ RETURN-BUFFER is the buffer that invoked the edit command."
           (pop-to-buffer edit-buf))))))
 
 ;;;###autoload
-(defun clutch-result-edit-cell ()
-  "Edit or re-edit the value at point in a dedicated buffer."
-  (interactive)
-  (let* ((return-buffer (current-buffer))
-         (result-buffer
-          (if (derived-mode-p 'clutch-record-mode)
-              (or (and (buffer-live-p clutch-record--result-buffer)
-                       clutch-record--result-buffer)
-                  (user-error "Result buffer no longer exists"))
-            (current-buffer))))
-    (with-current-buffer result-buffer
-      (clutch-edit--require-sql-staged-mutation "Edit / re-edit"))
-    (let ((cell (or (clutch--cell-at-point)
-                    (user-error "No cell at point"))))
-      (if (eq result-buffer return-buffer)
-          (clutch-result-edit--open-cell cell return-buffer)
-        (setcar cell (clutch-record--resolve-row-index))
-        (let ((opened (with-current-buffer result-buffer
-                        (clutch-result-edit--open-cell cell return-buffer))))
-          (when (and (buffer-live-p opened)
-                     (not (eq (current-buffer) opened)))
-            (pop-to-buffer opened))
-          opened)))))
-
-;;;###autoload
 (defun clutch-result-edit-finish ()
   "Stage the edit and return to the result buffer.
 Use \\<clutch-result-mode-map>\\[clutch-result-submit] in the result buffer to submit all staged edits."
   (interactive)
   (clutch-result-edit--finish-buffer))
 
-(defun clutch-result-edit--finish-buffer (&optional kill-buffer-directly)
+(defun clutch-result-edit--finish-buffer (&optional json-editor)
   "Stage the current edit buffer and return to the result buffer.
-When KILL-BUFFER-DIRECTLY is non-nil, kill the current buffer without relying on
-the selected window."
+When saving from JSON-EDITOR, close both editors after staging succeeds."
   (let* ((new-state (clutch-result-edit--current-state))
          (new-value
           (pcase (car new-state)
             ('null nil)
             ('default clutch--cell-default-placeholder)
             (_ (cdr new-state))))
+         (changed (not (equal new-state clutch-result-edit--initial-value-state)))
          (cb clutch-result--edit-callback)
          (return-buf clutch-result-edit--return-buffer)
+         (result-buf clutch-result--edit-result-buffer)
          (target-cell clutch-result-edit--target-cell))
     (when (and clutch-result-edit--blob-encoding
                (stringp new-value)
@@ -820,14 +830,18 @@ the selected window."
        clutch-result-edit--column-def
        clutch-result-edit--column-detail))
     (setq-local clutch-result-edit--error-message nil)
-    (when (and cb
-               (not (equal new-state
-                           clutch-result-edit--initial-value-state)))
+    (when (and cb changed)
       (funcall cb new-value))
-    (clutch-result-edit--close-buffer kill-buffer-directly)
+    (when json-editor
+      (with-current-buffer json-editor (quit-window 'kill)))
+    (clutch-result-edit--close-buffer json-editor)
     ;; `quit-window' restores its saved point, so refresh the Record afterward.
-    (clutch-result-edit--refresh-record-return-buffer return-buf
-                                                      (cdr target-cell))))
+    (when (and changed target-cell (buffer-live-p result-buf))
+      (with-current-buffer result-buf
+        (let ((record (unless (eq return-buf result-buf) return-buf)))
+          (clutch-result--refresh-record
+           (list (nth (car target-cell) (clutch--result-display-rows)))
+           record (and record (cdr target-cell))))))))
 
 ;;;###autoload
 (defun clutch-result-edit-cancel ()
@@ -853,9 +867,11 @@ relying on the selected window."
                                                  return-buf
                                                  viewport)))
 
-(defun clutch-result--apply-edit (ridx cidx new-value original-row original-state)
+(defun clutch-result--apply-edit (ridx cidx new-value original-row original-state
+                                      &optional draft-current-p)
   "Record edit for row RIDX, column CIDX with NEW-VALUE.
 ORIGINAL-ROW and ORIGINAL-STATE are the row and cell state at editor entry.
+DRAFT-CURRENT-P checks that the editor still owns the draft it opened.
 Refresh the affected row and footer in place when possible."
   (clutch--refuse-while-running clutch-connection)
   (clutch-result--refuse-if-moved)
@@ -866,18 +882,19 @@ Refresh the affected row and footer in place when possible."
                   (user-error "Edited row no longer exists; reopen the edit buffer")))
          (identity-vec (clutch-db-row-identity-values row row-identity))
          (key (cons identity-vec cidx))
+         (slot (cl-member key clutch--pending-edits :key #'car :test #'equal))
          (new-state (clutch-result-edit--state-for-value new-value)))
     ;; A new result can have the same values at this position for another
     ;; table or projection.  Its rows belong to a different snapshot.
     (unless (eq row original-row)
       (user-error "Edited row changed; reopen the edit buffer"))
-    (if (equal new-state original-state)
-        (setq clutch--pending-edits
-              (cl-remove key clutch--pending-edits :test #'equal :key #'car))
-      (let ((existing (cl-assoc key clutch--pending-edits :test #'equal)))
-        (if existing
-            (setcdr existing new-value)
-          (push (cons key new-value) clutch--pending-edits)))))
+    (when (and draft-current-p (not (funcall draft-current-p)))
+      (user-error "The field's draft changed; reopen the edit buffer"))
+    ;; Each replacement has its own identity, including an edit back to the same value.
+    (cond ((equal new-state original-state)
+           (setq clutch--pending-edits (delq (car slot) clutch--pending-edits)))
+          (slot (setcar slot (cons key new-value)))
+          (t (push (cons key new-value) clutch--pending-edits))))
   (clutch--replace-row-at-index ridx)
   (clutch--refresh-footer-line)
   (force-mode-line-update)
@@ -903,20 +920,6 @@ Refresh the affected row and footer in place when possible."
                     op table))
       (user-error "Cannot %s: no primary, unique, or row locator identity available for table %s"
                   op table)))
-
-(defun clutch--load-fk-info ()
-  "Load foreign key info for the current result's source table.
-Populates `clutch--fk-info' with an alist mapping
-column indices to their referenced table and column."
-  (setq clutch--fk-info nil)
-  (when-let* ((conn clutch-connection)
-              (table (clutch--result-source-key))
-              (col-names clutch--result-columns))
-    (when (clutch--foreign-keys-cached-p conn table)
-      (setq clutch--fk-info
-            (clutch--foreign-key-column-info conn table col-names)))
-    (unless (clutch--foreign-keys-cached-p conn table)
-      (clutch--ensure-foreign-keys-async conn table))))
 
 (defun clutch-result--ensure-where-guard (statements op-name)
   "Ensure every statement in STATEMENTS has a top-level WHERE for OP-NAME."
@@ -1034,6 +1037,52 @@ is not a writable source column."
                   op (string-join (nreverse invalid) ", ")))
     (nreverse columns)))
 
+(defun clutch-result--source-edits (table identity edits source-name &optional for-display)
+  "Group EDITS to row IDENTITY of TABLE by the source name of each field.
+SOURCE-NAME maps a result index to its source column, or nil to skip it.
+Return (NAME INDEX . VALUE) entries.  Conflicting aliases are omitted
+FOR-DISPLAY so each can show its own draft; an action reports the conflict."
+  (let ((groups (make-hash-table :test #'equal)) names)
+    (dolist (edit edits)
+      (when-let* ((name (funcall source-name (car edit))))
+        (unless (gethash name groups) (push name names))
+        (push edit (gethash name groups))))
+    (cl-loop for name in (nreverse names)
+             for (first . others) = (nreverse (gethash name groups))
+             for conflict = (seq-find (lambda (other)
+                                        (not (equal-including-properties
+                                              (cdr first) (cdr other))))
+                                      others)
+             when (and conflict (not for-display))
+             do (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
+                            table name identity
+                            (nth (car first) clutch--result-columns)
+                            (nth (car conflict) clutch--result-columns))
+             unless conflict collect (cons name first))))
+
+(defun clutch-result--row-edits (identity)
+  "Return the staged (INDEX . VALUE) edits for IDENTITY."
+  (cl-loop for ((id . idx) . val) in clutch--pending-edits
+           when (equal id identity) collect (cons idx val)))
+
+(defun clutch-result--field-edits (row columns &optional required)
+  "Return staged edits in result order for ROW, shared by aliases.
+COLUMNS lists the source names in result order.
+REQUIRED lists the source names used by an action as alist keys.  Edits
+to those columns must agree.  For display, aliases keep conflicting drafts."
+  (when-let* (clutch--pending-edits clutch--row-identity
+              (id (clutch-db-row-identity-values row clutch--row-identity))
+              (edits (clutch-result--row-edits id)))
+    (let* ((names (or required (mapcar #'list columns)))
+           (shared (clutch-result--source-edits
+                    (clutch--result-source-key) id edits
+                    (lambda (idx)
+                      (car (clutch-db-assoc-column clutch-connection (nth idx columns) names)))
+                    (not required))))
+      (cl-loop for name in columns for idx from 0
+               collect (or (assq idx edits)
+                           (cdr (clutch-db-assoc-column clutch-connection name shared)))))))
+
 (defun clutch-result--build-update-stmt
     (table identity-vec edits row-identity columns)
   "Build an UPDATE statement spec for TABLE.
@@ -1043,26 +1092,17 @@ COLUMNS, from `clutch-result--update-source-columns', gives the source
 column of each cidx.  Aliases of one source column must agree."
   (let* ((conn clutch-connection)
          (where-spec (clutch--row-identity-where-parts conn row-identity identity-vec))
-         (seen (make-hash-table :test #'equal))
+         (unique (clutch-result--source-edits
+                  table identity-vec edits (lambda (idx) (car (alist-get idx columns)))))
          set-parts set-params)
-    (dolist (edit edits)
-      (pcase-let* ((`(,name . ,type) (alist-get (car edit) columns))
-                   (value (cdr edit))
-                   (previous (gethash name seen)))
-        (if previous
-            (unless (equal-including-properties value (cdr previous))
-              (user-error "Conflicting values for %s.%s in row %S (columns %s and %s)"
-                          table name identity-vec
-                          (nth (car previous) clutch--result-columns)
-                          (nth (car edit) clutch--result-columns)))
-          (puthash name edit seen)
-          (let ((column (clutch-db-escape-identifier conn name)))
-            (if (eq value clutch--cell-default-placeholder)
-                (push (format "%s = DEFAULT" column) set-parts)
-              (push (format "%s = ?" column) set-parts)
-              (push (clutch-db-typed-param
-                     (clutch-db-require-complete-value value) type)
-                    set-params))))))
+    (pcase-dolist (`(,name ,idx . ,value) unique)
+      (let ((column (clutch-db-escape-identifier conn name)))
+        (if (eq value clutch--cell-default-placeholder)
+            (push (format "%s = DEFAULT" column) set-parts)
+          (push (format "%s = ?" column) set-parts)
+          (push (clutch-db-typed-param
+                 (clutch-db-require-complete-value value) (cdr (alist-get idx columns)))
+                set-params))))
     (cons (format "UPDATE %s SET %s WHERE %s"
                   (or (plist-get row-identity :source-token)
                       (clutch-db-escape-identifier conn table))
@@ -1927,12 +1967,11 @@ projection labels for editing and importing."
                     (clutch--ensure-column-details clutch-connection table)))
          (rows (and clone-index (clutch--result-display-rows)))
          (row (and clone-index (nth clone-index rows)))
-         (values (and row (clutch-result-insert--row-values-with-pending-edits row)))
          (staged (if (and clone-index (not row))
                      (or (nth (- clone-index (length rows)) clutch--pending-inserts)
                          (user-error "No staged insert at this row"))
                    fields))
-         names sources)
+         labels columns)
     (when details
       (clutch-result--bind-source-columns clutch--result-column-defs
                                          (clutch-result--insert-target clutch-connection table clutch--last-query)
@@ -1943,25 +1982,34 @@ projection labels for editing and importing."
              for source = (plist-get def :source-column)
              for detail = (and source (clutch-db-source-column-detail source details "insert"))
              for name = (or (plist-get detail :name) source)
-             when (and name (not (member name sources)))
-             collect
-             (let ((cell (and (or (not clone-index)
-                                   (clutch-result-insert--clone-copy-column-p detail idx))
-                               (if values
-                                   (let ((v (nth idx values)))
-                                     (unless (eq v clutch--cell-default-placeholder)
-                                       (cons name (and v (clutch-result--editable-field-string
-                                                         v def detail)))))
-                                 (assoc name staged)))))
-               (when (member label names)
-                 (user-error "Cannot insert: result label %s names two source columns" label))
-               (push label names)
-               (push name sources)
-               (list :name label :source-column name :column-def def :detail detail
-                     :value (or (cdr cell) "") :provided (and cell t)
-                     :special-value (and cell (null (cdr cell)) 'null)
-                     :special-overlay nil :value-marker nil :end-marker nil
-                     :error-overlay nil :error-message nil)))))
+             when (and name (not (assoc name columns)))
+             do (when (member label labels)
+                  (user-error "Cannot insert: result label %s names two source columns" label))
+                (push label labels)
+                (let ((copy-index (and clone-index
+                                       (clutch-result-insert--clone-copy-column-p detail idx)
+                                       idx)))
+                  (push (list name copy-index label def detail) columns)))
+    (let ((edits (when-let* (row clutch--pending-edits (copied (seq-filter #'cadr columns)))
+                   (clutch-result--field-edits
+                    row (mapcar (lambda (def) (plist-get def :source-column))
+                                clutch--result-column-defs)
+                    copied))))
+      (cl-loop for (name idx label def detail) in (nreverse columns)
+               for cell = (cond
+                           ((and clone-index (null idx)) nil)
+                           (row
+                            (let* ((edit (nth idx edits))
+                                   (v (if edit (cdr edit) (nth idx row))))
+                              (unless (eq v clutch--cell-default-placeholder)
+                                (cons name (and v (clutch-result--editable-field-string
+                                                  v def detail))))))
+                           (t (assoc name staged)))
+               collect (list :name label :source-column name :column-def def :detail detail
+                             :value (or (cdr cell) "") :provided (and cell t)
+                             :special-value (and cell (null (cdr cell)) 'null)
+                             :special-overlay nil :value-marker nil :end-marker nil
+                             :error-overlay nil :error-message nil)))))
 
 (defun clutch-result-insert--open-buffer
     (table result-buf &optional fields reedit clone-index)
@@ -2017,20 +2065,6 @@ once the connection moved from where the result's query ran."
                     (user-error "Cannot detect source table")))
          (result-buf (current-buffer)))
     (clutch-result-insert--open-buffer table result-buf)))
-
-(defun clutch-result-insert--row-values-with-pending-edits (row)
-  "Return ROW as a list, applying any staged edits in the current result buffer."
-  (let* ((values (append row nil))
-         (row-identity clutch--row-identity)
-         (identity-vec (and row-identity
-                            (clutch-db-row-identity-values
-                             row row-identity))))
-    (when identity-vec
-      (dolist (edit clutch--pending-edits)
-        (pcase-let ((`((,edit-identity . ,cidx) . ,new-value) edit))
-          (when (equal edit-identity identity-vec)
-            (setcar (nthcdr cidx values) new-value)))))
-    values))
 
 ;;;###autoload
 (defun clutch-clone-row-to-insert ()

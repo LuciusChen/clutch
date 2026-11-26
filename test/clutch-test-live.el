@@ -267,6 +267,33 @@ Skips if neither `clutch-test-password' nor `clutch-test-url' is set."
                     (clutch-test--await-queries))
                   (should (equal calls '("get-primary-keys")))
                   (should (string-match-p "ER load cancelled" (buffer-string))))))
+            (when (or (eq clutch-test-backend 'mysql)
+                      (and (eq clutch-test-backend 'sqlserver)
+                           (clutch-jdbc-conn-describe-source-columns conn)))
+              (when (eq clutch-test-backend 'sqlserver)
+                ;; Period columns belong to the catalog but not to SELECT *.
+                (clutch-db-query conn (format (concat "ALTER TABLE %s ADD "
+                                                      "valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL DEFAULT SYSUTCDATETIME(), "
+                                                      "valid_to datetime2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL DEFAULT '9999-12-31 23:59:59.9999999', "
+                                                      "PERIOD FOR SYSTEM_TIME (valid_from, valid_to)") child)))
+              (clutch-db-query conn (format "INSERT INTO %s VALUES (11,1,2)" parent))
+              (clutch-db-query conn (format "INSERT INTO %s VALUES (7,11,1,2)" child))
+              (with-current-buffer source
+                (insert (format "SELECT P AS parent_alias, %s.*, id + 1 AS extra FROM %s" child child))
+                (clutch-execute-buffer))
+              (clutch-test--await-queries)
+              (setq rows-buffer (buffer-local-value 'clutch--last-result-buffer source))
+              (with-current-buffer rows-buffer
+                (clutch-test--await (lambda () (assq 0 clutch--fk-info)))
+                (let ((send (symbol-function 'clutch-jdbc--send)) requests)
+                  (cl-letf (((symbol-function 'clutch-jdbc--send)
+                             (lambda (op args) (push op requests) (funcall send op args))))
+                    (with-current-buffer source (clutch-execute-buffer))
+                    (clutch-test--await-queries))
+                  (should-not (member "describe-source-columns" requests)))
+                (clutch-record--follow-column rows-buffer 0 0)
+                (clutch-test--await-queries)
+                (should (equal (cl-subseq (car clutch--result-rows) 0 3) '(11 1 2)))))
             (when (eq (plist-get (clutch-test-live-backend-descriptor) :id) 'duckdb)
               (dolist (sql (list (format "INSERT INTO %s VALUES (1,1,2)" parent)
                                 (format "INSERT INTO %s VALUES (1,1,1,2)" child)
@@ -1174,12 +1201,19 @@ though the server had rolled it back with the transaction."
                 (clutch-test--run-in-console
                  "BEGIN" (format "SET search_path TO %s" moved))
                 (should (equal (path-after-a-lost-connection) default-path))
+                (clutch-toggle-auto-commit)
+                (clutch-test--run-in-console
+                 "BEGIN" (format "SET search_path TO %s" schema)
+                 "CREATE TABLE marker (id int)")
+                (clutch-commit)
+                (should (equal (path-after-a-lost-connection) schema))
+                (clutch-toggle-auto-commit)
                 (clutch-test--run-in-console
                  "BEGIN" (format "SET search_path TO %s" moved)
                  "COMMIT /* outer /* inner */ outer */ AND CHAIN -- last in its buffer")
                 (should (equal (path-after-a-lost-connection) moved))))
           (ignore-errors
-            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s" schema))))))))
+            (clutch-db-query admin (format "DROP SCHEMA IF EXISTS %s CASCADE" schema))))))))
 
 (ert-deftest clutch-test-live-pg-rollback-after-a-failed-commit-follows-the-path ()
   "Transaction commands should show and reconnect to PostgreSQL's kept path.
@@ -2147,46 +2181,75 @@ Running the query again shows B's rows, which may then be edited."
             (ignore-errors
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
 
-(ert-deftest clutch-test-live-mysql-old-result-refuses-writes-after-a-typed-use ()
-  "A MySQL result left behind by a typed USE should refuse to submit.
+(ert-deftest clutch-test-live-old-result-refuses-writes-after-a-typed-use ()
+  "A result left behind by a typed USE should refuse to submit.
 Result buffers are named by database, so after `USE b' the result of
 database A stays in its own buffer, and an edit staged there and
 submitted updated B's table of the same name."
   :tags '(:clutch-live)
-  (unless (eq clutch-test-backend 'mysql)
-    (ert-skip "This regression covers MySQL's current database"))
+  (unless (memq clutch-test-backend '(mysql sqlserver))
+    (ert-skip "This regression covers MySQL and SQL Server USE"))
   (clutch-test--with-conn admin
     (let* ((a (format "clutch_typed_a_%d" (emacs-pid)))
            (b (format "clutch_typed_b_%d" (emacs-pid)))
-           (params (append (list :backend 'mysql :database a)
+           (params (append (list :backend clutch-test-backend :database a)
                            (clutch-test--live-connect-params)))
            results)
-      (cl-flet ((value (database)
-                  (caar (clutch-db-result-rows
-                         (clutch-db-query
-                          admin (format "SELECT v FROM %s.t WHERE id = 1" database))))))
+      (cl-labels ((table (database)
+                    (concat database (if (eq clutch-test-backend 'sqlserver) ".dbo.t" ".t")))
+                  (only-b ()
+                    (clutch-test--await
+                     (lambda () (and (gethash clutch-connection clutch--schema-cache)
+                                     (not (clutch-db-in-use-p clutch-connection)))))
+                    (cl-find "only_b" (clutch--ensure-column-details clutch-connection "t")
+                             :key (lambda (col) (plist-get col :name)) :test #'equal))
+                  (value (database)
+                    (caar (clutch-db-result-rows
+                           (clutch-db-query
+                            admin (format "SELECT v FROM %s WHERE id = 1" (table database)))))))
         (unwind-protect
             (progn
               (dolist (database (list a b))
                 (clutch-db-query admin (format "CREATE DATABASE %s" database))
                 (clutch-db-query
-                 admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(20))"
-                               database))
+                 admin (format "CREATE TABLE %s (id int PRIMARY KEY, v varchar(20), parent_id int)"
+                               (table database)))
                 (clutch-db-query
-                 admin (format "INSERT INTO %s.t VALUES (1, 'orig')" database)))
+                 admin (format "INSERT INTO %s (id, v) VALUES (1, 'orig')" (table database))))
+              (clutch-db-query admin (format "ALTER TABLE %s ADD only_b int" (table b)))
+              (clutch-db-query admin (format "ALTER TABLE %s ADD FOREIGN KEY (parent_id) REFERENCES %s(id)"
+                                           (table a) (table a)))
               (clutch-test--with-live-console params
-                (clutch-test--run-in-console "SELECT id, v FROM t")
+                (should-not (only-b))
+                (clutch-test--run-in-console "SELECT id, v, parent_id FROM t")
                 (push (get-buffer (clutch-result--buffer-name)) results)
-                (clutch-test--run-in-console (format "USE %s" b))
+                (with-current-buffer (car results)
+                  (clutch-test--await (lambda () (assq 2 clutch--fk-info)))
+                  (clutch-test--xtdb-edit 0 "v" "edited")
+                  (rename-buffer " *retained typed USE result*" t))
+                (clutch-test--run-in-console
+                 (format (if (eq clutch-test-backend 'sqlserver)
+                             "SELECT TOP 1 v FROM t; IF 1 = 1 USE %s" "USE %s") b))
                 (push (get-buffer (clutch-result--buffer-name)) results)
+                (when (eq clutch-test-backend 'sqlserver)
+                  (with-current-buffer (car results)
+                    (should (equal clutch--result-rows '(("orig"))))
+                    (should (eq clutch--result-resolution-context 'unknown))))
+                (should (only-b))
+                (clutch-test--run-in-console "SELECT id, v, parent_id FROM t")
+                (clutch-test--await (lambda () (clutch--foreign-keys-cached-p clutch-connection "t")))
                 (should-not (eq (car results) (cadr results)))
                 (with-current-buffer (cadr results)
-                  (should-error (clutch-test--xtdb-edit 0 "v" "edited")
-                                :type 'user-error))
-                (should (equal (list (value a) (value b)) '("orig" "orig")))))
+                  (should (assq 2 clutch--fk-info))
+                  (should-error (clutch-test--xtdb-submit) :type 'user-error))
+                (should (equal (list (value a) (value b)) '("orig" "orig")))
+                (clutch-test--run-in-console (format "USE %s" a))
+                (with-current-buffer (cadr results) (clutch-test--xtdb-submit))
+                (should (equal (list (value a) (value b)) '("edited" "orig")))))
           (dolist (buffer results)
             (when (buffer-live-p buffer)
-              (kill-buffer buffer)))
+              (with-current-buffer buffer
+                (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))))
           (dolist (database (list a b))
             (ignore-errors
               (clutch-db-query admin (format "DROP DATABASE IF EXISTS %s" database)))))))))
@@ -2213,9 +2276,53 @@ throughout."
             (dolist (schema (list s2 s3))
               (clutch-db-query admin (format "CREATE SCHEMA %s" schema))
               (clutch-db-query
-               admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text)" schema))
+               admin (format "CREATE TABLE %s.t (id int PRIMARY KEY, v text, memo %s)" schema
+                             (if (equal schema s2) (format "int REFERENCES %s.t" s2) "date")))
               (clutch-db-query
-               admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
+               admin (format "INSERT INTO %s.t VALUES (1, 'orig', %s)" schema
+                             (if (equal schema s2) "1" "NULL"))))
+            (clutch-test--with-live-console params
+              (cl-flet ((describe-after (statement)
+                          (erase-buffer)
+                          (insert statement ";\nSELECT memo, id FROM t;")
+                          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                            (clutch-execute-buffer))
+                          (clutch-test--await-queries)
+                          (with-current-buffer (clutch-result--buffer-name)
+                            (clutch-test--await
+                             (lambda ()
+                               (and (clutch--foreign-keys-cached-p clutch-connection "t")
+                                    (not (clutch-db-in-use-p clutch-connection)))))
+                            (clutch--goto-cell 0 0)
+                            (clutch-result-column-info)
+                            (list (plist-get (car clutch--result-column-details) :type)
+                                  (plist-get (cdr (assq 0 clutch--fk-info)) :schema)))))
+                (clutch-test--with-live-result-buffer result-name
+                  (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s2))
+                                 (list "integer" s2)))
+                  (clutch-toggle-auto-commit)
+                  (clutch-test--run-in-console "BEGIN" (format "SET LOCAL search_path TO %s" s2))
+                  (should (equal (describe-after
+                                  (format "ALTER TABLE t DROP CONSTRAINT t_memo_fkey, ADD FOREIGN KEY (memo) REFERENCES %s.t" s3))
+                                 (list "integer" s3)))
+                  (with-current-buffer result-name (clutch-result-open-record))
+                  (with-current-buffer "*clutch-record*" (clutch-rollback))
+                  (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) s2)))
+                    (call-interactively #'clutch-switch-schema))
+                  (with-current-buffer "*clutch-record*"
+                    (should-not (string-search (format "→ %s.t.id" s3) (buffer-string)))
+                    (clutch-test--with-live-result-buffer (concat result-name "-parent")
+                      (call-interactively #'clutch-record-toggle-expand)
+                      (clutch-test--await-queries)
+                      (with-current-buffer (clutch-result--buffer-name)
+                        (should (equal clutch--result-source-schema s2))
+                        (should (equal (seq-take (car clutch--result-rows) 3) '(1 "orig" 1)))))
+                    (should (string-search (format "→ %s.t.id" s2) (buffer-string))))
+                  (clutch-test--with-live-result-buffer (concat result-name "-other")
+                    (should (equal (describe-after (format "SET search_path TO %s, %s" s1 s3))
+                                   '("date" nil))))
+                  (with-current-buffer result-name
+                    (should (equal (plist-get (cdr (assq 0 clutch--fk-info)) :schema) s2))))))
             (dolist (action '(console submit edit copy))
               (clutch-test--with-live-console params
                 (clutch-toggle-auto-commit)

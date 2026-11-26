@@ -168,6 +168,8 @@ Nil means derive the offset from `clutch--page-current'.")
   "The `clutch-db-resolution-context' the result's query ran in.
 It is `unknown' when it could not be read, and nil for a result that
 recorded none.")
+(defvar-local clutch--result-metadata-scope nil
+  "Connection namespace whose table metadata belongs to this result.")
 (defvar-local clutch--result-server-pageable nil
   "Non-nil when server-side page navigation is safe for this result.")
 (defvar-local clutch--result-server-rewritable nil
@@ -227,6 +229,61 @@ Each element corresponds to the same-index column.  Nil when unavailable.")
 
 ;;;; Result buffer lifecycle
 
+(defun clutch--result-unbound-star ()
+  "Return the mixed projection when the driver did not identify every field."
+  (and-let* ((items (plist-get clutch--result-query-prep :mixed-star))
+             ((cl-some (lambda (def) (not (or (plist-get def :hidden)
+                                              (plist-member def :read-source))))
+                       clutch--result-column-defs)))
+    items))
+
+(defun clutch--result-source-column-names (&optional unverified)
+  "Return each result field's source name, using the catalog spelling if known.
+Expressions have no source name.  With UNVERIFIED, return only spellings
+needing a database lookup, leaving nil at other positions."
+  (let* ((metadata (clutch--table-metadata clutch-connection (clutch--result-source-key)))
+         (bindings (plist-get metadata :catalog-columns))
+         (projection (clutch--result-unbound-star))
+         (details (mapcar (lambda (col) (plist-get col :name))
+                          (and (or projection unverified) (plist-get metadata :column-details))))
+         (known (when unverified
+                  (append (mapcar #'car (plist-get metadata :foreign-keys))
+                          (plist-get metadata :columns) details)))
+         (verify-mixed (and projection unverified (not (clutch-db-identifier-case clutch-connection))))
+         (defs clutch--result-column-defs)
+         (verified-star (if bindings (gethash 'star bindings 'missing) 'missing))
+         (star-columns (if (eq verified-star 'missing) details verified-star))
+         (sources
+          (when-let* (projection star-columns
+                      (star (memq 'star projection))
+                      (start (- (length projection) (length star)))
+                      (labels (cl-loop for def in defs unless (plist-get def :hidden)
+                                       collect (plist-get def :name)))
+                      ((= (length labels) (+ (length star-columns) (length projection) -1)))
+                      ((equal star-columns (seq-subseq labels start (+ start (length star-columns))))))
+            ;; Other expressions can expand too.  Match the star to its catalog
+            ;; columns before assigning a source to any part of this projection.
+            (clutch--expand-projection-star projection (length labels))))
+         ;; Catalogs can include invisible columns that SELECT * omits.
+         (need-star (and unverified projection details (not sources)
+                         (eq verified-star 'missing))))
+    (cl-loop for label in clutch--result-columns for def = (pop defs)
+             for item = (and projection (not (plist-get def :hidden)) (pop sources))
+             for source = (cond (projection (if (eq item 'star) label item))
+                                ((plist-member def :source-column) (plist-get def :source-column))
+                                (t label))
+             collect (cond
+                      ((plist-member def :read-source)
+                       (unless unverified (plist-get def :read-source)))
+                      ((and need-star (not (plist-get def :hidden))) 'star)
+                      (unverified
+                       (and (or (and verify-mixed (stringp item)) (plist-get def :unresolved-source))
+                            source (not (member source known))
+                            (or (not bindings) (eq (gethash source bindings 'missing) 'missing))
+                            source))
+                      (bindings (gethash source bindings source))
+                      (t source)))))
+
 (defun clutch--result-column-details (conn table col-names &optional load)
   "Return detail plists aligned with result columns COL-NAMES.
 Uses cached metadata for CONN/TABLE.  When LOAD is non-nil, synchronously load
@@ -242,28 +299,149 @@ missing table metadata."
                 (gethash (downcase name) by-name))
               col-names))))
 
+(defun clutch--foreign-key-column-info (conn table col-names)
+  "Index CONN's cached TABLE relations by the result fields in COL-NAMES."
+  (when-let* ((keys (clutch--cached-foreign-keys conn table)))
+    (let ((by-column
+           (cl-loop for relation in (clutch-er--relations keys nil)
+                    append (cl-loop for (column . target) in (plist-get relation :pairs)
+                                    collect (cons column (cons :ref-column (cons target relation)))))))
+      (cl-loop for name in col-names for idx from 0
+               for link = (cdr (clutch-db-assoc-column conn name by-column))
+               when link collect (cons idx link)))))
+
+(defun clutch--update-fk-info (conn table refresh)
+  "Show CONN's cached foreign keys for TABLE, redrawing the grid if REFRESH."
+  (let ((links (clutch--foreign-key-column-info conn table (clutch--result-source-column-names))))
+    (unless (equal links clutch--fk-info)
+      (setq-local clutch--fk-info links)
+      (when refresh
+        (clutch--refresh-display)
+        (clutch-result--refresh-record (clutch--result-display-rows))))))
+
+(defun clutch--resolve-result-column-names (conn table names callback &optional sync)
+  "Resolve NAMES for this result, sharing outstanding lookups for TABLE on CONN.
+Call CALLBACK in the requesting result if it is still current.  With SYNC,
+wait for an outstanding lookup or use the primary connection."
+  (let* ((buffer (current-buffer))
+         (prep clutch--result-query-prep)
+         (names (if (memq 'star names)
+                    (append (delete-dups (seq-filter #'stringp (plist-get prep :mixed-star))) '(star))
+                  names))
+         (target (clutch-result--insert-target conn table clutch--last-query))
+         (bindings (or (plist-get (clutch--table-metadata conn table) :catalog-columns)
+                       (let ((index (make-hash-table :test 'equal)))
+                         (clutch--set-table-metadata conn table :catalog-columns index)
+                         index)))
+         (pending (gethash :pending bindings))
+         (request (cl-find-if (lambda (r) (seq-every-p (lambda (n) (member n (car r))) names))
+                              pending))
+         (notify (and callback
+                      (lambda ()
+                        (when (buffer-live-p buffer)
+                          (with-current-buffer buffer
+                            (when (and (eq conn clutch-connection) (eq prep clutch--result-query-prep)
+                                       (clutch--result-metadata-current-p))
+                              (funcall callback))))))))
+    (cl-labels
+        ((install (pairs)
+           (dolist (pair pairs) (puthash (car pair) (cdr pair) bindings))
+           (when pairs
+             (run-hook-with-args 'clutch--table-metadata-updated-hook conn table 'source-columns))))
+      (cond
+       (request
+        (when notify (push notify (cdr request)))
+        (when sync
+          (with-timeout (clutch-read-idle-timeout-seconds
+                         (signal 'clutch-db-error '("Timed out waiting for source columns")))
+            (while (and (memq request (gethash :pending bindings))
+                        (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
+              (accept-process-output nil 0.05)))
+          (unless (and (eq conn clutch-connection) (eq prep clutch--result-query-prep)
+                       (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns)))
+            (user-error "The result or its source columns changed; retry the command"))
+          (clutch-result--refuse-if-moved)
+          (when (stringp (car request)) (signal 'clutch-db-error (list (car request)))))
+        t)
+       (sync
+        (clutch-result--refuse-if-moved)
+        (install (clutch-db-resolve-column-names conn names target))
+        (when notify (funcall notify)))
+       (t
+        (setq request (cons names (and notify (list notify))))
+        (push request (gethash :pending bindings))
+        (let (started)
+          (unwind-protect
+              (setq started
+                    (clutch-db-resolve-column-names-async
+                     conn names target
+                     (lambda (pairs &optional error-message)
+                       (puthash :pending (delq request (gethash :pending bindings)) bindings)
+                       (when (eq bindings (plist-get (clutch--table-metadata conn table) :catalog-columns))
+                         (if error-message
+                             (progn (setcar request error-message)
+                                    (message "Could not resolve source columns: %s" error-message))
+                           (install pairs)
+                           (dolist (fn (cdr request)) (funcall fn)))))))
+            (unless started
+              (puthash :pending (delq request (gethash :pending bindings)) bindings)))))))))
+
+(defun clutch--result-metadata-current-p ()
+  "Return whether the connection's metadata still belongs to this result."
+  (and (not (eq clutch--result-resolution-context 'unknown))
+       (or (null clutch--result-metadata-scope)
+           (equal clutch--result-metadata-scope (clutch--namespace-before clutch-connection)))))
+
+(defun clutch--load-fk-info (&optional refresh)
+  "Show known foreign keys, optionally REFRESH, and request missing spellings."
+  (when-let* ((conn clutch-connection)
+              ((clutch--result-metadata-current-p))
+              (table (and clutch--result-columns (clutch--result-source-key))))
+    (if (not (clutch--foreign-keys-cached-p conn table))
+        (clutch--ensure-foreign-keys-async conn table)
+      (clutch--update-fk-info conn table refresh)
+      (when (clutch--cached-foreign-keys conn table)
+        (if (and (clutch--result-unbound-star)
+                 (not (clutch--column-details-cached-p conn table)))
+            (clutch--ensure-column-details-async conn table)
+          (when-let* ((names (delete-dups (delq nil (clutch--result-source-column-names t)))))
+            (clutch--resolve-result-column-names conn table names nil)))))))
+
+(defun clutch--reload-result-links-on-display (_window)
+  "Load invalidated links when this result is displayed again."
+  (remove-hook 'window-buffer-change-functions #'clutch--reload-result-links-on-display t)
+  (when (clutch-db-live-p clutch-connection)
+    (clutch--load-fk-info t)))
+
 (defun clutch--handle-table-metadata-updated (conn table kind)
   "Refresh result UI for CONN/TABLE metadata KIND.
-TABLE is a metadata key from `clutch--table-key'."
+TABLE is a metadata key, or nil when the current scope is invalidated."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
-      (when (and (derived-mode-p 'clutch-result-mode)
-                 (eq clutch-connection conn)
-                 clutch--result-columns
-                 (equal (clutch--result-source-key) table))
+      (when-let* (((derived-mode-p 'clutch-result-mode))
+                  ((eq clutch-connection conn))
+                  (clutch--result-columns)
+                  (source (clutch--result-source-key))
+                  ((or (null table) (equal source table)))
+                  ((clutch--result-metadata-current-p)))
         (pcase kind
+          ('invalidated
+           (setq-local clutch--result-column-details nil)
+           (clutch--update-fk-info conn source t)
+           (let ((record (get-buffer "*clutch-record*")))
+             (if (or (get-buffer-window buf t)
+                     (and record
+                          (eq buf (buffer-local-value 'clutch-record--result-buffer record))))
+                 (clutch--load-fk-info t)
+               (add-hook 'window-buffer-change-functions
+                         #'clutch--reload-result-links-on-display nil t))))
+          ('source-columns (clutch--update-fk-info conn table t))
           ('column-details
+           (when (clutch--result-unbound-star) (clutch--load-fk-info t))
            (setq-local clutch--result-column-details
-                       (clutch--result-column-details
-                        clutch-connection table clutch--result-columns))
-           (when clutch--pending-inserts
-             (clutch--refresh-display)))
-          ('foreign-keys
-           (let ((fk-info (clutch--foreign-key-column-info
-                           clutch-connection table clutch--result-columns)))
-             (unless (equal fk-info clutch--fk-info)
-               (setq-local clutch--fk-info fk-info)
-               (clutch--refresh-display)))))))))
+                       (clutch--result-column-details conn table clutch--result-columns))
+           (when clutch--pending-inserts (clutch--refresh-display)))
+          ('foreign-keys (clutch--load-fk-info t)))))))
 
 (add-hook 'clutch--table-metadata-updated-hook
           #'clutch--handle-table-metadata-updated)
@@ -541,6 +719,7 @@ Returns column names."
               clutch--result-source-schema source-schema
               clutch--result-source-catalog source-catalog
               clutch--result-resolution-context resolution-context
+              clutch--result-metadata-scope (and clutch-connection (clutch--namespace-before clutch-connection))
               clutch--result-server-pageable server-pageable
               clutch--result-server-rewritable server-rewritable
               clutch--page-total-rows (and (not server-pageable)
@@ -897,8 +1076,8 @@ If the result has columns, shows a table; otherwise shows DML summary."
     (mapcar (lambda (ridx) (and (< ridx (length rows)) (aref rows ridx)))
             indices)))
 
-(defun clutch-result--discard-pending-at (ridx cidx)
-  "Discard the staged change for RIDX and CIDX in the current result buffer."
+(defun clutch-result--discard-pending-at (ridx cidx &optional record)
+  "Discard the change at RIDX and CIDX.  RECORD may be the invoking view."
   (let* ((display-rows (clutch--result-display-rows))
          (nrows (length display-rows)))
     (cond
@@ -916,19 +1095,18 @@ If the result has columns, shows a table; otherwise shows DML summary."
              (identity-vec (when row-identity
                              (clutch-db-row-identity-values
                               row row-identity)))
-             (edit-key (and identity-vec cidx (cons identity-vec cidx)))
-             (was-edit (and edit-key
-                            (cl-assoc edit-key clutch--pending-edits :test #'equal)))
+             (edit-key (and cidx identity-vec (cons identity-vec cidx)))
+             (was-edit (assoc edit-key clutch--pending-edits))
              (was-delete (and identity-vec
                               (cl-find identity-vec clutch--pending-deletes
                                        :test #'equal))))
         (cond
          (was-edit
-          (setq clutch--pending-edits
-                (cl-remove edit-key clutch--pending-edits :test #'equal :key #'car))
+          (setq clutch--pending-edits (delq was-edit clutch--pending-edits))
           (clutch--replace-row-at-index ridx)
           (clutch--refresh-footer-line)
           (force-mode-line-update)
+          (clutch-result--refresh-record (list row) record)
           (message "Staged edit discarded"))
          (was-delete
           (setq clutch--pending-deletes
@@ -941,16 +1119,38 @@ If the result has columns, shows a table; otherwise shows DML summary."
           (user-error "No staged change at point"))))))))
 
 ;;;###autoload
+(defun clutch-result-edit-cell ()
+  "Edit or re-edit the value at point in a dedicated buffer."
+  (interactive)
+  (let* ((return-buffer (current-buffer))
+         (result-buffer
+          (if (derived-mode-p 'clutch-record-mode)
+              (or (and (buffer-live-p clutch-record--result-buffer)
+                       clutch-record--result-buffer)
+                  (user-error "Result buffer no longer exists"))
+            (current-buffer))))
+    (with-current-buffer result-buffer
+      (clutch-edit--require-sql-staged-mutation "Edit / re-edit"))
+    (if (eq result-buffer return-buffer)
+        (clutch-result-edit--open-cell
+         (or (clutch--cell-at-point) (user-error "No cell at point")) return-buffer)
+      (let* ((cell (clutch-record--editable-cell-at-point))
+             (opened (with-current-buffer result-buffer
+                       (clutch-result-edit--open-cell cell return-buffer
+                                                      #'clutch--result-source-column-names))))
+        (when (and (buffer-live-p opened) (not (eq (current-buffer) opened)))
+          (pop-to-buffer opened))
+        opened))))
+
+;;;###autoload
 (defun clutch-result-discard-pending-at-point ()
   "Discard the staged change at point."
   (interactive)
   (if (derived-mode-p 'clutch-record-mode)
-      (pcase-let* ((`(,_ ,cidx ,_) (or (clutch--cell-at-point)
-                                         (user-error "No field at point")))
-                   (ridx (clutch-record--resolve-row-index)))
+      (pcase-let ((`(,ridx ,_ ,_ ,draft-column) (clutch-record--editable-cell-at-point))
+                  (record (current-buffer)))
         (with-current-buffer clutch-record--result-buffer
-          (clutch-result--discard-pending-at ridx cidx))
-        (clutch-record--revert))
+          (clutch-result--discard-pending-at ridx draft-column record)))
     (let ((ridx (or (clutch--row-idx-at-line)
                     (user-error "No row at point")))
           (cidx (clutch--col-idx-at-point)))
@@ -2851,8 +3051,8 @@ Return nil when the current graphical display cannot create one."
                   (line-spacing . 0)
                   (vertical-scroll-bars . nil)
                   (horizontal-scroll-bars . nil)
-                  (left-fringe . 0)
-                  (right-fringe . 0)
+                  (left-fringe . 6)
+                  (right-fringe . 6)
                   (border-width . 1)
                   (border-color . ,border)
                   (internal-border-width . 0)
@@ -2874,6 +3074,7 @@ Return nil when the current graphical display cannot create one."
           (setq frame (let ((after-make-frame-functions nil))
                         (with-current-buffer buffer
                           (make-frame parameters))))
+          (set-face-background 'fringe background frame)
           (let ((window (frame-root-window frame)))
             (set-window-buffer window buffer)
             (set-window-parameter window 'mode-line-format 'none)
@@ -4319,19 +4520,17 @@ Reuses a single *clutch-record* buffer, updating it in place."
       (clutch-record--render))
     (pop-to-buffer buf '(display-buffer-at-bottom))))
 
-(defun clutch-record--render-field (name cidx val col-def identity-vec ridx
-                                        edits fk-info expanded-fields max-name-w)
-  "Insert one field line for column NAME at CIDX.
-VAL is the cell value, COL-DEF the column metadata, IDENTITY-VEC the row's
-precomputed identity vector (or nil).  RIDX is the row index.  EDITS,
-FK-INFO, and EXPANDED-FIELDS provide edit/FK/expand state.  MAX-NAME-W is
-the label column width."
-  (let* ((edited (and identity-vec (assoc (cons identity-vec cidx) edits)))
-         (display-val (if edited (cdr edited) val))
+(defun clutch-record--render-field (name cidx val col-def edited ridx
+                                        fk-info expanded-fields max-name-w)
+  "Insert one field line for column NAME at CIDX of row RIDX.
+VAL and COL-DEF are the result value and metadata.  EDITED holds a
+staged edit for this field.  FK-INFO, EXPANDED-FIELDS and MAX-NAME-W
+supply its links, expansion state and label width."
+  (let* ((display-val (if edited (cdr edited) val))
          (long-p (clutch--long-field-type-p col-def))
          (expanded-p (memq cidx expanded-fields))
          (fk (cdr (assq cidx fk-info)))
-         (formatted (or (clutch--cell-placeholder-value display-val)
+         (formatted (or (clutch--cell-placeholder-value display-val edited)
                         (and (null display-val) clutch--null-cell-display-text)
                         (clutch--format-value display-val)))
          (display (if (and long-p (not expanded-p) (> (length formatted) 80))
@@ -4344,6 +4543,7 @@ the label column width."
                      (t nil)))
          (cell-props (list 'clutch-row-idx ridx
                            'clutch-col-idx cidx
+                           'clutch-draft-column (if edited (car edited) cidx)
                            'clutch-full-value display-val)))
     (when truncated
       (setq cell-props (nconc cell-props '(clutch-cell-truncated t))))
@@ -4356,8 +4556,14 @@ the label column width."
                            cell-props))
             (apply #'propertize display
                    (append (when face (list 'face face))
-                           cell-props))
-            "\n")))
+                           cell-props)))
+    (when fk
+      (let ((target (string-join
+                     (delq nil (list (plist-get fk :schema) (plist-get fk :table)
+                                     (plist-get fk :ref-column)))
+                     ".")))
+        (insert (apply #'propertize (concat "  → " target) 'face 'shadow cell-props))))
+    (insert "\n")))
 
 (defun clutch-record--render (&optional _ignore-auto _noconfirm)
   "Render the current row in the Record buffer."
@@ -4369,9 +4575,7 @@ the label column width."
          (col-defs (buffer-local-value 'clutch--result-column-defs result-buf))
          (rows (with-current-buffer result-buf
                  (clutch--result-display-rows)))
-         (row-identity (buffer-local-value 'clutch--row-identity result-buf))
          (fk-info (buffer-local-value 'clutch--fk-info result-buf))
-         (edits (buffer-local-value 'clutch--pending-edits result-buf))
          (inhibit-read-only t))
     (unless (< ridx (length rows))
       (user-error "Row %d no longer exists" ridx))
@@ -4388,53 +4592,57 @@ the label column width."
                 (list #'clutch--header-with-disconnect-badge
                       'clutch-record--header-base)))
     (let* ((row (nth ridx rows))
-           (identity-vec (and row-identity row
-                              (clutch-db-row-identity-values row row-identity)))
+           (edits (with-current-buffer result-buf
+                    (when clutch--pending-edits
+                      (clutch-result--field-edits row (clutch--result-source-column-names)))))
            (max-name-w (apply #'max (mapcar #'string-width col-names))))
       (setq clutch-record--row row)
       (cl-loop for name in col-names
-               for col-def in col-defs
+               for col-def in col-defs for val in row
+               for edit = (pop edits)
                for cidx from 0
                unless (plist-get col-def :hidden)
                do (clutch-record--render-field
-                   name cidx (nth cidx row) col-def
-                   identity-vec ridx edits fk-info clutch-record--expanded-fields
+                   name cidx val col-def edit ridx fk-info clutch-record--expanded-fields
                    max-name-w)))
     (goto-char (point-min))))
 
-(defun clutch-record--follow (relation ridx result-buf columns)
-  "Show the row RELATION references from row RIDX of RESULT-BUF.
+(defun clutch-record--follow (relation ridx columns)
+  "Show the row RELATION references from result row RIDX.
 The query names every column of RELATION, so a key over several columns
 finds one row; each must be in the result with a value.  COLUMNS are its
 source column names, in result order, with nil for expressions.  The referenced
 table retains its catalog and schema qualification."
-  (with-current-buffer result-buf
-    (let* ((conn clutch-connection)
-           (row (nth ridx (clutch--result-display-rows))))
-      (clutch--execute
-       (format "SELECT * FROM %s WHERE %s"
-               (clutch--object-sql-name
-                conn (list :name (plist-get relation :table)
-                           :schema (plist-get relation :schema)
-                           :catalog (plist-get relation :catalog)))
-               (mapconcat
-                (pcase-lambda (`(,column . ,referenced))
-                  (let* ((cidx (or (cl-position column columns
-                                                :test #'equal)
-                                   (user-error "The relation also needs %s, which the result does not show"
-                                               column)))
-                         (value (nth cidx row)))
-                    (when (null value)
-                      (user-error "NULL value in %s — cannot follow" column))
-                    (when-let* ((placeholder (clutch--cell-placeholder-value value)))
-                      (user-error "%s value in %s — cannot follow"
-                                  placeholder column))
-                    (format "%s = %s"
-                            (clutch-db-escape-identifier conn referenced)
-                            (clutch-db-value-to-literal
-                             conn value #'clutch--format-value))))
-                (plist-get relation :pairs)
-                " AND "))))))
+  (let* ((conn clutch-connection)
+         (row (nth ridx (clutch--result-display-rows)))
+         (pairs (plist-get relation :pairs))
+         (edits (clutch-result--field-edits row columns pairs))
+         (values (cl-loop for name in columns for value in row
+                          for edit = (pop edits)
+                          when name collect (cons name (if edit (cdr edit) value)))))
+    (clutch--execute
+     (format "SELECT * FROM %s WHERE %s"
+             (clutch--object-sql-name
+              conn (list :name (plist-get relation :table)
+                         :schema (plist-get relation :schema)
+                         :catalog (plist-get relation :catalog)))
+             (mapconcat
+              (pcase-lambda (`(,column . ,referenced))
+                (let* ((field (or (clutch-db-assoc-column conn column values)
+                                  (user-error "The relation also needs %s, which the result does not show"
+                                              column)))
+                       (value (cdr field)))
+                  (when (null value)
+                    (user-error "NULL value in %s — cannot follow" column))
+                  (when-let* ((placeholder (clutch--cell-placeholder-value value)))
+                    (user-error "%s value in %s — cannot follow"
+                                placeholder column))
+                  (format "%s = %s"
+                          (clutch-db-escape-identifier conn referenced)
+                          (clutch-db-value-to-literal
+                           conn value #'clutch--format-value))))
+              pairs
+              " AND ")))))
 
 (defun clutch-record--follow-column (result-buf cidx ridx &optional ask)
   "Follow a relation from column CIDX of row RIDX of RESULT-BUF.
@@ -4442,44 +4650,44 @@ The relations are those of `clutch-er-outgoing-relations' for the
 result's table that join the column.  Follow the first, a foreign key of
 the database before a relation added by hand, or with ASK choose when
 there are several."
-  (let* ((source-columns
-          (with-current-buffer result-buf
-            (cl-mapcar (lambda (name definition)
-                         (if (plist-member definition :source-column)
-                             (plist-get definition :source-column)
-                           name))
-                       clutch--result-columns clutch--result-column-defs)))
-         (relations
-          (with-current-buffer result-buf
-            (clutch--ensure-connection)
-            (clutch--refuse-while-running clutch-connection)
-            (clutch-result--refuse-if-moved)
-            (let ((column (nth cidx source-columns)))
-              (cl-remove-if-not
-               (lambda (relation) (assoc column (plist-get relation :pairs)))
-               (clutch-er-outgoing-relations
-                clutch-connection clutch--connection-params
-                (list :name (or clutch--result-source-table
-                                (user-error "This result does not show one table"))
-                      :type "TABLE"
-                      :schema clutch--result-source-schema
-                      :catalog clutch--result-source-catalog))))))
-         (choices
-          (mapcar (lambda (relation)
-                    (cons (format "%s (%s) from %s"
-                                  (plist-get relation :table)
-                                  (string-join (mapcar #'cdr (plist-get relation :pairs))
-                                               ", ")
-                                  (string-join (mapcar #'car (plist-get relation :pairs))
-                                               ", "))
-                          relation))
-                  relations)))
-    (clutch-record--follow
-     (cond ((null relations) (user-error "No relation starts at this field"))
-           ((or (not ask) (null (cdr relations))) (car relations))
-           (t (cdr (assoc (completing-read "Follow relation: " choices nil t)
-                          choices))))
-     ridx result-buf source-columns)))
+  (with-current-buffer result-buf
+    (clutch--ensure-connection)
+    (clutch--refuse-while-running clutch-connection)
+    (clutch-result--refuse-if-moved)
+    (let* ((table (clutch--result-source-key))
+           (displayed (and (not ask) (cdr (assq cidx clutch--fk-info))))
+           (outgoing (if displayed (list displayed)
+                       (clutch-er-outgoing-relations
+                        clutch-connection clutch--connection-params
+                        (list :name (or clutch--result-source-table
+                                        (user-error "This result does not show one table"))
+                              :type "TABLE" :schema clutch--result-source-schema
+                              :catalog clutch--result-source-catalog)))))
+      (when (and outgoing (clutch--result-unbound-star))
+        (clutch--ensure-column-details clutch-connection table))
+      (when-let* (outgoing (names (delete-dups (delq nil (clutch--result-source-column-names t)))))
+        (clutch--resolve-result-column-names clutch-connection table names nil t))
+      (let* ((source-columns (clutch--result-source-column-names))
+             (column (nth cidx source-columns))
+             (relations (cl-remove-if-not
+                         (lambda (rel) (clutch-db-assoc-column clutch-connection column (plist-get rel :pairs)))
+                         outgoing))
+             (choices
+              (mapcar (lambda (relation)
+                        (cons (format "%s (%s) from %s"
+                                      (plist-get relation :table)
+                                      (string-join (mapcar #'cdr (plist-get relation :pairs))
+                                                   ", ")
+                                      (string-join (mapcar #'car (plist-get relation :pairs))
+                                                   ", "))
+                              relation))
+                      relations)))
+        (clutch-record--follow
+         (cond ((null relations) (user-error "No relation starts at this field"))
+               ((or (not ask) (null (cdr relations))) (car relations))
+               (t (cdr (assoc (completing-read "Follow relation: " choices nil t)
+                              choices))))
+         ridx source-columns)))))
 
 (defun clutch-record-follow-relation ()
   "Follow a relation from the field at point, asking when several start there.
@@ -4496,13 +4704,12 @@ result's table; see `clutch-er-add-relation'."
   (when-let* ((cidx (get-text-property (point) 'clutch-col-idx))
               (result-buf clutch-record--result-buffer)
               ((buffer-live-p result-buf)))
-    (let* ((fk-info (buffer-local-value 'clutch--fk-info result-buf))
-           (fk (cdr (assq cidx fk-info)))
-           (col-defs
+    (let* ((col-defs
             (buffer-local-value 'clutch--result-column-defs result-buf))
            (col-def (nth cidx col-defs))
            (value (get-text-property (point) 'clutch-full-value))
            (placeholder (clutch--cell-placeholder-value value))
+           (fk (assq cidx (buffer-local-value 'clutch--fk-info result-buf)))
            (expandable-p
             (and (not placeholder)
                  (clutch--long-field-type-p col-def)
@@ -4536,10 +4743,8 @@ result's table; see `clutch-er-add-relation'."
     (with-current-buffer result-buf
       (clutch-result--pending-changes-p))))
 
-;;;###autoload
-(defun clutch-record-toggle-expand ()
-  "Run the expand, collapse, foreign-key, or display action at point."
-  (interactive)
+(defun clutch-record--run-field-action ()
+  "Apply the current Record field action using the installed metadata."
   (if-let* ((context (clutch-record--field-action-context)))
       (pcase (plist-get context :action)
         ('follow-fk
@@ -4559,6 +4764,45 @@ result's table; see `clutch-er-add-relation'."
          (message "%s"
                   (clutch--view-format-value (plist-get context :value)))))
     (user-error "No field at point")))
+
+(defun clutch-record--resolve-field-link (idx callback)
+  "Resolve a possible link at IDX in the parent result before Record acts.
+Return non-nil when CALLBACK will resume the action asynchronously."
+  (when-let* ((table (clutch--result-source-key))
+              ((not (assq idx clutch--fk-info)))
+              ((clutch--result-metadata-current-p))
+              ((clutch-db-live-p clutch-connection)))
+    (let ((mixed (and (not (plist-member (nth idx clutch--result-column-defs) :read-source))
+                      (clutch--result-unbound-star))))
+      (unless (clutch--foreign-keys-cached-p clutch-connection table)
+        (when (or mixed (nth idx (clutch--result-source-column-names)))
+          (clutch--ensure-connection)
+          (clutch--ensure-foreign-keys clutch-connection table)))
+      (when-let* (((clutch--cached-foreign-keys clutch-connection table))
+                  ((not (assq idx clutch--fk-info)))
+                  (name (or (nth idx (clutch--result-source-column-names t))
+                            (and mixed (not (clutch--column-details-cached-p clutch-connection table))
+                                 'star))))
+        (clutch--resolve-result-column-names clutch-connection table (list name) callback)))))
+
+;;;###autoload
+(defun clutch-record-toggle-expand ()
+  "Run the expand, collapse, foreign-key, or display action at point."
+  (interactive)
+  (let ((record (current-buffer)) (row clutch-record--row)
+        (idx (get-text-property (point) 'clutch-col-idx))
+        (value (get-text-property (point) 'clutch-full-value)))
+    (unless (and idx value (not (clutch--cell-placeholder-value value))
+                 (buffer-live-p clutch-record--result-buffer)
+                 (with-current-buffer clutch-record--result-buffer
+                   (clutch-record--resolve-field-link
+                    idx (lambda ()
+                          (when (eq record (window-buffer (selected-window)))
+                            (with-current-buffer record
+                              (when (and (eq row clutch-record--row)
+                                         (eql idx (get-text-property (point) 'clutch-col-idx)))
+                                (clutch-record--run-field-action))))))))
+      (clutch-record--run-field-action))))
 
 ;;;###autoload
 (defun clutch-record-next-row ()
