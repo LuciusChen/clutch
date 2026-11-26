@@ -2182,8 +2182,7 @@ since doubling the quote alone would leave a trailing backslash escaping
 the closing quote there, while elsewhere doubling it would store a
 character the user never typed."
   (let ((escaped (replace-regexp-in-string "'" "''" value)))
-    (when (or (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
-              (clutch-jdbc--mysql-family-conn-p conn))
+    (when (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
       (setq escaped (replace-regexp-in-string "\\\\" "\\\\\\\\" escaped)))
     (format "'%s'" escaped)))
 

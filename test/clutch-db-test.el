@@ -11104,7 +11104,10 @@ that file, or in a new, empty in-memory database, without a word."
       (should (string-match-p
                "ORDER BY `id` DESC LIMIT 10 OFFSET 20\\'"
                (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))
-      (should (equal (clutch-db-escape-literal conn "a\\b") "'a\\\\b'"))))
+      ;; Do not blindly double backslashes for generic MySQL/MariaDB URLs, as
+      ;; sessions with NO_BACKSLASH_ESCAPES would store doubled backslashes.
+      (should (equal (clutch-db-escape-literal conn "C:\\folder\\file")
+                     "'C:\\folder\\file'"))))
   (dolist (url '("jdbc:sqlite:/tmp/app.db"
                  "jdbc:postgresql://db/app"))
     (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
