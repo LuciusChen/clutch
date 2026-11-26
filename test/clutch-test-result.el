@@ -1967,12 +1967,15 @@ It orders exponent floats, infinity, and NaN as well."
               (with-current-buffer parent
                 (should (equal (seq-take (car clutch--result-rows) 2) '(2 "aux"))))
               (kill-buffer parent))
+            (with-current-buffer record
+              (clutch-clone-row-to-insert)
+              (clutch-result-insert-stage))
             (with-current-buffer result
               (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                 (clutch-result-submit)))
             (should (equal (clutch-db-result-rows
-                            (clutch-db-query conn "SELECT parent_id FROM aux.children"))
-                           '((2)))))
+                            (clutch-db-query conn "SELECT id, parent_id FROM aux.children ORDER BY id"))
+                           '((1 2) (2 2)))))
         (when (buffer-live-p record) (kill-buffer record))
         (when (buffer-live-p parent) (kill-buffer parent))))))
 
