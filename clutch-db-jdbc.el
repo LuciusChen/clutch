@@ -2174,17 +2174,28 @@ Such identifiers should remain quoted in reconstructed Oracle DDL."
           keywordp)
       cached)))
 
+(defun clutch-jdbc--mysql-hex-string-literal (value)
+  "Encode VALUE as a MySQL UTF-8 expression immune to `sql_mode' escaping."
+  (let ((bytes (encode-coding-string value 'utf-8-unix)))
+    (format "CONVERT(X'%s' USING utf8mb4)"
+            (mapconcat (lambda (byte) (format "%02X" byte)) bytes ""))))
+
 (cl-defmethod clutch-db-escape-literal ((conn clutch-jdbc-conn) value)
   "Escape VALUE as a SQL string literal for CONN.
 Quote doubling is accepted by every supported engine.  A backslash is
 doubled only where the connection's SQL dialect reads it as an escape,
 since doubling the quote alone would leave a trailing backslash escaping
 the closing quote there, while elsewhere doubling it would store a
-character the user never typed."
-  (let ((escaped (replace-regexp-in-string "'" "''" value)))
-    (when (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
-      (setq escaped (replace-regexp-in-string "\\\\" "\\\\\\\\" escaped)))
-    (format "'%s'" escaped)))
+character the user never typed.  For generic MySQL and MariaDB JDBC
+connections, values containing backslashes use a UTF-8 hex expression so
+the round-trip value is identical with or without `NO_BACKSLASH_ESCAPES'."
+  (if (and (clutch-jdbc--mysql-family-conn-p conn)
+           (string-search "\\" value))
+      (clutch-jdbc--mysql-hex-string-literal value)
+    (let ((escaped (replace-regexp-in-string "'" "''" value)))
+      (when (plist-get (clutch-db-connection-sql-dialect conn) :backslash-escapes)
+        (setq escaped (replace-regexp-in-string "\\\\" "\\\\\\\\" escaped)))
+      (format "'%s'" escaped))))
 
 ;;;; Schema methods
 

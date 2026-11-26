@@ -11104,16 +11104,38 @@ that file, or in a new, empty in-memory database, without a word."
       (should (string-match-p
                "ORDER BY `id` DESC LIMIT 10 OFFSET 20\\'"
                (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))
-      ;; Do not blindly double backslashes for generic MySQL/MariaDB URLs, as
-      ;; sessions with NO_BACKSLASH_ESCAPES would store doubled backslashes.
+      ;; Backslash-bearing literals on generic MySQL/MariaDB JDBC must decode
+      ;; identically in default mode and under NO_BACKSLASH_ESCAPES; values
+      ;; without backslashes stay readable single-quoted strings.
       (should (equal (clutch-db-escape-literal conn "C:\\folder\\file")
-                     "'C:\\folder\\file'"))))
+                     "CONVERT(X'433A5C666F6C6465725C66696C65' USING utf8mb4)"))
+      (should (equal (clutch-db-escape-literal conn "file\\")
+                     "CONVERT(X'66696C655C' USING utf8mb4)"))
+      (should (equal (clutch-db-escape-literal conn "O'Brien")
+                     "'O''Brien'"))
+      (should (equal (clutch-db-escape-literal conn "a\\中")
+                     "CONVERT(X'615CE4B8AD' USING utf8mb4)"))
+      ;; Verify both default-mode and NO_BACKSLASH_ESCAPES evaluation agree:
+      ;; neither form contains a backslash inside quotes and hex decodes verbatim.
+      (dolist (sample '("C:\\folder\\file" "file\\" "O'Brien" "a\\中"))
+        (let ((sql (clutch-db-escape-literal conn sample)))
+          (should-not (string-search "\\" sql))
+          (if (string-match "\\`CONVERT(X'\\([0-9A-F]+\\)' USING utf8mb4)\\'" sql)
+              (let* ((hex (match-string 1 sql))
+                     (bytes (apply #'unibyte-string
+                                   (cl-loop for i from 0 below (length hex) by 2
+                                            collect (string-to-number
+                                                     (substring hex i (+ i 2)) 16)))))
+                (should (equal (decode-coding-string bytes 'utf-8-unix) sample)))
+            (should (equal sql (format "'%s'" (replace-regexp-in-string "'" "''" sample)))))))))
   (dolist (url '("jdbc:sqlite:/tmp/app.db"
                  "jdbc:postgresql://db/app"))
     (let ((conn (make-clutch-jdbc-conn :params `(:driver jdbc :url ,url))))
       (should (string-match-p
                "ORDER BY \"id\" DESC LIMIT 10 OFFSET 20\\'"
-               (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))))
+               (clutch-db-build-paged-sql conn "SELECT * FROM items" 2 10 '("id" . "DESC"))))
+      (should (equal (clutch-db-escape-literal conn "C:\\folder\\file")
+                     "'C:\\folder\\file'"))))
   (should (eq (clutch-jdbc--type-category "BYTEA") 'blob))
   (should (eq (clutch-jdbc--type-category "INTERVAL") 'text))
   (should (eq (clutch-jdbc--type-category "INTERVAL YEAR TO MONTH") 'text))
