@@ -1101,17 +1101,18 @@ Returns a `clutch-jdbc-conn'."
             (unless switched
               (clutch-db-disconnect conn)))))
       (when (clutch-jdbc--sqlserver-conn-p conn)
-        (condition-case err
-            (let ((requested (plist-get conn-params :catalog))
-                  (opened (plist-get result :catalog)))
-              (cond
-               ((and requested (not (equal requested opened)))
-                (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn requested))))
-               (opened (setf (clutch-jdbc-conn-params conn) (plist-put conn-params :catalog opened)))
-               (t (clutch-jdbc--read-sqlserver-catalog conn))))
-          (clutch-db-error
-           (clutch-db-disconnect conn)
-           (signal (car err) (cdr err)))))
+        (let (ready)
+          (unwind-protect
+              (let ((requested (plist-get conn-params :catalog))
+                    (opened (plist-get result :catalog)))
+                (cond
+                 ((and requested (not (equal requested opened)))
+                  (clutch-db-query conn (concat "USE " (clutch-db-escape-identifier conn requested))))
+                 (opened (setf (clutch-jdbc-conn-params conn) (plist-put conn-params :catalog opened)))
+                 (t (clutch-jdbc--read-sqlserver-catalog conn)))
+                (setq ready t))
+            (unless ready
+              (clutch-db-disconnect conn)))))
       conn)))
 
 ;;;; Register backend
@@ -2046,10 +2047,25 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
       (cl-call-next-method)
     ;; Browse mode 2 reports a view's own column names, also through a synonym.
     (let* ((select (clutch-db--column-binding-select conn names source-token))
-           (sql (format (concat "SELECT source_column FROM sys.dm_exec_describe_first_result_set"
-                                "(N%s, NULL, 2) WHERE is_hidden = 0 ORDER BY column_ordinal")
-                        (clutch-db-escape-literal conn select))))
-      (clutch-db--column-bindings names (mapcar #'car (clutch-db-result-rows (clutch-db-query conn sql)))))))
+           (sql (format (concat "SELECT source_column, CASE WHEN is_hidden = 0 THEN 0 ELSE 1 END, "
+                                "error_number, error_message "
+                                "FROM sys.dm_exec_describe_first_result_set"
+                                "(N%s, NULL, 2) ORDER BY column_ordinal")
+                        (clutch-db-escape-literal conn select)))
+           columns)
+      (dolist (row (clutch-db-result-rows (clutch-db-query conn sql)))
+        (pcase-let ((`(,source-column ,hidden ,error-number ,error-message) row))
+          (let ((msg (and (stringp error-message)
+                          (not (string-empty-p (string-trim error-message)))
+                          error-message)))
+            (when (or msg error-number)
+              (signal 'clutch-db-error
+                      (list (or msg
+                                (format "Could not describe source columns (SQL Server error %s)"
+                                        error-number))))))
+          (when (equal hidden 0)
+            (push source-column columns))))
+      (clutch-db--column-bindings names (nreverse columns)))))
 
 (cl-defmethod clutch-db-resolve-column-names-async ((conn clutch-jdbc-conn) names source-token callback)
   "Resolve NAMES on SOURCE-TOKEN on CONN's metadata session and call CALLBACK."

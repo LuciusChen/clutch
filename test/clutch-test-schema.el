@@ -660,6 +660,36 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
   (should-not (clutch--result-column-details
                'dummy nil)))
 
+(ert-deftest clutch-test-resolve-result-column-names-sync-stops-when-disconnected ()
+  "Sync waiting on a pending source-column lookup should fail promptly when closed."
+  (let ((clutch--table-metadata-cache (make-hash-table :test 'eq)))
+    (with-temp-buffer
+      (clutch-result-mode)
+      (let* ((clutch-connection (make-clutch-test-conn))
+             (clutch--result-source-table "users")
+             (clutch--row-identity '(:source-token "users"))
+             (clutch--result-columns '("alias"))
+             (clutch--result-column-defs '((:source-column "cafe" :unresolved-source t)))
+             (clutch-read-idle-timeout-seconds 30)
+             (live t)
+             (waits 0))
+        (cl-letf (((symbol-function 'clutch-db-live-p)
+                   (lambda (_conn) live))
+                  ((symbol-function 'clutch-db-resolve-column-names-async)
+                   (lambda (_conn _names _target _cb) t))
+                  ((symbol-function 'accept-process-output)
+                   (lambda (&rest _)
+                     (cl-incf waits)
+                     (setq live nil))))
+          (should (clutch--resolve-result-column-names
+                   clutch-connection "users" '("cafe") nil))
+          (should (equal (cadr (should-error
+                                (clutch--resolve-result-column-names
+                                 clutch-connection "users" '("cafe") nil t)
+                                :type 'clutch-db-error))
+                         "Connection closed"))
+          (should (= waits 1)))))))
+
 (provide 'clutch-test-schema)
 
 ;;; clutch-test-schema.el ends here
