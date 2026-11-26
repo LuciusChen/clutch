@@ -3807,13 +3807,14 @@ Each batch has its own list spine."
                do (funcall function (seq-take tail size)))
     (funcall function nil)))
 
-(defun clutch-result--map-export-batches (function done)
+(defun clutch-result--map-export-batches (function done &optional stream)
   "Call FUNCTION with each bounded export batch, then DONE.
 Call FUNCTION once with nil for an empty result.  Each batch has its own
 list spine, so consumers may collect batches without mutating cached
 rows.  DONE gets nil after the last batch, or the error that stopped the
 export.  Pages are fetched without blocking, as statements run, so DONE
-may run after this function returns."
+may run after this function returns.  STREAM may start a file export of
+the prepared SQL when no interactive sort needs applying."
   (clutch--ensure-connection)
   (let* ((effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
@@ -3825,14 +3826,17 @@ may run after this function returns."
             (emit clutch--result-rows)
             (funcall done nil))
         (clutch-result--refuse-if-moved)
-        (clutch-result--export-pages
-         effective-sql
-         (clutch-result--effective-query (plist-get clutch--result-query-prep :sql))
-         (and clutch--base-query
-              (or clutch--order-by
-                  (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
-              page-size)
-         #'emit done)))))
+        (let ((query (clutch-result--effective-query (plist-get clutch--result-query-prep :sql))))
+          (clutch-result--export-pages
+           effective-sql query
+           (and clutch--base-query
+                (or clutch--order-by
+                    (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
+                page-size)
+           #'emit done
+           (when (and stream (not clutch--order-by))
+             (lambda (outcome)
+               (funcall stream query outcome)))))))))
 
 (defconst clutch-result--export-gc-threshold (* 32 1024 1024)
   "Garbage collection threshold in bytes while an export runs.
@@ -4254,7 +4258,18 @@ When OMIT-HEADER is non-nil, omit headers from delimited formats."
                    (append (list row-count (if (= row-count 1) "" "s") path)
                            (when coding (list coding)))))
           :coding coding :omit-header omit-header
-          :columns columns :col-indices col-indices))))))
+          :columns columns :col-indices col-indices
+          :map-batches
+          (if (and delimited col-indices clutch--result-column-defs)
+              (lambda (emit done)
+                (clutch-result--map-export-batches
+                 emit done
+                 (lambda (sql outcome)
+                   (clutch-db-grid-export-async
+                    clutch-connection sql clutch--result-column-defs
+                    (if (eq kind 'tsv) ?\t clutch-csv-delimiter)
+                    (not omit-header) clutch-export-null-value-text emit outcome))))
+            #'clutch-result--map-export-batches)))))))
 
 ;;;; Column navigation and metadata
 

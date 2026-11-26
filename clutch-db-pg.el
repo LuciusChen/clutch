@@ -858,6 +858,32 @@ COPY."
                                 (clutch-db--error-data error))))))))
       t)))
 
+(cl-defmethod clutch-db-grid-export-async
+    ((conn clutch-db-pg--connection) sql columns delimiter header null-text emit callback)
+  "Stream SQL on CONN when COPY matches the visible grid COLUMNS.
+DELIMITER, HEADER, NULL-TEXT, EMIT and CALLBACK follow the generic."
+  (when (and (memq delimiter '(?, ?\t)) (string-empty-p null-text))
+    (let (aliases projection)
+      (catch 'decline
+        (cl-loop for column in columns for i from 0
+                 for alias = (format "c%d" i)
+                 do (push alias aliases)
+                 unless (plist-get column :hidden) do
+                 (unless (member (plist-get column :backend-type)
+                                 '("int2" "int4" "int8" "text" "varchar"))
+                   (throw 'decline nil))
+                 (push (concat alias " AS " (clutch-db-escape-identifier
+                                             conn (plist-get column :name)))
+                       projection))
+        ;; Older servers quote a lone backslash-dot in single-column CSV.
+        (when (cdr projection)
+          (clutch-db-delimited-export-async
+           conn (format "SELECT %s FROM (%s\n) AS t(%s)"
+                        (mapconcat #'identity (nreverse projection) ", ")
+                        (clutch-db-sql-trim-end sql)
+                        (mapconcat #'identity (nreverse aliases) ", "))
+           delimiter header null-text emit callback))))))
+
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
   "Execute parameterized SQL on PostgreSQL CONN with PARAMS."

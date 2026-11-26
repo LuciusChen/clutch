@@ -2901,7 +2901,19 @@ throughout."
                                                        (buffer-string))
                                      (if (string-empty-p null-text)
                                          "id,body\n1,\"中文,a\"\n2,b\n3,\"\"\n4,\n5,NULL\n"
-                                       "id,body\n1,\"中文,a\"\n2,b\n3,\n4,NULL\n5,\"NULL\"\n")))))))))
+                                       "id,body\n1,\"中文,a\"\n2,b\n3,\n4,NULL\n5,\"NULL\"\n"))))))))
+            (when (eq clutch-test-backend 'pg)
+              (clutch-test--with-live-result-buffer " *grid-file-export*"
+                (clutch-test--execute-live-select
+                 conn (format "SELECT id AS x, body, body AS x FROM %s ORDER BY id" table))
+                (with-current-buffer " *grid-file-export*"
+                  (cl-callf plist-put (nth 1 clutch--result-column-defs) :hidden t)
+                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+                    (clutch-test--with-minibuffer-answers '("utf-8")
+                      (clutch--export-result 'csv 'file))
+                    (clutch-test--await-queries))
+                  (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                                 "x,x\n1,\"中文,a\"\n2,b\n3,\"\"\n4,\n5,NULL\n"))))))
         (clutch-db-query conn (format "DROP TABLE IF EXISTS %s" table))
         (delete-file path)))))
 
