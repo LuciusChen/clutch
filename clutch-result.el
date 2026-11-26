@@ -4554,40 +4554,41 @@ the label column width."
                    max-name-w)))
     (goto-char (point-min))))
 
-(defun clutch-record--follow (relation ridx result-buf columns)
-  "Show the row RELATION references from row RIDX of RESULT-BUF.
+(defun clutch-record--follow (relation ridx columns cidx)
+  "Show the row RELATION references from field CIDX of result row RIDX.
 The query names every column of RELATION, so a key over several columns
 finds one row; each must be in the result with a value.  COLUMNS are its
 source column names, in result order, with nil for expressions.  The referenced
 table retains its catalog and schema qualification."
-  (with-current-buffer result-buf
-    (let* ((conn clutch-connection)
-           (values (cl-loop for name in columns
-                            for value in (nth ridx (clutch--result-display-rows))
-                            when name collect (cons name value))))
-      (clutch--execute
-       (format "SELECT * FROM %s WHERE %s"
-               (clutch--object-sql-name
-                conn (list :name (plist-get relation :table)
-                           :schema (plist-get relation :schema)
-                           :catalog (plist-get relation :catalog)))
-               (mapconcat
-                (pcase-lambda (`(,column . ,referenced))
-                  (let* ((field (or (clutch-db-assoc-column conn column values)
-                                    (user-error "The relation also needs %s, which the result does not show"
-                                                column)))
-                         (value (cdr field)))
-                    (when (null value)
-                      (user-error "NULL value in %s — cannot follow" column))
-                    (when-let* ((placeholder (clutch--cell-placeholder-value value)))
-                      (user-error "%s value in %s — cannot follow"
-                                  placeholder column))
-                    (format "%s = %s"
-                            (clutch-db-escape-identifier conn referenced)
-                            (clutch-db-value-to-literal
-                             conn value #'clutch--format-value))))
-                (plist-get relation :pairs)
-                " AND "))))))
+  (let* ((conn clutch-connection)
+         (row (clutch-result--row-values-with-pending-edits
+               (nth ridx (clutch--result-display-rows))))
+         (fields (cl-mapcar #'cons columns row))
+         ;; When two aliases project one key, follow the value at point.
+         (values (assq-delete-all nil (cons (nth cidx fields) fields))))
+    (clutch--execute
+     (format "SELECT * FROM %s WHERE %s"
+             (clutch--object-sql-name
+              conn (list :name (plist-get relation :table)
+                         :schema (plist-get relation :schema)
+                         :catalog (plist-get relation :catalog)))
+             (mapconcat
+              (pcase-lambda (`(,column . ,referenced))
+                (let* ((field (or (clutch-db-assoc-column conn column values)
+                                  (user-error "The relation also needs %s, which the result does not show"
+                                              column)))
+                       (value (cdr field)))
+                  (when (null value)
+                    (user-error "NULL value in %s — cannot follow" column))
+                  (when-let* ((placeholder (clutch--cell-placeholder-value value)))
+                    (user-error "%s value in %s — cannot follow"
+                                placeholder column))
+                  (format "%s = %s"
+                          (clutch-db-escape-identifier conn referenced)
+                          (clutch-db-value-to-literal
+                           conn value #'clutch--format-value))))
+              (plist-get relation :pairs)
+              " AND ")))))
 
 (defun clutch-record--follow-column (result-buf cidx ridx &optional ask)
   "Follow a relation from column CIDX of row RIDX of RESULT-BUF.
@@ -4632,7 +4633,7 @@ there are several."
                ((or (not ask) (null (cdr relations))) (car relations))
                (t (cdr (assoc (completing-read "Follow relation: " choices nil t)
                               choices))))
-         ridx result-buf source-columns)))))
+         ridx source-columns cidx)))))
 
 (defun clutch-record-follow-relation ()
   "Follow a relation from the field at point, asking when several start there.
@@ -4644,24 +4645,35 @@ result's table; see `clutch-er-add-relation'."
     (clutch-record--follow-column clutch-record--result-buffer
                                   cidx (clutch-record--resolve-row-index) t)))
 
-(defun clutch-record--field-action-context ()
-  "Return the action context for the Record field at point, or nil."
+(defun clutch-record--field-action-context (&optional load)
+  "Return the action context for the Record field at point, or nil.
+With LOAD, resolve missing foreign keys if this field could follow one."
   (when-let* ((cidx (get-text-property (point) 'clutch-col-idx))
               (result-buf clutch-record--result-buffer)
               ((buffer-live-p result-buf)))
-    (let* ((fk-info (buffer-local-value 'clutch--fk-info result-buf))
-           (fk (cdr (assq cidx fk-info)))
-           (col-defs
+    (let* ((col-defs
             (buffer-local-value 'clutch--result-column-defs result-buf))
            (col-def (nth cidx col-defs))
            (value (get-text-property (point) 'clutch-full-value))
            (placeholder (clutch--cell-placeholder-value value))
+           (fk (and value (not placeholder)
+                    (with-current-buffer result-buf
+                      (when-let* (load (table (clutch--result-source-key))
+                                  ((not (clutch--foreign-keys-cached-p clutch-connection table)))
+                                  ((clutch--result-metadata-current-p))
+                                  ((or (nth cidx (clutch--result-source-column-names))
+                                       (and (not (plist-member col-def :read-source))
+                                            (clutch--result-unbound-star))))
+                                  ((clutch-db-live-p clutch-connection)))
+                        (clutch--ensure-connection)
+                        (clutch--ensure-foreign-keys clutch-connection table))
+                      (assq cidx clutch--fk-info))))
            (expandable-p
             (and (not placeholder)
                  (clutch--long-field-type-p col-def)
                  (> (length (clutch--format-value value)) 80)))
            (action (cond
-                    ((and fk value (not placeholder)) 'follow-fk)
+                    (fk 'follow-fk)
                     ((and expandable-p
                           (memq cidx clutch-record--expanded-fields))
                      'collapse)
@@ -4693,16 +4705,7 @@ result's table; see `clutch-er-add-relation'."
 (defun clutch-record-toggle-expand ()
   "Run the expand, collapse, foreign-key, or display action at point."
   (interactive)
-  ;; RET can arrive before an open Record's replacement keys have returned.
-  (when (buffer-live-p clutch-record--result-buffer)
-    (with-current-buffer clutch-record--result-buffer
-      (when-let* ((table (clutch--result-source-key))
-                  ((clutch--result-metadata-current-p))
-                  ((not (clutch--foreign-keys-cached-p clutch-connection table)))
-                  ((clutch-db-live-p clutch-connection)))
-        (clutch--ensure-connection)
-        (clutch--ensure-foreign-keys clutch-connection table))))
-  (if-let* ((context (clutch-record--field-action-context)))
+  (if-let* ((context (clutch-record--field-action-context t)))
       (pcase (plist-get context :action)
         ('follow-fk
          (clutch-record--follow-column

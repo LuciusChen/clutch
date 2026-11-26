@@ -1996,7 +1996,7 @@ relation added by hand starts at the same field, offered after the key."
             (dolist (sql '("CREATE TABLE regions (code TEXT, country TEXT, name TEXT, PRIMARY KEY (code, country))"
                            "INSERT INTO regions VALUES ('n', 'a', 'north a'), ('n', 'b', 'north b')"
                            "CREATE TABLE notes (code TEXT PRIMARY KEY, body TEXT)"
-                           "INSERT INTO notes VALUES ('n', 'note n')"
+                           "INSERT INTO notes VALUES ('n', 'note n'), ('x', 'note x')"
                            "CREATE TABLE shops (id INTEGER PRIMARY KEY, code TEXT, country TEXT, label TEXT GENERATED ALWAYS AS (upper(code)) STORED, FOREIGN KEY (code, country) REFERENCES regions)"
                            "INSERT INTO shops VALUES (1, 'n', 'b')"))
               (clutch-db-query conn sql))
@@ -2025,11 +2025,18 @@ relation added by hand starts at the same field, offered after the key."
             (with-current-buffer result-buf
               (clutch--goto-cell 0 3)
               (should-error (clutch-result-edit-cell) :type 'user-error)
+              (clutch--goto-cell 0 1)
+              (with-current-buffer (clutch-result-edit-cell)
+                (erase-buffer)
+                (insert "x")
+                (clutch-result-edit-finish))
               (clutch-test--with-minibuffer-answers '("notes (code) from code")
-                (clutch-record--follow-column result-buf 1 0 t))
+                (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                  (clutch-record--follow-column result-buf 1 0 t)))
               (clutch-test--await-queries)
               (should (equal clutch--last-query
-                             "SELECT * FROM \"notes\" WHERE \"code\" = 'n'")))
+                             "SELECT * FROM \"notes\" WHERE \"code\" = 'x'"))
+              (should (equal (caar clutch--result-rows) "x")))
             ;; A stored relation can be the only relation on a cold table.
             (clutch-er--write-relations
              (clutch-er--relations-file conn nil)
