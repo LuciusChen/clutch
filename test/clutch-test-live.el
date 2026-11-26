@@ -2275,12 +2275,11 @@ throughout."
                admin (format "INSERT INTO %s.t VALUES (1, 'orig')" schema)))
             (clutch-test--with-live-console params
               (cl-flet ((describe-on (schema)
-                          (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 schema))
-                          (clutch-test--await (lambda () (gethash clutch-connection clutch--schema-cache)))
-                          (clutch-test--run-in-console "SELECT memo, id FROM t")
+                          (clutch-test--run-in-console (format "SET search_path TO %s, %s" s1 schema)
+                                                       "SELECT memo, id FROM t")
                           (with-current-buffer (clutch-result--buffer-name)
                             (clutch-test--await
-                             (lambda () (and (clutch--foreign-keys-cached-p clutch-connection "t")
+                             (lambda () (and (gethash clutch-connection clutch--schema-cache)
                                              (not (clutch-db-in-use-p clutch-connection)))))
                             (clutch--goto-cell 0 0)
                             (clutch-result-column-info)
