@@ -1095,11 +1095,7 @@ If the result has columns, shows a table; otherwise shows DML summary."
              (identity-vec (when row-identity
                              (clutch-db-row-identity-values
                               row row-identity)))
-             (edit-index (if (and record cidx clutch--pending-edits)
-                             (car (nth cidx (clutch-result--field-edits
-                                             row (clutch--result-source-column-names))))
-                           cidx))
-             (edit-key (and edit-index identity-vec (cons identity-vec edit-index)))
+             (edit-key (and cidx identity-vec (cons identity-vec cidx)))
              (was-edit (assoc edit-key clutch--pending-edits))
              (was-delete (and identity-vec
                               (cl-find identity-vec clutch--pending-deletes
@@ -1127,12 +1123,10 @@ If the result has columns, shows a table; otherwise shows DML summary."
   "Discard the staged change at point."
   (interactive)
   (if (derived-mode-p 'clutch-record-mode)
-      (pcase-let* ((`(,_ ,cidx ,_) (or (clutch--cell-at-point)
-                                         (user-error "No field at point")))
-                   (ridx (clutch-record--resolve-row-index))
-                   (record (current-buffer)))
+      (pcase-let ((`(,ridx ,_ ,_ ,draft-column) (clutch-record--editable-cell-at-point))
+                  (record (current-buffer)))
         (with-current-buffer clutch-record--result-buffer
-          (clutch-result--discard-pending-at ridx cidx record)))
+          (clutch-result--discard-pending-at ridx draft-column record)))
     (let ((ridx (or (clutch--row-idx-at-line)
                     (user-error "No row at point")))
           (cidx (clutch--col-idx-at-point)))
@@ -4525,6 +4519,7 @@ supply its links, expansion state and label width."
                      (t nil)))
          (cell-props (list 'clutch-row-idx ridx
                            'clutch-col-idx cidx
+                           'clutch-draft-column (if edited (car edited) cidx)
                            'clutch-full-value display-val)))
     (when truncated
       (setq cell-props (nconc cell-props '(clutch-cell-truncated t))))

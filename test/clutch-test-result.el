@@ -1954,8 +1954,15 @@ It orders exponent floats, infinity, and NaN as well."
               (clutch-result-open-record)
               (setq record (current-buffer)))
             (with-current-buffer (clutch-result-edit-cell)
-              (insert "2")
+              (insert "1")
               (clutch-result-edit-finish))
+            (with-current-buffer record
+              (goto-char (point-min))
+              (forward-line 1)
+              (with-current-buffer (clutch-result-edit-cell)
+                (erase-buffer)
+                (insert "2")
+                (clutch-result-edit-finish)))
             (dolist (idx '(1 2))
               (with-current-buffer record
                 (goto-char (point-min))

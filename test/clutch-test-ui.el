@@ -2568,27 +2568,33 @@ Point left behind made the next cell command scroll back to it."
             (should-not clutch--pending-edits)))))))
 
 (ert-deftest clutch-test-record-discard-pending-edit-at-field ()
-  "Discard a shared edit through its other alias, keeping a staged deletion."
-  (clutch-test--with-sqlite-result (conn result)
-      '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
-        "INSERT INTO users VALUES (1, NULL)")
-      "SELECT id, name AS a, name AS b FROM users"
-    (clutch--goto-cell 0 2)
-    (with-current-buffer (clutch-result-edit-cell)
-      (insert "ann")
-      (clutch-result-edit-finish))
-    (clutch-result-delete-rows)
-    (clutch-result-open-record)
-    (unwind-protect
-        (progn
-          (forward-line 1)
-          (clutch-result-discard-pending-at-point)
-          (should (eq (get-text-property (point) 'clutch-col-idx) 1))
-          (should-not (get-text-property (point) 'clutch-full-value))
-          (with-current-buffer result
-            (should-not clutch--pending-edits)
-            (should (equal clutch--pending-deletes '([1])))))
-      (kill-buffer (current-buffer)))))
+  "Discard or restore a shared edit through its alias, keeping the row deletion."
+  (dolist (action '(discard restore-null))
+    (ert-info ((symbol-name action))
+      (clutch-test--with-sqlite-result (conn result)
+          '("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+            "INSERT INTO users VALUES (1, NULL)")
+          "SELECT id, name AS a, name AS b FROM users"
+        (clutch--goto-cell 0 2)
+        (with-current-buffer (clutch-result-edit-cell)
+          (insert "ann")
+          (clutch-result-edit-finish))
+        (clutch-result-delete-rows)
+        (clutch-result-open-record)
+        (unwind-protect
+            (progn
+              (forward-line 1)
+              (if (eq action 'discard)
+                  (clutch-result-discard-pending-at-point)
+                (with-current-buffer (clutch-result-edit-cell)
+                  (call-interactively (key-binding (kbd "C-c C-n")))
+                  (clutch-result-edit-finish)))
+              (should (eq (get-text-property (point) 'clutch-col-idx) 1))
+              (should-not (get-text-property (point) 'clutch-full-value))
+              (with-current-buffer result
+                (should-not clutch--pending-edits)
+                (should (equal clutch--pending-deletes '([1])))))
+          (kill-buffer (current-buffer)))))))
 
 (ert-deftest clutch-test-record-open-renders-visible-row ()
   "Opening record view should render the visible row at point."
