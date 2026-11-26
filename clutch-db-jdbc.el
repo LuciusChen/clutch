@@ -1458,32 +1458,32 @@ so an object name is matched by prefix search instead."
         (setq done (eq t (plist-get result :done)))))
     (apply #'nconc (nreverse batches))))
 
-(defun clutch-jdbc--collect-cursor-async (conn first send outcome)
+(defun clutch-jdbc--collect-cursor-async (conn first send outcome &optional consume)
   "Collect FIRST and later cursor batches on CONN, then call OUTCOME.
 SEND submits fetch parameters and calls its reply with (PAGE ERROR).
-On failure, ask the agent to release the cursor and report the original error."
+With CONSUME, pass it each batch instead of retaining rows.  If it
+returns \='stop, release the cursor without requesting another batch."
   (let (batches cursor)
     (cl-labels
         ((receive (page error)
-           (cond
-            (error
-             (when (and cursor (clutch-db-live-p conn))
-               (ignore-errors
-                 (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor)))))
-             (funcall outcome nil error))
-            (t
-             (push (plist-get page :rows) batches)
-             (if (eq t (plist-get page :done))
-                 (funcall outcome (apply #'nconc (nreverse batches)) nil)
-               (setq cursor (plist-get page :cursor-id))
-               (when-let* ((failure
-                            (condition-case err
-                                (progn
-                                  (funcall send (clutch-jdbc--fetch-params conn cursor) #'receive)
-                                  nil)
-                              (clutch-db-error err)
-                              (error (list 'clutch-db-error (error-message-string err))))))
-                 (receive nil failure)))))))
+           (let ((done (eq t (plist-get page :done))) stopped)
+             (unless error
+               (setq cursor (unless done (plist-get page :cursor-id)))
+               (condition-case err
+                   (progn
+                     (if consume
+                         (setq stopped (eq (funcall consume (plist-get page :rows)) 'stop))
+                       (push (plist-get page :rows) batches))
+                     (unless (or done stopped)
+                       (funcall send (clutch-jdbc--fetch-params conn cursor) #'receive)))
+                 (clutch-db-error (setq error err))
+                 ((error quit)
+                  (setq error (list 'clutch-db-error (error-message-string err))))))
+             (when (or done stopped error)
+               (when (and cursor (clutch-db-live-p conn))
+                 (ignore-errors
+                   (clutch-jdbc--send "close-cursor" `((cursor-id . ,cursor)))))
+               (funcall outcome (unless error (apply #'nconc (nreverse batches))) error)))))
       (receive first nil))))
 
 (defun clutch-jdbc--collect-table-entries (conn result)
@@ -1772,11 +1772,12 @@ Only fetch requests have a client deadline.  Return the active request id."
      clutch-jdbc--async-callbacks)
     id))
 
-(defun clutch-jdbc--execute-rpc-async (conn op payload callback)
+(defun clutch-jdbc--execute-rpc-async (conn op payload callback &optional emit)
   "Start JDBC RPC OP with PAYLOAD on CONN and pass the outcome to CALLBACK.
 CALLBACK receives a database result and nil, or nil and a `clutch-db-error'
 condition, exactly once.  The initial request has no client deadline.
-Keep CONN busy through any cursor fetches."
+Keep CONN busy through any cursor fetches.  For export, call EMIT with
+each batch of normalized rows, nil and the column names."
   (setq conn (clutch-jdbc--require-current-connection conn))
   (let (request-id)
     (cl-labels
@@ -1794,15 +1795,20 @@ Keep CONN busy through any cursor fetches."
              (unwind-protect (clutch-jdbc--finish-execution conn payload)
                (funcall callback result error))))
          (receive (raw error)
-           (if (and (not error) (plist-get raw :cursor-id)
-                    (not (eq t (plist-get raw :done)))
-                    (not (clutch-jdbc--cassandra-conn-p conn)))
+           (if (and (not error)
+                    (or emit (and (plist-get raw :cursor-id)
+                                  (not (eq t (plist-get raw :done)))
+                                  (not (clutch-jdbc--cassandra-conn-p conn)))))
                (clutch-jdbc--collect-cursor-async
                 conn raw
                 (lambda (params outcome)
                   (setq request-id (clutch-jdbc--send-foreground conn "fetch" params outcome)))
                 (lambda (rows error)
-                  (finish (plist-put (plist-put raw :rows rows) :done t) error)))
+                  (finish (plist-put (plist-put raw :rows rows) :done t) error))
+                (when emit
+                  (lambda (rows)
+                    (funcall emit (mapcar #'clutch-jdbc--normalize-row rows)
+                             nil (plist-get raw :columns)))))
              (finish raw error))))
       (setq request-id
             (clutch-jdbc--send-foreground
@@ -1875,6 +1881,13 @@ still arrive."
   "Execute SQL on JDBC CONN and return a `clutch-db-result'."
   (prog1 (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql)))
     (clutch-jdbc--follow-schema conn sql)))
+
+(cl-defmethod clutch-db-delimited-export-async
+    ((conn clutch-jdbc-conn) sql _delimiter _header _null-text emit callback)
+  "Execute SQL once on CONN and pass its cursor batches to the file writer."
+  (unless (clutch-jdbc--cassandra-conn-p conn)
+    (clutch-jdbc--execute-rpc-async conn "execute" `((sql . ,sql)) callback emit)
+    t))
 
 (cl-defmethod clutch-db-query-async ((conn clutch-jdbc-conn) sql callback)
   "Start SQL on JDBC CONN and pass the outcome to CALLBACK."

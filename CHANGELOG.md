@@ -5,6 +5,7 @@
 ### Changed
 
 - Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
+- JDBC query-to-file export executes the SELECT once and writes each cursor batch as it arrives.
 
 ### Fixed
 

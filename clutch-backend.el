@@ -1929,8 +1929,10 @@ contain it, a double quote or a line break, or equal NULL-TEXT, with
 double quotes doubled; SQL NULL is NULL-TEXT, unquoted.  HEADER non-nil
 starts the text with the column names.  FUNCTION is called in order,
 from timers, with the next part of the text and the number of rows it
-holds; it may wait, as writing a remote file does, and is not called
-again until it returns.  CALLBACK is later called once, as for
+holds, or with decoded rows, nil and their column names for the writer
+to format.  It may wait, as writing a remote file does, and is not called
+again until it returns.  A row consumer returning \='stop needs no more
+cursor batches.  CALLBACK is later called once, as for
 `clutch-db-query-async', after FUNCTION's last call has returned.
 Return nil, calling neither, when CONN cannot stream SQL.")
 

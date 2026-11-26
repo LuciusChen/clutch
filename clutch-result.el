@@ -4201,7 +4201,7 @@ stops it.  Replace the destination only after the whole export succeeds."
        :coding coding
        :map-batches
        (lambda (emit done)
-         (let (export-columns)
+         (let ((source (current-buffer)) (conn clutch-connection) export-columns)
            (clutch-result--export-pages
             sql sql
             (unless (clutch-db-sql-has-top-level-row-limit-p sql) page-size)
@@ -4214,13 +4214,21 @@ stops it.  Replace the destination only after the whole export succeeds."
                rows page-size (lambda (batch)
                                 (funcall emit batch nil export-columns))))
             done
-            ;; A stream writes formatted text itself; the rows it ends with
-            ;; add nothing.
+            ;; While writing a batch, a file handler may allow a cancel or
+            ;; a change of connection before the next fetch.
             (lambda (outcome)
               (clutch-db-delimited-export-async
                clutch-connection sql
                (if (eq kind 'tsv) ?\t clutch-csv-delimiter) t
-               clutch-export-null-value-text emit outcome)))))))))
+               clutch-export-null-value-text
+               (lambda (batch count &optional names)
+                 (when (buffer-live-p source)
+                   (with-current-buffer source (funcall emit batch count names)))
+                 (when (or (not (buffer-live-p source))
+                           (not (eq conn (buffer-local-value 'clutch-connection source)))
+                           (plist-get (gethash conn clutch--running-queries) :cancelling))
+                   'stop))
+               outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
   "Export result rows as KIND to DESTINATION.
