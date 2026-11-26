@@ -679,7 +679,8 @@ MySQL access errors name the host pattern, as in \\='u\\='@\\='%\\='."
                    (lambda (_conn _names _target _cb) t))
                   ((symbol-function 'accept-process-output)
                    (lambda (&rest _)
-                     (cl-incf waits)
+                     (when (> (cl-incf waits) 1)
+                       (ert-fail "Expected wait loop to stop once connection closed"))
                      (setq live nil))))
           (should (clutch--resolve-result-column-names
                    clutch-connection "users" '("cafe") nil))

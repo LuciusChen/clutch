@@ -2047,14 +2047,14 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
       (cl-call-next-method)
     ;; Browse mode 2 reports a view's own column names, also through a synonym.
     (let* ((select (clutch-db--column-binding-select conn names source-token))
-           (sql (format (concat "SELECT source_column, CASE WHEN is_hidden = 0 THEN 0 ELSE 1 END, "
-                                "error_number, error_message "
-                                "FROM sys.dm_exec_describe_first_result_set"
-                                "(N%s, NULL, 2) ORDER BY column_ordinal")
+           (sql (format (concat "SELECT source_column, error_number, error_message "
+                                "FROM sys.dm_exec_describe_first_result_set(N%s, NULL, 2) "
+                                "WHERE is_hidden = 0 OR error_number IS NOT NULL "
+                                "OR error_message IS NOT NULL ORDER BY column_ordinal")
                         (clutch-db-escape-literal conn select)))
            columns)
       (dolist (row (clutch-db-result-rows (clutch-db-query conn sql)))
-        (pcase-let ((`(,source-column ,hidden ,error-number ,error-message) row))
+        (pcase-let ((`(,source-column ,error-number ,error-message) row))
           (let ((msg (and (stringp error-message)
                           (not (string-empty-p (string-trim error-message)))
                           error-message)))
@@ -2063,8 +2063,7 @@ PostgreSQL fold them to lower case.  DuckDB ignores ASCII case."
                       (list (or msg
                                 (format "Could not describe source columns (SQL Server error %s)"
                                         error-number))))))
-          (when (equal hidden 0)
-            (push source-column columns))))
+          (push source-column columns)))
       (clutch-db--column-bindings names (nreverse columns)))))
 
 (cl-defmethod clutch-db-resolve-column-names-async ((conn clutch-jdbc-conn) names source-token callback)

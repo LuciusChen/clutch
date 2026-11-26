@@ -1149,22 +1149,34 @@ or a USE the automatic reconnect lost the schema."
 (ert-deftest clutch-db-test-jdbc-sqlserver-resolve-column-names-reports-errors ()
   "Sync SQL Server column resolution should filter hidden rows and signal describe errors."
   (let ((conn (make-clutch-jdbc-conn :driver 'sqlserver :params '(:driver sqlserver)))
-        rows)
+        server-rows)
     (cl-letf (((symbol-function 'clutch-db-query)
                (lambda (_conn sql)
-                 (should (string-match-p "error_number, error_message" sql))
-                 (make-clutch-db-result :rows rows))))
-      (setq rows '(("id" 0 nil nil)
-                   ("hidden_key" 1 nil nil)
-                   (nil 0 nil nil)
-                   ("café" 0 nil nil)))
+                 ;; Simulate SQL Server's WHERE clause so bare "WHERE is_hidden = 0" drops error rows.
+                 (let* ((case-fold-search t)
+                        (has-where (string-match-p " where " sql))
+                        (filters-hidden (string-match-p "is_hidden = 0" sql))
+                        (keeps-errors (or (string-match-p "error_number is not null" sql)
+                                          (string-match-p "error_message is not null" sql)))
+                        (matched
+                         (cl-loop for row in server-rows
+                                  for (source hidden err-num err-msg) = row
+                                  when (or (not has-where)
+                                           (and filters-hidden (equal hidden 0))
+                                           (and keeps-errors (or err-num err-msg)))
+                                  collect (list source err-num err-msg))))
+                   (make-clutch-db-result :rows matched)))))
+      (setq server-rows '(("id" 0 nil nil)
+                          ("hidden_key" 1 nil nil)
+                          (nil 0 nil nil)
+                          ("café" 0 nil nil)))
       (should (equal (clutch-db-resolve-column-names conn '("id" "expr" "cafe") "[dbo].[users]")
                      '(("id" . "id") ("expr" . nil) ("cafe" . "café"))))
-      (setq rows '((nil 1 208 "Invalid object name 'dbo.missing'.")))
+      (setq server-rows '((nil nil 207 "Invalid column name 'no_such_column'.")))
       (should (equal (cadr (should-error
-                            (clutch-db-resolve-column-names conn '("id") "[dbo].[missing]")
+                            (clutch-db-resolve-column-names conn '("no_such_column") "[dbo].[users]")
                             :type 'clutch-db-error))
-                     "Invalid object name 'dbo.missing'.")))))
+                     "Invalid column name 'no_such_column'.")))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-session-control-keeps-the-transaction ()
   "An Oracle ALTER SESSION or ALTER SYSTEM should keep the transaction's state.
@@ -9110,7 +9122,19 @@ key into another schema lost that schema."
               (clutch-db-query conn (format "ALTER TABLE %s.%s ADD %s" schema table
                                             (if case-insensitive "[État] INT" "[État] INT, [état] INT")))
               (should (equal (clutch-db-resolve-column-names conn '("État" "état") synonym)
-                             (list (cons "État" "État") (cons "état" (if case-insensitive "État" "état"))))))
+                             (list (cons "État" "État") (cons "état" (if case-insensitive "État" "état")))))
+              (should-error (clutch-db-resolve-column-names conn '("no_such_column") synonym)
+                            :type 'clutch-db-error)
+              (let (async-outcome)
+                (should (clutch-db-resolve-column-names-async
+                         conn '("no_such_column") synonym
+                         (lambda (pairs &optional err)
+                           (setq async-outcome (list pairs err)))))
+                (with-timeout (30 (error "No async resolve outcome"))
+                  (while (not async-outcome)
+                    (accept-process-output nil 0.05)))
+                (should-not (car async-outcome))
+                (should (stringp (cadr async-outcome)))))
             (should (equal (clutch-db-foreign-keys conn table schema)
                            `(("parent_id" :ref-table ,parents :ref-column "id"
                               :ref-schema ,schema :constraint ,key)))))
