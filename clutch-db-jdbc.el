@@ -390,16 +390,17 @@ Return non-nil when a request was waiting for it."
                            (gethash (clutch-jdbc-conn-conn-id conn)
                                     clutch-jdbc--connections-by-id)))
                (condition-case err
-                   (if (eq t (plist-get response :ok))
-                       (when callback
-                         (funcall callback (plist-get response :result)))
-                     (clutch-jdbc--remember-error-response conn op response)
+                   (progn
                      (when (clutch-jdbc--connection-invalidated-p response)
                        (clutch-jdbc--retire-invalidated-connection conn))
-                     (let ((message (clutch-jdbc--rpc-error-message op response)))
-                       (if errback
-                           (funcall errback message)
-                         (message "clutch-jdbc async error: %s" message))))
+                     (if (eq t (plist-get response :ok))
+                         (when callback
+                           (funcall callback (plist-get response :result)))
+                       (clutch-jdbc--remember-error-response conn op response)
+                       (let ((message (clutch-jdbc--rpc-error-message op response)))
+                         (if errback
+                             (funcall errback message)
+                           (message "clutch-jdbc async error: %s" message)))))
                  (error
                   (message "clutch-jdbc async callback failed: %s"
                            (error-message-string err))))))))))
@@ -676,7 +677,8 @@ When CONN is nil, return the details snapshot for the current failure."
 
 (defun clutch-jdbc--connection-invalidated-p (response)
   "Return non-nil if RESPONSE has an invalidated logical connection."
-  (eq t (plist-get (plist-get response :diag) :connection-invalidated)))
+  (or (eq t (plist-get response :connection-invalidated))
+      (eq t (plist-get (plist-get response :diag) :connection-invalidated))))
 
 (defun clutch-jdbc--retire-invalidated-connection (conn)
   "Retire invalidated JDBC CONN from local live-request state.
@@ -709,6 +711,8 @@ When CONN is non-nil, remember structured diagnostics on the connection."
   (when-let* ((conn) (catalog (plist-get response :catalog)))
     (setf (clutch-jdbc-conn-params conn)
           (plist-put (clutch-jdbc-conn-params conn) :catalog catalog)))
+  (when (clutch-jdbc--connection-invalidated-p response)
+    (clutch-jdbc--retire-invalidated-connection conn))
   (if (eq t (plist-get response :ok))
       (plist-get response :result)
     (let* ((details (clutch-jdbc--remember-error-response conn op response))
@@ -722,8 +726,6 @@ When CONN is non-nil, remember structured diagnostics on the connection."
                  (equal (plist-get diag :op) op)
                  (eq t (plist-get diag :connection-invalidated))
                  (eq t (plist-get diag :execution-not-started)))))
-      (when (clutch-jdbc--connection-invalidated-p response)
-        (clutch-jdbc--retire-invalidated-connection conn))
       (signal (if execution-not-started
                   'clutch-db-execution-not-started
                 'clutch-db-error)

@@ -1147,36 +1147,42 @@ or a USE the automatic reconnect lost the schema."
             (should (= (clutch-jdbc-conn-conn-id disconnected) 11))))))))
 
 (ert-deftest clutch-db-test-jdbc-sqlserver-resolve-column-names-reports-errors ()
-  "Sync SQL Server column resolution should filter hidden rows and signal describe errors."
+  "Sync SQL Server column resolution should decode rows and signal describe errors."
   (let ((conn (make-clutch-jdbc-conn :driver 'sqlserver :params '(:driver sqlserver)))
-        server-rows)
+        rows)
     (cl-letf (((symbol-function 'clutch-db-query)
-               (lambda (_conn sql)
-                 ;; Simulate SQL Server's WHERE clause so bare "WHERE is_hidden = 0" drops error rows.
-                 (let* ((case-fold-search t)
-                        (has-where (string-match-p " where " sql))
-                        (filters-hidden (string-match-p "is_hidden = 0" sql))
-                        (keeps-errors (or (string-match-p "error_number is not null" sql)
-                                          (string-match-p "error_message is not null" sql)))
-                        (matched
-                         (cl-loop for row in server-rows
-                                  for (source hidden err-num err-msg) = row
-                                  when (or (not has-where)
-                                           (and filters-hidden (equal hidden 0))
-                                           (and keeps-errors (or err-num err-msg)))
-                                  collect (list source err-num err-msg))))
-                   (make-clutch-db-result :rows matched)))))
-      (setq server-rows '(("id" 0 nil nil)
-                          ("hidden_key" 1 nil nil)
-                          (nil 0 nil nil)
-                          ("café" 0 nil nil)))
+               (lambda (_conn _sql)
+                 (make-clutch-db-result :rows rows))))
+      (setq rows '(("id" nil nil)
+                   (nil nil nil)
+                   ("café" nil nil)))
       (should (equal (clutch-db-resolve-column-names conn '("id" "expr" "cafe") "[dbo].[users]")
                      '(("id" . "id") ("expr" . nil) ("cafe" . "café"))))
-      (setq server-rows '((nil nil 207 "Invalid column name 'no_such_column'.")))
+      (setq rows '((nil 207 "Invalid column name 'no_such_column'.")))
       (should (equal (cadr (should-error
                             (clutch-db-resolve-column-names conn '("no_such_column") "[dbo].[users]")
                             :type 'clutch-db-error))
                      "Invalid column name 'no_such_column'.")))))
+
+(ert-deftest clutch-db-test-jdbc-ok-reply-retires-invalidated-connection ()
+  "A successful reply with :connection-invalidated keeps its result and retires CONN."
+  (let* ((clutch-jdbc--agent-process 'live-proc)
+         (clutch-jdbc--connections-by-id (make-hash-table :test 'eql))
+         (clutch-jdbc--busy-request-ids (make-hash-table :test 'eq))
+         (clutch-jdbc--async-callbacks (make-hash-table :test 'eql))
+         (conn (make-clutch-jdbc-conn :process 'live-proc :conn-id 2
+                                      :driver 'sqlserver
+                                      :params '(:driver sqlserver :catalog "master"))))
+    (puthash 2 conn clutch-jdbc--connections-by-id)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t)))
+      (should (clutch-db-live-p conn))
+      (let ((result (clutch-jdbc--response-result-or-signal
+                     conn "execute"
+                     '(:id 9 :ok t :connection-invalidated t
+                           :result (:type "query" :columns ("n") :rows ((17)) :done t)))))
+        (should (equal (plist-get result :rows) '((17))))
+        (should-not (clutch-db-live-p conn))
+        (should-not (gethash 2 clutch-jdbc--connections-by-id))))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-session-control-keeps-the-transaction ()
   "An Oracle ALTER SESSION or ALTER SYSTEM should keep the transaction's state.

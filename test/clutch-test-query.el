@@ -3870,6 +3870,83 @@ stream that wrote each small part, one per network read, was slow."
       (advice-remove 'write-region count-write)
       (delete-directory dir t))))
 
+(ert-deftest clutch-test-success-reply-on-retired-connection-updates-console-and-reconnects ()
+  "A query that returns rows and then loses its session should show the rows and retire the session."
+  (let* ((params '(:driver sqlserver :host "localhost" :database "master"))
+         (conn1 (make-clutch-test-conn :backend 'sqlserver :commit-mode 'auto :params params))
+         (conn2 (make-clutch-test-conn :backend 'sqlserver :commit-mode 'auto :params params))
+         (conn3 (make-clutch-test-conn :backend 'sqlserver :commit-mode 'auto :params params))
+         (next-conns (list conn2 conn3))
+         (queried-conns nil)
+         (auto-commit-conns nil)
+         (result-buf nil)
+         (console-buf (generate-new-buffer "*clutch-test-console-retire*")))
+    (unwind-protect
+        (with-current-buffer console-buf
+          (sql-mode)
+          (setq-local clutch--query-buffer-local-p t
+                      clutch-connection conn1
+                      clutch--connection-params params
+                      clutch--conn-sql-product 'ms)
+          (clutch--refresh-connection-render-state)
+          (should (plist-get clutch--connection-render-state :connected-p))
+          (cl-letf (((symbol-function 'clutch-db-query-async)
+                     (lambda (c sql cb)
+                       (push (cons c sql) queried-conns)
+                       (cond
+                        ((eq c conn1)
+                         ;; Simulate SQL Server returning 17 then closing the session.
+                         (setf (clutch-test-conn-live c) nil)
+                         (funcall cb (make-clutch-db-result
+                                      :connection c :columns '((:name "n")) :rows '((17)))
+                                  nil))
+                        ((eq c conn2)
+                         (setf (clutch-test-conn-live c) nil)
+                         (funcall cb (make-clutch-db-result
+                                      :connection c :columns '((:name "n")) :rows '((18)))
+                                  nil))
+                        (t
+                         (funcall cb (make-clutch-db-result
+                                      :connection c :columns '((:name "n")) :rows '((99)))
+                                  nil)))
+                       t))
+                    ((symbol-function 'clutch-db-set-auto-commit)
+                     (lambda (c enabled)
+                       (push (cons c enabled) auto-commit-conns)
+                       (setf (clutch-test-conn-commit-mode c) (if enabled 'auto 'manual))))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_c sql &rest _) sql))
+                    ((symbol-function 'clutch--try-reconnect)
+                     (lambda ()
+                       (let ((fresh (pop next-conns)))
+                         (setq clutch-connection fresh)
+                         fresh)))
+                    ((symbol-function 'clutch-result--show-buffer)
+                     (lambda (buf) (setq result-buf buf))))
+            ;; Query 1 returns 17 and closes conn1; console immediately reflects disconnected.
+            (clutch--execute "EXEC dbo.return_17_and_close")
+            (ert-run-idle-timers)
+            (should (buffer-live-p result-buf))
+            (should (equal (buffer-local-value 'clutch--result-rows result-buf) '((17))))
+            (should-not (clutch--connection-alive-p conn1))
+            (should-not (plist-get clutch--connection-render-state :connected-p))
+            ;; C-c C-a reconnects to conn2 instead of sending set-auto-commit to dead conn1.
+            (clutch-toggle-auto-commit)
+            (should (eq clutch-connection conn2))
+            (should (equal auto-commit-conns (list (cons conn2 nil))))
+            ;; Query 2 returns 18 and closes conn2; next SELECT 99 reconnects to conn3
+            ;; directly without ever sending SQL to dead conn2.
+            (clutch--execute "EXEC dbo.return_18_and_close")
+            (ert-run-idle-timers)
+            (should-not (clutch--connection-alive-p conn2))
+            (setq queried-conns nil)
+            (clutch--execute "SELECT 99")
+            (ert-run-idle-timers)
+            (should (equal queried-conns (list (cons conn3 "SELECT 99"))))
+            (should (equal (buffer-local-value 'clutch--result-rows result-buf) '((99))))))
+      (when (buffer-live-p result-buf) (kill-buffer result-buf))
+      (when (buffer-live-p console-buf) (kill-buffer console-buf)))))
+
 (provide 'clutch-test-query)
 
 ;;; clutch-test-query.el ends here

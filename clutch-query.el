@@ -1526,7 +1526,9 @@ executed or failed."
            :result-context (plist-get outcome :result-context)
            :resolution-context (plist-get outcome :resolution-context)
            :source-buffer source-buffer)
-        (clutch-result--display result sql elapsed)))))
+        (clutch-result--display result sql elapsed))
+      (unless (clutch--connection-alive-p connection)
+        (clutch--retire-query-connection connection)))))
 
 (defun clutch--statement-running-here-p ()
   "Return non-nil while a statement of this buffer is running on its connection.
@@ -1853,6 +1855,8 @@ Stops and reports on the first error."
                   (when region
                     (clutch--mark-executed-sql-region
                      (car region) (cdr region)))
+                  (unless (clutch--connection-alive-p connection)
+                    (clutch--retire-query-connection connection))
                   (report-complete))))
              nil)
             (t
