@@ -3947,6 +3947,60 @@ stream that wrote each small part, one per network read, was slow."
       (when (buffer-live-p result-buf) (kill-buffer result-buf))
       (when (buffer-live-p console-buf) (kill-buffer console-buf)))))
 
+(ert-deftest clutch-test-repl-dml-on-retired-connection-updates-open-result-buffer ()
+  "A REPL DML that closes its session should print rows and mark open result buffers disconnected."
+  (let* ((params '(:driver sqlserver :host "localhost" :database "master"))
+         (conn (make-clutch-test-conn :backend 'sqlserver :commit-mode 'auto :params params))
+         (result-buf nil)
+         (repl-buf (generate-new-buffer "*clutch-test-repl-retire*")))
+    (unwind-protect
+        (with-current-buffer repl-buf
+          (clutch-repl-mode)
+          (setq-local clutch-connection conn
+                      clutch--connection-params params
+                      clutch--conn-sql-product 'ms)
+          (clutch--refresh-connection-render-state)
+          (cl-letf (((symbol-function 'clutch-db-query-async)
+                     (lambda (c sql cb)
+                       (if (string-prefix-p "SELECT" sql)
+                           (funcall cb (make-clutch-db-result
+                                        :connection c :columns '((:name "n")) :rows '((1)))
+                                    nil)
+                         ;; Simulate DML returning Affected rows: 1 then closing the session.
+                         (setf (clutch-test-conn-live c) nil)
+                         (funcall cb (make-clutch-db-result
+                                      :connection c :affected-rows 1)
+                                  nil))
+                       t))
+                    ((symbol-function 'clutch-db-build-paged-sql)
+                     (lambda (_c sql &rest _) sql))
+                    ((symbol-function 'clutch-result--show-buffer)
+                     (lambda (buf) (setq result-buf buf))))
+            ;; Open a result buffer from the REPL while connected.
+            (clutch-repl--execute-and-print "SELECT 1 AS n")
+            (ert-run-idle-timers)
+            (should (buffer-live-p result-buf))
+            (should (plist-get (buffer-local-value 'clutch--connection-render-state result-buf)
+                               :connected-p))
+            (with-current-buffer result-buf
+              (should-not (string-match-p
+                           "DISCONNECTED"
+                           (substring-no-properties (clutch--footer-mode-line-display)))))
+            ;; Run DML that returns Affected rows: 1 and retires conn.
+            (clutch-repl--execute-and-print "INSERT INTO t VALUES (1)")
+            (ert-run-idle-timers)
+            (should (string-match-p "Affected rows: 1" (buffer-string)))
+            (should-not (clutch--connection-alive-p conn))
+            (should-not (plist-get clutch--connection-render-state :connected-p))
+            (should-not (plist-get (buffer-local-value 'clutch--connection-render-state result-buf)
+                                   :connected-p))
+            (with-current-buffer result-buf
+              (should (string-match-p
+                       "DISCONNECTED"
+                       (substring-no-properties (clutch--footer-mode-line-display)))))))
+      (when (buffer-live-p result-buf) (kill-buffer result-buf))
+      (when (buffer-live-p repl-buf) (kill-buffer repl-buf)))))
+
 (provide 'clutch-test-query)
 
 ;;; clutch-test-query.el ends here
