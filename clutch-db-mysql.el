@@ -49,6 +49,7 @@
 (declare-function mysql-live-p "mysql" (conn))
 (declare-function mysql-prepare "mysql" (conn sql))
 (declare-function mysql-query "mysql" (conn sql))
+(declare-function mysql-query-rows-async "mysql" (conn sql function callback))
 (declare-function mysql-query-async "mysql" (conn sql callback))
 (declare-function mysql-refresh-current-database "mysql" (conn))
 (declare-function mysql-result-affected-rows "mysql" (object))
@@ -763,6 +764,26 @@ Decline when the installed mysql.el cannot execute asynchronously."
                     (and error
                          (cons 'clutch-db-error
                                (clutch-db--error-data error))))))))
+    t))
+
+(cl-defmethod clutch-db--stream-export-rows ((conn mysql-conn) sql emit callback)
+  "Stream SQL on CONN to EMIT, then call CALLBACK with the outcome."
+  (when (fboundp 'mysql-query-rows-async)
+    (let (names)
+      (clutch-db--translate-library-error mysql-error
+        (mysql-query-rows-async
+         conn sql
+         (lambda (rows columns)
+           (unless names (setq names (mapcar (lambda (col) (plist-get col :name)) columns)))
+           (condition-case err
+               (funcall emit rows names)
+             ((error quit)
+              ;; Stop the server's work; mysql.el consumes the final packet.
+              (clutch-db-interrupt-query conn)
+              (signal (car err) (cdr err)))))
+         (lambda (result error)
+           (funcall callback (and result (clutch-db-mysql--wrap-result result))
+                    (and error (cons 'clutch-db-error (clutch-db--error-data error))))))))
     t))
 
 (cl-defmethod clutch-db-symbol-help ((conn mysql-conn) symbol)

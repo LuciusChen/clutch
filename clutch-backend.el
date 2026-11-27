@@ -1923,6 +1923,11 @@ blocking.")
   "Return nil because this backend cannot run SQL without blocking."
   nil)
 
+(cl-defgeneric clutch-db--stream-export-rows (conn sql emit callback)
+  "Stream SQL on CONN, calling EMIT with rows and column names, then CALLBACK.
+The file writer needs names for its header.  A grid already owns its columns."
+  (:method (_conn _sql _emit _callback) nil))
+
 (cl-defgeneric clutch-db-delimited-export-async
     (conn sql delimiter header null-text function callback)
   "Start streaming the result of SQL on CONN as text and return non-nil.
@@ -1938,18 +1943,22 @@ cursor batches.  CALLBACK is later called once, as for
 `clutch-db-query-async', after FUNCTION's last call has returned.
 Return nil, calling neither, when CONN cannot stream SQL.")
 
-(cl-defmethod clutch-db-delimited-export-async ((_conn t) &rest _)
-  "Return nil because this backend cannot stream delimited text."
-  nil)
+(cl-defmethod clutch-db-delimited-export-async
+    (conn sql _delimiter _header _null-text function callback)
+  "Stream SQL on CONN for the file writer, passing its rows to FUNCTION.
+Deliver completion to CALLBACK."
+  (clutch-db--stream-export-rows
+   conn sql (lambda (rows names) (funcall function rows nil names)) callback))
 
 (cl-defgeneric clutch-db-stream-rows-async (conn sql function callback)
   "Stream SQL on CONN, calling FUNCTION with each batch of decoded rows.
 CALLBACK receives the final result without accumulated rows, or an error,
 as in `clutch-db-query-async'.  Return nil to decline before starting.")
 
-(cl-defmethod clutch-db-stream-rows-async ((_conn t) &rest _)
-  "Use ordinary query pages by default."
-  nil)
+(cl-defmethod clutch-db-stream-rows-async (conn sql function callback)
+  "Stream SQL on CONN, delivering rows to FUNCTION and completion to CALLBACK."
+  (clutch-db--stream-export-rows
+   conn sql (lambda (rows _names) (funcall function rows)) callback))
 
 (cl-defgeneric clutch-db-result-query-p (conn sql)
   "Return non-nil when SQL should render as a tabular result for CONN.")

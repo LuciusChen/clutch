@@ -1796,7 +1796,7 @@ Only fetch requests have a client deadline.  Return the active request id."
 CALLBACK receives a database result and nil, or nil and a `clutch-db-error'
 condition, exactly once.  The initial request has no client deadline.
 Keep CONN busy through any cursor fetches.  For export, call EMIT with
-each batch of normalized rows, nil and the column names."
+each batch of normalized rows and the column names."
   (setq conn (clutch-jdbc--require-current-connection conn))
   (let (request-id)
     (cl-labels
@@ -1830,7 +1830,7 @@ each batch of normalized rows, nil and the column names."
                 (when emit
                   (lambda (rows)
                     (funcall emit (mapcar #'clutch-jdbc--normalize-row rows)
-                             nil (plist-get raw :columns)))))
+                             (plist-get raw :columns)))))
              (finish raw error))))
       (setq request-id
             (clutch-jdbc--send-foreground
@@ -1904,8 +1904,7 @@ still arrive."
   (prog1 (clutch-jdbc--execute-rpc conn "execute" `((sql . ,sql)))
     (clutch-jdbc--follow-schema conn sql)))
 
-(cl-defmethod clutch-db-delimited-export-async
-    ((conn clutch-jdbc-conn) sql _delimiter _header _null-text emit callback)
+(cl-defmethod clutch-db--stream-export-rows ((conn clutch-jdbc-conn) sql emit callback)
   "Execute SQL once on CONN and pass its cursor batches to the file writer."
   (unless (clutch-jdbc--cassandra-conn-p conn)
     (clutch-jdbc--execute-rpc-async conn "execute" `((sql . ,sql)) callback emit)
