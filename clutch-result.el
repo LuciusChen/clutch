@@ -3807,32 +3807,41 @@ Each batch has its own list spine."
                do (funcall function (seq-take tail size)))
     (funcall function nil)))
 
-(defun clutch-result--map-export-batches (function done)
+(defun clutch-result--map-export-batches (function done &optional stream)
   "Call FUNCTION with each bounded export batch, then DONE.
 Call FUNCTION once with nil for an empty result.  Each batch has its own
 list spine, so consumers may collect batches without mutating cached
 rows.  DONE gets nil after the last batch, or the error that stopped the
 export.  Pages are fetched without blocking, as statements run, so DONE
-may run after this function returns."
+may run after this function returns.  Non-nil STREAM also allows the backend to
+deliver decoded rows from one execution when no grid sort is pending."
   (clutch--ensure-connection)
-  (let* ((effective-sql (clutch-result--effective-query))
+  (let* ((buffer (current-buffer))
+         (conn clutch-connection)
+         (effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
-                  (clutch-result--emit-export-batches rows page-size function)))
+                  (with-current-buffer buffer
+                    (unless (eq conn clutch-connection)
+                      (error "Export stopped: its buffer's connection changed"))
+                    (clutch-result--emit-export-batches rows page-size function))))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
           (progn
             (emit clutch--result-rows)
             (funcall done nil))
         (clutch-result--refuse-if-moved)
-        (clutch-result--export-pages
-         effective-sql
-         (clutch-result--effective-query (plist-get clutch--result-query-prep :sql))
-         (and clutch--base-query
-              (or clutch--order-by
-                  (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
-              page-size)
-         #'emit done)))))
+        (let ((query (clutch-result--effective-query (plist-get clutch--result-query-prep :sql))))
+          (clutch-result--export-pages
+           effective-sql query
+           (and clutch--base-query
+                (or clutch--order-by
+                    (not (clutch-db-sql-has-top-level-row-limit-p effective-sql)))
+                page-size)
+           #'emit done
+           (when (and stream (not clutch--order-by))
+             (lambda (outcome)
+               (clutch-db-stream-rows-async clutch-connection query #'emit outcome)))))))))
 
 (defconst clutch-result--export-gc-threshold (* 32 1024 1024)
   "Garbage collection threshold in bytes while an export runs.
@@ -4046,7 +4055,9 @@ so writing each part of a stream, as small as a network read, is slow.")
 
 (cl-defun clutch-result--write-export-file
     (kind spec path done &key coding omit-header columns col-indices
-          (map-batches #'clutch-result--map-export-batches))
+          (map-batches (lambda (emit finish)
+                         (clutch-result--map-export-batches
+                          emit finish (memq kind '(csv tsv))))))
   "Write KIND using SPEC to PATH with CODING and OMIT-HEADER, then call DONE.
 Format one batch at a time, write the text whenever
 `clutch-result--export-write-size' characters of it have collected and

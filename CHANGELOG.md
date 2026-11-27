@@ -4,6 +4,7 @@
 
 ### Changed
 
+- PostgreSQL result-grid CSV and TSV files can stream decoded rows from one query with a recent pgsql.el. A failed or cancelled PostgreSQL streaming export preserves earlier work in the same transaction.
 - Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
 
 ### Fixed

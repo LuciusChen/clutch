@@ -76,6 +76,8 @@ enforce a server-side statement timeout."
 (define-error 'clutch-db-execution-not-started
   "Database operation did not start"
   'clutch-db-error)
+(define-error 'clutch-db-cancelled-before-start
+  "Query cancelled before execution" 'clutch-db-execution-not-started)
 (define-error 'clutch-db-session-restore-error
   "Database session state was not restored after a known batch outcome"
   'clutch-db-error)
@@ -1936,6 +1938,15 @@ Return nil, calling neither, when CONN cannot stream SQL.")
 
 (cl-defmethod clutch-db-delimited-export-async ((_conn t) &rest _)
   "Return nil because this backend cannot stream delimited text."
+  nil)
+
+(cl-defgeneric clutch-db-stream-rows-async (conn sql function callback)
+  "Stream SQL on CONN, calling FUNCTION with each batch of decoded rows.
+CALLBACK receives the final result without accumulated rows, or an error,
+as in `clutch-db-query-async'.  Return nil to decline before starting.")
+
+(cl-defmethod clutch-db-stream-rows-async ((_conn t) &rest _)
+  "Use ordinary query pages by default."
   nil)
 
 (cl-defgeneric clutch-db-result-query-p (conn sql)
