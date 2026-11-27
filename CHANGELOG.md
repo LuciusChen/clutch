@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 - 2026-11-27
 
 ### Changed
 
@@ -65,7 +65,7 @@
 
 - MySQL drains a timed-out transaction reply or closes the connection before reuse. A commit with an unknown outcome is never retried. A late reply to a database switch updates the selected database only when the server accepts it.
 
-- Clutch pins JDBC agent 0.2.31 so `C-g` can cancel a submitted statement before it starts. Clutch skips automatic retry when cancellation and an idle connection failure coincide.
+- `C-g` can cancel a submitted JDBC statement before it starts. Clutch skips automatic retry when cancellation and an idle connection failure coincide.
 
 ## 0.8.0 - 2026-11-18
 
