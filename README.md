@@ -90,7 +90,7 @@ If a configured protocol package is missing, Clutch tells you when you connect.
 
 `nerd-icons` is optional; without it, Clutch falls back to plain text symbols. Availability is checked once per Emacs session, so restart Emacs after installing it.
 
-JDBC backends require Java 17+, `clutch-jdbc-agent.jar` (pinned at 0.2.35 and SHA-256 verified on startup), and the database's JDBC driver jar. Run `M-x clutch-jdbc-ensure-agent` to download the agent and `M-x clutch-jdbc-install-driver` for supported drivers. See the [JDBC backend guide](docs/jdbc-backend.md) for setup and connection examples.
+JDBC backends require Java 17+, `clutch-jdbc-agent.jar` (pinned at 0.2.36 and SHA-256 verified on startup), and the database's JDBC driver jar. Run `M-x clutch-jdbc-ensure-agent` to download the agent and `M-x clutch-jdbc-install-driver` for supported drivers. See the [JDBC backend guide](docs/jdbc-backend.md) for setup and connection examples.
 
 When installing from source checkouts, add Clutch and any native protocol checkouts you use to `load-path`:
 

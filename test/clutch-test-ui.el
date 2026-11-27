@@ -1358,10 +1358,8 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
               ((symbol-function 'clutch-jdbc--unique-not-null-identities)
                (lambda (&rest _args)
                  (ert-fail "Dictionary views must skip unique-key metadata")))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn prefix)
-                 (list (list :name prefix :type "PUBLIC SYNONYM"
-                             :schema "SYS" :source-schema "PUBLIC")))))
+              ((symbol-function 'clutch-jdbc--oracle-base-table-p)
+               (lambda (_conn _table) nil)))
       (dolist (sql '("SELECT table_name FROM all_tables"
                      "SELECT table_name FROM user_tables"))
         (let ((prep (clutch--prepare-row-identity-query conn sql)))
@@ -1375,35 +1373,15 @@ a sole * that Oracle rejects next to other columns (ORA-00923)."
 (ert-deftest clutch-test-row-identity-prep-scopes-qualified-oracle-source ()
   "Qualified Oracle sources should resolve identity in their named schema."
   (let ((conn (make-clutch-jdbc-conn :params '(:driver oracle
-                                               :schema "ZJSY"))))
-    (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
+                                               :schema "ZJSY")))
+        lookup)
+    (cl-letf (((symbol-function 'clutch-jdbc--oracle-base-table-p)
                (lambda (metadata-conn table)
-                 (should (equal table "REPORTS"))
-                 (should (equal
-                          (plist-get (clutch-jdbc-conn-params metadata-conn)
-                                     :schema)
-                          "APP"))
-                 nil))
-              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
-               (lambda (metadata-conn table)
-                 (should (equal table "REPORTS"))
-                 (should (equal
-                          (plist-get (clutch-jdbc-conn-params metadata-conn)
-                                     :schema)
-                          "APP"))
-                 nil))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (metadata-conn prefix)
-                 (should (equal prefix "REPORTS"))
-                 (if (equal (plist-get (clutch-jdbc-conn-params metadata-conn)
-                                       :schema)
-                            "APP")
-                     '((:name "REPORTS" :type "VIEW"
-                        :schema "APP" :source-schema "APP"))
-                   '((:name "REPORTS" :type "TABLE"
-                      :schema "ZJSY" :source-schema "ZJSY"))))))
+                 (setq lookup (list (clutch-jdbc--conn-schema metadata-conn) table))
+                 nil)))
       (let ((prep (clutch--prepare-row-identity-query
                    conn "SELECT id FROM APP.reports")))
+        (should (equal lookup '("APP" "REPORTS")))
         (should (equal (plist-get prep :table) "REPORTS"))
         (should (equal (plist-get prep :source-token) "APP.reports"))
         (should (eq (plist-get prep :identity-status) 'unsupported))

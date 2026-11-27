@@ -78,7 +78,8 @@ When `validate-after-idle-seconds` is positive, an idle primary session runs `Co
 
 ## Metadata payloads
 
-- **`get-tables` / `search-tables`:** Cursor-shaped (`columns`, `rows`, `cursor-id`, `done`) with `name`, `type`, `schema`, `source_schema`, and optional `comment` (`REMARKS`; Oracle's direct query omits `comment`, where absence means unknown rather than empty).
+- **`get-tables`:** A cursor (`columns`, `rows`, `cursor-id`, `done`) with `name`, `type`, `schema`, and `source_schema`. Oracle returns these four columns. Other JDBC backends also return `comment`, with `null` for missing or blank JDBC `REMARKS`.
+- **`search-tables`:** Returns a `tables` array of entries with `source-schema`. Oracle row identity supplies `table` for an exact base-table lookup in `schema`, alongside `prefix` for older agents. Completion supplies only the prefix and includes views and synonyms.
 - **`get-columns` / `search-columns`:** Objects with `name`, `type`, `nullable`, `position`, and optional `default` (`COLUMN_DEF` / Oracle `DATA_DEFAULT`, omitted when unreported). On DuckDB and SQL Server, `get-columns` uses JDBC `LIKE` patterns, so Clutch escapes `_`, `%`, and `\`.
 - **`describe-source-columns` (SQL Server):** Accepts `conn-id` and a `projection` SELECT (optionally preceded by `USE`), inspects the projection's source columns on the metadata session without executing, and returns `columns` in projection order (`null` when unresolvable).
 - **`get-foreign-keys` / `get-referencing-keys` (agent 0.2.28+):** `get-foreign-keys` returns `fk-column`, `pk-table`, `pk-schema`, `pk-column`, and optional `fk-name`, grouped by target and ordered by `KEY_SEQ`. `get-referencing-keys` returns `fk-table`, `fk-schema`, `fk-column`, `pk-column`, and optional `fk-name` in key order. On JDBC, ER cancellation stops sending further RPCs after the active reply without sending `cancel` (protecting primary SQL).
