@@ -4222,12 +4222,13 @@ stops it.  Replace the destination only after the whole export succeeds."
                (if (eq kind 'tsv) ?\t clutch-csv-delimiter) t
                clutch-export-null-value-text
                (lambda (batch count &optional names)
-                 (when (buffer-live-p source)
-                   (with-current-buffer source (funcall emit batch count names)))
-                 (when (or (not (buffer-live-p source))
-                           (not (eq conn (buffer-local-value 'clutch-connection source)))
-                           (plist-get (gethash conn clutch--running-queries) :cancelling))
-                   'stop))
+                 (cl-flet ((stopped ()
+                             (or (not (buffer-live-p source))
+                                 (not (eq conn (buffer-local-value 'clutch-connection source)))
+                                 (plist-get (gethash conn clutch--running-queries) :cancelling))))
+                   (if (stopped) 'stop
+                     (with-current-buffer source (funcall emit batch count names))
+                     (when (stopped) 'stop))))
                outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)

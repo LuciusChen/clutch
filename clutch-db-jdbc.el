@@ -376,6 +376,11 @@ Return non-nil when a request was waiting for it."
         (setcar (plist-get entry :reply) response))
        ;; A foreground request is told even when its connection is gone.
        ((plist-get entry :handler)
+        (let ((conn (plist-get entry :conn)))
+          (when (eql id (gethash conn clutch-jdbc--busy-request-ids))
+            ;; The workflow still owns CONN, but this RPC has replied.
+            (remhash conn clutch-jdbc--busy-request-ids)
+            (setf (clutch-jdbc-conn-busy conn) t)))
         (run-at-time 0 nil (plist-get entry :handler) response))
        (t
         (let ((callback (plist-get entry :callback))
@@ -1803,6 +1808,8 @@ each batch of normalized rows, nil and the column names."
                (clutch-jdbc--collect-cursor-async
                 conn raw
                 (lambda (params outcome)
+                  (when (eq (clutch-jdbc-conn-busy conn) 'stopping)
+                    (signal 'clutch-db-error '("Query interrupted while fetching its rows")))
                   (setq request-id (clutch-jdbc--send-foreground conn "fetch" params outcome)))
                 (lambda (rows error)
                   (finish (plist-put (plist-put raw :rows rows) :done t) error))
@@ -1963,12 +1970,17 @@ still arrive."
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-jdbc-conn))
   "Interrupt the active JDBC request on CONN.
 Retire the connection if a foreground fetch is in progress."
-  (if (eq (clutch-jdbc-conn-busy conn) 'fetching)
-      (progn
-        (setf (clutch-jdbc-conn-busy conn) 'fetch-interrupted)
-        (clutch-jdbc--release-stuck-connection conn)
-        t)
-    (when-let* ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
+  (let ((request-id (gethash conn clutch-jdbc--busy-request-ids)))
+    (cond
+     ((eq (clutch-jdbc-conn-busy conn) 'fetching)
+      (setf (clutch-jdbc-conn-busy conn) 'fetch-interrupted)
+      (clutch-jdbc--release-stuck-connection conn)
+      t)
+     ((not request-id)
+      (when (and (clutch-jdbc-conn-busy conn) (clutch-db-live-p conn))
+        (setf (clutch-jdbc-conn-busy conn) 'stopping)
+        t))
+     (t
       (clutch-jdbc--require-current-connection conn)
       ;; A foreground asynchronous request still reports the server's verdict;
       ;; a synchronous one was abandoned by the quit, so nothing waits for its
@@ -1984,7 +1996,7 @@ Retire the connection if a foreground fetch is in progress."
         (when (eq t (plist-get response :ok))
           (let ((result (plist-get response :result)))
             (and (eq t (plist-get result :cancelled))
-                 (eql request-id (plist-get result :request-id)))))))))
+                 (eql request-id (plist-get result :request-id))))))))))
 
 (defun clutch-jdbc--build-oracle-paged-sql (conn base offset page-size order-by)
   "Build Oracle ROWNUM-based pagination SQL for CONN.
