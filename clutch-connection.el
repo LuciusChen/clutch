@@ -857,8 +857,18 @@ CANCEL, when non-nil, is a zero-argument function used in place of
                  (equal (plist-get diag :category) "cancel")
                  (not (eq (plist-get diag :connection-invalidated) t))
                  (or (equal state "HY008")
-                     (equal (plist-get diag :exception-class)
-                            "java.util.concurrent.CancellationException")
+                     (and (equal state "57014")
+                          (stringp (plist-get diag :raw-message))
+                          (string-match-p "canceling statement due to user request"
+                                          (plist-get diag :raw-message)))
+                     (and (equal state "70100")
+                          (eql (plist-get diag :vendor-code) 1317))
+                     (member (plist-get diag :exception-class)
+                             '("java.util.concurrent.CancellationException"
+                               "com.mysql.cj.jdbc.exceptions.MySQLStatementCancelledException"
+                               "com.mysql.cj.jdbc.exceptions.MySQLQueryInterruptedException"
+                               "com.mysql.jdbc.exceptions.jdbc4.MySQLStatementCancelledException"
+                               "com.mysql.jdbc.exceptions.jdbc4.MySQLQueryInterruptedException"))
                      (and (eq backend 'oracle)
                           (eql (plist-get diag :vendor-code) 1013))
                      (and (eq backend 'clickhouse)

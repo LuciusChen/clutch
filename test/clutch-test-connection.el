@@ -4235,4 +4235,50 @@ them in place."
 
 (provide 'clutch-test-connection)
 
+(ert-deftest clutch-test-jdbc-confirmed-cancellation-recognizes-pg-and-mysql ()
+  "JDBC cancel confirmation should recognize PostgreSQL 57014 user cancel and MySQL 70100/1317."
+  (let ((conn (make-clutch-jdbc-conn :conn-id 7 :params '(:driver jdbc))))
+    (cl-letf (((symbol-function 'clutch--connection-alive-p) (lambda (_) t)))
+      ;; PostgreSQL JDBC user cancellation.
+      (should (clutch--confirmed-query-cancellation-p
+               conn
+               '(clutch-db-error "cancelled"
+                 (:backend jdbc
+                  :diag (:category "cancel"
+                         :sql-state "57014"
+                         :raw-message "ERROR: canceling statement due to user request")))))
+      ;; PostgreSQL JDBC statement timeout shares SQLState 57014 and must NOT confirm user cancel.
+      (should-not (clutch--confirmed-query-cancellation-p
+                   conn
+                   '(clutch-db-error "timeout"
+                     (:backend jdbc
+                      :diag (:category "cancel"
+                             :sql-state "57014"
+                             :raw-message "ERROR: canceling statement due to statement timeout")))))
+      ;; MySQL / MariaDB JDBC query interrupted (SQLState 70100, vendor code 1317).
+      (should (clutch--confirmed-query-cancellation-p
+               conn
+               '(clutch-db-error "Query execution was interrupted"
+                 (:backend jdbc
+                  :diag (:category "cancel"
+                         :sql-state "70100"
+                         :vendor-code 1317)))))
+      ;; MySQL Connector/J Statement.cancel() throws MySQLStatementCancelledException
+      ;; with nil SQLState and vendor code 0.
+      (should (clutch--confirmed-query-cancellation-p
+               conn
+               '(clutch-db-error "Statement cancelled due to client request"
+                 (:backend jdbc
+                  :diag (:category "cancel"
+                         :exception-class "com.mysql.cj.jdbc.exceptions.MySQLStatementCancelledException"
+                         :raw-message "Statement cancelled due to client request")))))
+      ;; MySQL Connector/J timeout must NOT confirm user cancellation.
+      (should-not (clutch--confirmed-query-cancellation-p
+                   conn
+                   '(clutch-db-error "Statement cancelled due to timeout or client request"
+                     (:backend jdbc
+                      :diag (:category "cancel"
+                             :exception-class "com.mysql.cj.jdbc.exceptions.MySQLTimeoutException"
+                             :raw-message "Statement cancelled due to timeout or client request"))))))))
+
 ;;; clutch-test-connection.el ends here
