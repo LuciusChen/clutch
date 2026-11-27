@@ -7,19 +7,19 @@
   </picture>
 </p>
 
-<p align="center"><strong>Query and browse databases—and stage SQL row edits—without leaving Emacs.</strong></p>
+<p align="center"><strong>Query and browse databases, inspect results, and stage SQL row edits without leaving Emacs.</strong></p>
 
-Clutch keeps queries in editable buffers, shows results in an interactive grid, and stages supported SQL row changes for preview before execution. It provides sidecar-free paths for MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, plus JDBC access to Oracle, SQL Server, DB2, Snowflake, Redshift, ClickHouse, DuckDB, Cassandra, and other databases.
+Clutch runs queries from ordinary editable buffers, shows results in an interactive grid, and lets you stage and preview SQL row edits before committing them. It connects directly in Emacs Lisp to MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis, and uses a small Java sidecar for JDBC databases including Oracle, SQL Server, DuckDB, ClickHouse, Snowflake, Redshift, DB2, and Cassandra.
 
 ![Clutch query console with a result grid and XML value viewer](docs/screenshots/clutch-overview.png)
 
 ## Quick Start
 
-The shortest path uses SQLite, which requires only Emacs 29.1+—no protocol package or Java runtime.
+The fastest way to try Clutch is with SQLite, which uses Emacs 29.1+'s built-in SQLite support and needs no extra package or Java runtime.
 
 ### 1. Install Clutch
 
-With MELPA or another package archive configured:
+With MELPA configured:
 
 ```emacs-lisp
 (package-install 'clutch)
@@ -31,7 +31,7 @@ With MELPA or another package archive configured:
 M-x clutch-query-sqlite-file
 ```
 
-Select a SQLite database file. Clutch opens a connected query console in an editable SQL buffer.
+Pick a SQLite file to open a connected SQL console.
 
 ### 3. Run a query
 
@@ -39,63 +39,60 @@ Select a SQLite database file. Clutch opens a connected query console in an edit
 SELECT sqlite_version();
 ```
 
-Press `C-c C-c`. Clutch executes the region when one is active, otherwise the statement at point, and displays the result below the query buffer.
+Press `C-c C-c`. Clutch runs the active region if one is selected, or the statement at point otherwise, and opens the result grid below.
 
-For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, continue with [Installation Details](#installation-details) and the [user guide](docs/user-guide.md).
+For MySQL, PostgreSQL, MongoDB, Redis, or JDBC, see [Installation Details](#installation-details) and the [user guide](docs/user-guide.md).
 
 ## Key Capabilities
 
-- **Keep query context visible:** execute a region or statement without leaving the SQL buffer; results refresh in a split grid, the statement Clutch picks at point flashes, a statement that runs without blocking Emacs keeps a background until it finishes, and the last executed statement stays marked in the fringe on graphical displays or the left margin in terminals.
-- **Inspect wide or structured results:** navigate a single-page table, scroll horizontally, open record and full-value views, and preview truncated JSON, XML, text, or BLOB values after a brief pause without dragging the preview across cells during navigation. Press `x` in a BLOB viewer to switch between text and hexadecimal when bytes are available.
-- **Edit supported SQL results with guardrails:** stage inserts, updates, and deletes locally, inspect Preview SQL in the result menu, and submit only after validation and confirmation.
-- **Navigate with database context:** complete scoped tables and columns, inspect Eldoc and object definitions, follow foreign keys, and reuse cache-first metadata without blocking point motion. JDBC identifier completion keeps accepting input while metadata loads. Native PostgreSQL and MySQL refresh schema, columns, comments, keys and objects through their asynchronous query APIs when available.
-- **Compare table definitions:** use the table's object actions to compare DDL with a saved connection in Ediff. PostgreSQL comparison covers column definitions. [Object workflow](docs/interactive-client.md#compare-table-definitions)
-- **See a table's relations:** navigate a clickable overview, inspect composite foreign keys, and save your own links in a Git-friendly file. [ER guide](docs/interactive-client.md#er-view-clutch-er-mode-key-bindings)
-- **Read a plan:** show a statement's PostgreSQL, MySQL or SQLite plan as a tree, with each step's own share of the cost, or of the measured time under `EXPLAIN ANALYZE`.
-- **Refine and export results:** apply server-side `WHERE` and `ORDER BY`, use client-side substring filtering, copy selections as TSV, CSV, or Org tables, and export complete pageable results as CSV or TSV with consistent Transient controls for optional headers and clipboard/file destinations. For CSV/TSV files, JDBC and current native PostgreSQL and MySQL drivers can read the result in one query.
-- **See connection state where it matters:** keep separate query consoles, reconnect from preserved parameters, and view schema-refresh, transaction, timeout, and diagnostic state in the relevant buffers.
-- **Choose the backend path you need:** use native or pure-Elisp integrations when available, or the Java 17+ [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) for JDBC databases.
-
-Row editing stays within the [row-editing boundaries](docs/user-guide.md#row-editing-boundaries): Clutch stages `UPDATE` and `DELETE` only when it can identify a stable source row.
+- **In-buffer query execution:** Run a region, statement, or script without leaving your SQL buffer. Supported backends (MySQL, PostgreSQL, JDBC) run queries asynchronously so Emacs stays responsive, with running/finished markers in the fringe or terminal margin.
+- **Interactive result grid:** Page through results, scroll horizontally by column, filter the current page (`/`), sort (`s`), open vertical record views (`RET`), and inspect JSON, XML, or BLOB values (`v`, or optional child-frame previews).
+- **Staged SQL row editing:** Stage inserts, cell edits, and deletes locally, inspect the generated SQL before sending, and submit inside a transaction or savepoint. Edits are allowed only when Clutch can identify a stable source row (see [row-editing boundaries](docs/user-guide.md#row-editing-boundaries)).
+- **Completion and object browsing:** Complete tables, schemas, and columns (including subqueries and aliases), jump to definitions and DDL (`C-c C-j` / `C-c C-d` / `C-c C-o`), follow foreign keys, and compare table definitions across connections in Ediff ([object workflow](docs/interactive-client.md#compare-table-definitions)).
+- **ER view and manual relations:** Inspect incoming and outgoing foreign keys in an interactive table overview, and record extra relations in a Git-friendly JSON file ([ER guide](docs/interactive-client.md#er-view-clutch-er-mode-key-bindings)).
+- **Query plans:** View PostgreSQL, MySQL, and SQLite execution plans as a tree with per-step cost or `EXPLAIN ANALYZE` timing bars (`E` in `C-c ?`).
+- **Copy and export:** Copy cells or rectangles as TSV, CSV, Org tables, `INSERT`, or `UPDATE`, or export full query/grid results to CSV or TSV files (streaming in a single query on JDBC and current native MySQL/PostgreSQL drivers).
+- **Transactions and transports:** Manage auto-commit, commit, and rollback across consoles and result buffers, store credentials in `pass` or `.authinfo.gpg`, and tunnel over `~/.ssh/config` or TRAMP.
+- **Native or JDBC backends:** Use pure-Elisp protocol packages where available, or the Java 17+ [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent) for JDBC databases.
 
 ## Backend Support
 
 | Backend | Support level | Requirements and notes |
 |---|---|---|
-| MySQL | Core SQL support | Validated against MySQL 5.6, MySQL 8.0, MySQL 8.4 LTS, and MariaDB 10.11 |
-| PostgreSQL | Core SQL support | Requires [`pgsql`](https://melpa.org/#/pgsql), available from MELPA |
-| XTDB | Basic SQL support over the PostgreSQL protocol | Requires [`pgsql`](https://melpa.org/#/pgsql); staged changes are submitted in Auto mode, and a column of mixed types, unless they are all numbers, is changed with SQL |
-| SQLite | Core SQL support | Uses Emacs 29.1+ built-in `sqlite-*` functions; no external dependency |
-| Oracle / SQL Server | Core SQL support via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
-| DuckDB | Core SQL model, generic JDBC entry | Uses a file-backed `jdbc:duckdb:...` URL and the DuckDB JDBC driver |
-| MongoDB | Basic native document support; optional SQL Interface surface | Native use requires `mongodb.el`; SQL Interface uses `:surface sql-interface` and JDBC |
-| Redis | Basic key/value support | Requires `redis.el`; includes a line-oriented command menu, bounded key browsing, and type-aware values |
-| Cassandra | Basic CQL support via JDBC | CQL console, bounded read-only results, and table and column browsing. Table definition actions are unavailable. |
-| ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL / query-first support | Backend-specific limits apply to editing, transactions, and dialect behavior |
+| MySQL | Core SQL | Requires [`mysql`](https://melpa.org/#/mysql) (MELPA); tested with MySQL 5.6, 8.0, 8.4 LTS, and MariaDB 10.11 |
+| PostgreSQL | Core SQL | Requires [`pgsql`](https://melpa.org/#/pgsql) (MELPA) |
+| XTDB | Basic SQL over PostgreSQL protocol | Requires [`pgsql`](https://melpa.org/#/pgsql); staged edits submit in Auto mode |
+| SQLite | Core SQL | Built into Emacs 29.1+; no extra dependency |
+| Oracle / SQL Server | Core SQL via JDBC | Requires Java 17+ and `clutch-jdbc-agent.jar` |
+| DuckDB | Core SQL via generic JDBC | File-backed `jdbc:duckdb:...` URL and DuckDB JDBC driver |
+| MongoDB | Basic native document; optional SQL Interface | Native mode requires `mongodb.el`; SQL Interface uses `:surface sql-interface` via JDBC |
+| Redis | Basic key/value | Requires `redis.el`; line-oriented console, key browsing, and type-aware values |
+| Cassandra | Basic CQL via JDBC | CQL console, bounded read-only results, and table/column browsing |
+| ClickHouse / Snowflake / Redshift / DB2 / generic JDBC | Basic SQL | Query and metadata first; editing, transaction, and dialect support vary by driver |
 
-See [Backend support levels](docs/backend-support.md) for the precise support policy and non-relational boundaries.
+See [Backend support levels](docs/backend-support.md) for the exact scope of each backend.
 
 ## Installation Details
 
-The SQLite Quick Start has no optional dependency. For other backends, install only the protocol package you use:
+SQLite works out of the box. For other backends, install only the protocol package you need:
 
 | Backend | Extra Emacs package |
 |---|---|
-| `:backend mysql` | [mysql.el](https://github.com/LuciusChen/mysql.el) |
-| `:backend pg` | [pgsql.el](https://github.com/LuciusChen/pgsql.el) |
-| `:backend xtdb` | [pgsql.el](https://github.com/LuciusChen/pgsql.el) |
+| `:backend mysql` | [`mysql`](https://melpa.org/#/mysql) ([mysql.el](https://github.com/LuciusChen/mysql.el)) |
+| `:backend pg` | [`pgsql`](https://melpa.org/#/pgsql) ([pgsql.el](https://github.com/LuciusChen/pgsql.el)) |
+| `:backend xtdb` | [`pgsql`](https://melpa.org/#/pgsql) ([pgsql.el](https://github.com/LuciusChen/pgsql.el)) |
 | `:backend mongodb` | [mongodb.el](https://github.com/LuciusChen/mongodb.el) |
 | `:backend redis` | [redis.el](https://github.com/LuciusChen/redis.el) |
-| `:backend sqlite` | None; Emacs 29.1+ provides SQLite |
-| `:backend jdbc` / Oracle / SQL Server / ClickHouse / DB2 / DuckDB | None in Emacs; uses the bundled JDBC adapter |
+| `:backend sqlite` | None (built into Emacs 29.1+) |
+| `:backend jdbc` / Oracle / SQL Server / Snowflake / Redshift / ClickHouse / DB2 / DuckDB / Cassandra | None in Emacs (uses the bundled JDBC adapter) |
 
-If a configured native backend package is missing, Clutch reports it when connecting. Install that package with your package manager, ensure it is on `load-path`, and reconnect.
+If a configured protocol package is missing, Clutch tells you when you connect.
 
-`nerd-icons` is optional: without it, Clutch uses text symbols and backend names instead of icons. Its availability is checked once per Emacs session, including when it is missing; restart Emacs after installing it during a running session.
+`nerd-icons` is optional; without it, Clutch falls back to plain text symbols. Availability is checked once per Emacs session, so restart Emacs after installing it.
 
-JDBC support ships with Clutch and requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.35, which supports cancelling requests before execution, bounded BLOB previews, and ordered foreign-key metadata for ER views and composite-key navigation. Run `M-x clutch-jdbc-ensure-agent` to install the agent and `M-x clutch-jdbc-install-driver` for supported drivers. Clutch verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.md) for setup, supported drivers, connection examples, and transaction behavior.
+JDBC backends require Java 17+, `clutch-jdbc-agent.jar` (pinned at 0.2.35 and SHA-256 verified on startup), and the database's JDBC driver jar. Run `M-x clutch-jdbc-ensure-agent` to download the agent and `M-x clutch-jdbc-install-driver` for supported drivers. See the [JDBC backend guide](docs/jdbc-backend.md) for setup and connection examples.
 
-For source checkouts, add Clutch and each native protocol checkout you use to `load-path`:
+When installing from source checkouts, add Clutch and any native protocol checkouts you use to `load-path`:
 
 ```emacs-lisp
 (add-to-list 'load-path "/path/to/clutch")
@@ -111,26 +108,24 @@ Org-Babel integration lives in the separate [ob-clutch](https://github.com/Luciu
 ## Requirements
 
 - Emacs 29.1+
-- MySQL 5.6+, PostgreSQL 12+, or SQLite through Emacs built-in support for the corresponding SQL backends
-- Java 17+ only for JDBC backends
-- Current `mongodb.el` or `redis.el` for the corresponding native document/key-value backend
-
-MariaDB 10.11 has been live-validated through the native `mysql` backend, including TLS with `mysql_native_password`; other MariaDB versions are expected to be broadly compatible but are not yet part of the regular test matrix. MySQL 5.6 has no native JSON column type, MariaDB exposes `JSON` as checked text, and the older `mysql_old_password` plugin is not supported by the native client.
+- MySQL 5.6+ / MariaDB 10.11, PostgreSQL 12+, or SQLite for the native SQL backends (`mysql_old_password` is not supported)
+- Java 17+ for JDBC backends
+- `mongodb.el` or `redis.el` for native MongoDB or Redis
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) — saved connections, the query workflow and export, transactions, password management and encrypted profiles, SSH tunnels, TRAMP origins, SQL files, and everyday commands.
-- [Interactive client guide](docs/interactive-client.md) — key bindings, result workflows, object actions, REPL, transient menus, faces, timeouts, and customization.
-- [Backend support levels](docs/backend-support.md) — support contracts for Core SQL, basic integrations, MongoDB SQL Interface, DuckDB, and Redis.
-- [Native backend guide](docs/native-backends.md) — MySQL, PostgreSQL, XTDB, SQLite, MongoDB and Redis notes, TLS, timeouts, and native backend examples.
-- [MongoDB backend guide](docs/mongodb-backend.md) — supported helper syntax, document workflows, and native/SQL Interface boundaries. Collection discovery, field sampling and index warmup run asynchronously with a current `mongodb.el`.
-- [JDBC backend guide](docs/jdbc-backend.md) — driver setup, connection examples, Oracle and DuckDB notes, transactions, and generic JDBC URLs.
-- [Architecture guide](docs/architecture.md) — module layers, backend/surface ownership, connection flow, query/object flow, and JDBC runtime diagrams.
-- [Org-Babel guide](docs/org-babel.md) — `ob-clutch` setup, source block examples, header arguments, and connection caching.
-- [JDBC agent protocol](docs/jdbc-agent-protocol.md) — sidecar RPC protocol and implementation notes.
-- [Product requirements](PRD.md) — stable scope, required workflows, compatibility, and non-goals.
+- [User guide](docs/user-guide.md) — saved connections, query and export basics, transactions, passwords and encrypted profiles, SSH tunnels, TRAMP, and `.sql` files.
+- [Interactive client guide](docs/interactive-client.md) — key bindings, result browser, editing/insert forms, ER view, query plans, object actions, REPL, menus, faces, and options.
+- [Backend support levels](docs/backend-support.md) — what each backend supports and where non-relational/JDBC limits sit.
+- [Native backend guide](docs/native-backends.md) — MySQL, PostgreSQL, XTDB, SQLite, MongoDB, and Redis details, TLS, and timeouts.
+- [MongoDB backend guide](docs/mongodb-backend.md) — MQL helpers, completion, read-only document grids, and SQL Interface setup.
+- [JDBC backend guide](docs/jdbc-backend.md) — agent/driver installation, connection examples, Oracle/DuckDB/Snowflake/Cassandra notes, and transactions.
+- [Org-Babel guide](docs/org-babel.md) — `ob-clutch` setup, block examples, header arguments, and caching.
+- [Architecture guide](docs/architecture.md) — module layout, dependencies, and runtime diagrams.
+- [JDBC agent protocol](docs/jdbc-agent-protocol.md) — stdin/stdout JSON protocol and sidecar session model.
+- [Product requirements](PRD.md) — scope and design goals.
 
-For development, see [CONTRIBUTING.md](CONTRIBUTING.md) for local test targets, the code gate and live database runs, and [AGENTS.md](AGENTS.md) for project contracts and verification policy.
+For development and tests, see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ## License
 

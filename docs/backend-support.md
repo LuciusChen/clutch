@@ -1,40 +1,37 @@
 # clutch Backend Support Levels
 
-# Support Levels
+## Support Levels
 
-Clutch separates database support by the surface it can honestly expose, not only by whether a connection can be opened.
+Clutch groups backends by what workflows they can actually support, not just whether they can open a connection:
 
 | Level | Meaning | Examples |
-|----|----|----|
-| Core SQL support | SQL-first database where clutch targets the normal query, metadata, result grid, completion, pagination, and staged mutation workflows where the backend can provide row identity and transactions. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
-| Core SQL model, generic entry | SQL-first database that fits the core clutch model, but currently enters through generic JDBC configuration instead of a dedicated manual backend prompt. | DuckDB |
-| Basic SQL / query-first support | SQL or SQL-like database, reached through JDBC or another database's protocol, where querying and metadata are supported, while edits, transactions, row identity, or dialect behavior may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC, XTDB via `pgsql` |
-| Basic document support | Non-relational backend with a read-oriented grid/metadata mapping, but not the SQL row-editing model. | MongoDB via `mongodb` |
-| Basic key/value support | Command-oriented key/value and data-structure backend with key browsing and type-aware value display, but not SQL row editing, joins, or row identity. | Redis via `redis` |
-| SQL Interface surface | A SQL/JDBC endpoint for a non-relational database. It is useful only when that product actually provides the SQL surface. | MongoDB SQL Interface via `(:backend mongodb :surface sql-interface)` |
-| Basic CQL support | CQL execution and table and column metadata, with a bounded read-only result grid. | Cassandra via JDBC |
-| Unsupported / future contract | Databases that need a different UI and backend contract before clutch should claim support. | Elasticsearch, Couchbase |
+|---|---|---|
+| Core SQL | Full SQL workflow: queries, metadata, result grid, completion, pagination, and staged row edits where row identity and transactions exist. | MySQL, PostgreSQL, SQLite, Oracle, SQL Server |
+| Core SQL (generic JDBC entry) | Same SQL workflow, configured via a generic `:backend jdbc` entry instead of a dedicated backend prompt. | DuckDB |
+| Basic SQL | Query and metadata support; editing, transactions, row identity, or dialect coverage may be partial. | ClickHouse, Snowflake, Redshift, DB2, generic JDBC, XTDB (via `pgsql`) |
+| Basic document | Native document queries and read-only grids without SQL row editing. | MongoDB (`:backend mongodb`) |
+| Basic key/value | Command-oriented console, key browsing, and type-aware value display without SQL editing or joins. | Redis (`:backend redis`) |
+| SQL Interface | SQL/JDBC endpoint for a non-relational database that exposes one. | MongoDB SQL Interface (`:backend mongodb :surface sql-interface`) |
+| Basic CQL | CQL console, table/column browsing, and bounded read-only previews. | Cassandra (via JDBC) |
+| Unsupported | Needs a different backend/UI model. | Elasticsearch, Couchbase |
 
-# MongoDB Boundary
+## MongoDB
 
-`mongodb` is the normal MongoDB backend. It connects to ordinary `mongod` deployments through the external `mongodb.el` native client and evaluates supported MongoDB Shell / MQL helper commands. Normal MongoDB connections do not require Java or a JDBC driver jar. Protocol capabilities and connection option semantics are documented in the `mongodb.el` repository; Clutch should not duplicate that driver-level behavior in its own adapter.
+`:backend mongodb` connects to standard `mongod` deployments via the external `mongodb.el` client and accepts common MQL helper syntax, with no Java or JDBC jar required. See the `mongodb.el` repo for protocol options.
 
-MongoDB SQL Interface is not another backend. It is the optional `:surface sql-interface` mode of `mongodb` and should be used only for Atlas or self-managed deployments that actually expose that SQL Interface endpoint. That surface requires the JDBC sidecar and MongoDB JDBC driver jar.
+For Atlas or Enterprise deployments that expose MongoDB SQL Interface, add `:surface sql-interface` to the same `:backend mongodb` entry (requires the JDBC sidecar and MongoDB JDBC driver).
 
-# DuckDB Boundary
+## DuckDB
 
-DuckDB belongs with SQL-first databases, not with document/basic support. Its data model, query language, metadata, and mutation behavior are close to the core clutch SQL workflow. The current integration is through the generic JDBC backend with a `jdbc:duckdb:...` URL and the auto-installable DuckDB JDBC driver. `clutch-switch-schema` lists and switches schemas only in the current file-backed catalog. Pure in-memory URLs and attached catalogs are deliberately excluded because those databases or `ATTACH` state belong to one JDBC session while Clutch's metadata sidecar uses a separate session; use qualified `catalog.schema.table` names for attached catalogs. The current DuckDB JDBC driver does not expose savepoints, so Manual-mode staged submission is rejected before any staged DML runs; switch the connection to Auto mode to submit that batch.
+DuckDB fits Clutch's SQL workflow and connects via `:backend jdbc` with a file-backed `jdbc:duckdb:...` URL and the auto-installable DuckDB JDBC driver:
 
-# Redis And Similar Systems
+- `clutch-switch-schema` lists and switches schemas inside the file-backed catalog only. Pure in-memory URLs and `ATTACH`ed catalogs live only in the primary JDBC session, which Clutch's separate metadata session cannot see. Query attached objects with qualified `catalog.schema.table` names.
+- The current DuckDB JDBC driver has no savepoint support, so Manual-mode staged submission is rejected; switch to Auto mode to submit staged edits.
 
-Redis is not a MongoDB-like document backend for clutch purposes. It is a key/value and data-structure server with command-oriented workflows, different metadata, different result shapes, and no table/collection row identity model.
+## Redis
 
-Redis support uses the separate `redis` backend and the external `redis.el` native RESP client. Clutch owns the command query buffer, key browsing, type-aware value display, TTL metadata, and result-grid mapping. The protocol package owns RESP encoding/decoding, TCP connection lifecycle, AUTH, SELECT, and Redis error responses.
+Redis uses `:backend redis` and the external `redis.el` client for line-oriented command buffers, key browsing, TTL/existence metadata, and type-aware values. It does not support SQL editing, transactions, pub/sub loops, clusters, or stream consumers.
 
-Saved Redis profiles may choose an initial `:database`, and a `SELECT` run in the console moves the session to another logical database: Clutch shows it, loads its keys and selects it again when it reconnects after an idle drop, while `C-c C-e` connects to the profile's database, as after `clutch-switch-schema`. Runtime logical-database switching is not advertised through the shared namespace picker because the server's configured database count is not reliably enumerable under ordinary ACLs; hard-coding the common 0–15 range would overstate the backend capability.
-
-Redis support is intentionally basic. It does not expose SQL row editing, joins, row identity, transaction workflow, pub/sub loops, cluster management, or stream consumer workflows.
-
-Key discovery collects at most `clutch-redis-key-discovery-limit` unique keys (default 5000) and performs at most eight SCAN batches per operation. Generated hash/list/set/zset/stream browse commands request at most `clutch-redis-browse-limit` elements (default 200). The object picker keeps completion local to its bounded snapshot; type an exact key and submit it to perform one remote existence check beyond that snapshot. Use explicit Redis scan/range commands for broader discovery.
-
-Bounded generated hash browsing uses `HRANDFIELD` and therefore requires Redis 6.2 or newer. Manual `SCAN`-family commands remain available; when Redis returns an empty nonterminal batch, Clutch displays its continuation cursor.
+- Saved profiles can set an initial `:database`, and running `SELECT` in the console moves the session and survives idle reconnects (`C-c C-e` returns to the profile's database). Interactive schema switching is disabled because Redis has no ACL-safe way to enumerate database counts.
+- Key discovery is capped at `clutch-redis-key-discovery-limit` (default 5000 keys, at most 8 `SCAN` batches); generated hash/list/set/zset/stream browse commands request at most `clutch-redis-browse-limit` elements (default 200). Typing an exact key beyond the snapshot performs a single existence check.
+- Generated hash browsing uses `HRANDFIELD` and requires Redis 6.2+. Manual `SCAN` commands work everywhere and display continuation cursors on empty nonterminal batches.

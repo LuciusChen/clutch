@@ -1,6 +1,6 @@
 # clutch Architecture
 
-This document is the current architecture review map for `clutch`. It describes the module boundaries that should hold after the relational SQL, document database, and JDBC surface refactor. Historical rationale lives in [`postmortem/`](../postmortem/); this file should describe the current design.
+Current module map and boundaries for `clutch`. Design history lives in [`postmortem/`](../postmortem/).
 
 ## Layered Module Architecture
 
@@ -78,17 +78,13 @@ flowchart TB
   Agent --> Drivers
 ```
 
-This diagram shows primary runtime/workflow ownership, not every `require` form; the next section shows the `require` edges. Arrows between the large groups show layer boundaries. Adapter-to-runtime arrows are expanded only at the bottom layer, where they identify the external protocol package or runtime each adapter delegates to. The facade is the database contract boundary. Workflow modules call generic `clutch-db-*` operations instead of protocol packages. Backend adapters own database-specific connection params, metadata, object definitions, query execution, and type mapping.
+Workflow modules call generic `clutch-db-*` operations in `clutch-backend.el` rather than protocol packages directly; adapters own database-specific parameters, metadata, execution, and type mapping.
 
-`clutch-query.el` is query-console workflow, not the SQL layer. SQL-specific analysis and completion live in `clutch-sql.el` and are installed by `clutch-mode`, whose major-mode definition lives in `clutch-query.el`. Document query-buffer behavior is selected through backend registry metadata. `clutch-document.el` currently provides `clutch-mongodb-mode` for MongoDB and reuses the shared query workflow for execution. Future document backends should register their own query mode instead of adding MongoDB branches to generic workflow modules. Redis defines `clutch-redis-mode` in its adapter file because the mode is Redis-specific and small, so it sits in the adapter layer above; it reaches the shared query workflow through lazily loaded `declare-function` references, not a `require`. Protocol work still lives in `redis.el`. `clutch-result.el` owns result buffer lifecycle state, paging/filter/sort state, refine state, and the result action registry. `clutch-edit.el` owns staged mutation payloads. `clutch-ui.el` is a shared rendering/helper module for result grids and connection header-line presentation; it is not a separate workflow entry point or result-state owner, so its same-layer helper edges are omitted from this overview.
-
-Staged submission has one backend contract: `clutch-db-call-with-atomic-batch`. `clutch-edit.el` owns statement order, row-count validation, and local staged state. Backends own the database boundary: an Auto-mode transaction or a Manual-mode savepoint. Transaction and savepoint completion are distinct: a failed savepoint release can still be recovered by rolling back to that savepoint, while a failed commit has an unknown outcome and must not be followed by a rollback presented as proof that nothing committed. The same unknown-outcome rule applies to explicit `clutch-commit`. JDBC keeps `java.sql.Savepoint` objects in the agent and exposes only opaque ids; neither SQL savepoint dialects nor partial-statement state leak into the result workflow. Transaction state is tracked as clean, dirty, or uncertain, with uncertain reserved for failed batch recovery or an unknown commit outcome. Rollback or reconnect clears the unsafe session state, but UI messaging preserves the distinction between known discarded work and a historical commit outcome that still requires verification.
-
-`clutch-er.el` owns the ER view of a table. It reads the table's columns and foreign keys through the schema metadata cache and asks the backend each time for the keys that reference the table (`clutch-db-referencing-keys`), whose default refuses. A backend that tells foreign keys apart marks each column of a key with the key's `:constraint`, so the view groups a composite key into one relation; it draws with `clutch-viz.el` and keeps its model in its buffer. It also owns the relations added by hand and their JSON file for each connection, reusing `clutch-connection.el`'s connection identity for the default filename; it reads the file when the view loads and before each change, and `clutch-result.el` starts a relation from a result column through it. Those relations serve browsing only: row identity, staging and submission never read them. Native PostgreSQL, MySQL and JDBC ER loads use backend asynchronous metadata operations and the shared query activity lifecycle owned by `clutch-connection.el`, which reserves the connection, accounts for cancellation and guards replies by their owning buffer and connection. Warm columns and outgoing keys come from the schema cache; cold loads reuse the adapters' SQL builders and row decoders. JDBC reuses the existing asynchronous RPC transport and isolated metadata session; its operation-specific cancellation stops the sequence while preserving primary SQL. SQLite and older native libraries retain the synchronous path. A connection replaced under the view moves with the other attached buffers.
-
-The ER view aligns its lines with `clutch-viz-columns`. The record view follows relations through `clutch-er-outgoing-relations`, so a composite key and a relation added by hand are followed as the ER view groups them.
-
-`clutch-viz.el` draws text charts from plain Lisp data and requires no Clutch module, which the architecture check enforces; `clutch-result.el` owns the plan buffer and decides what it shows. `clutch-diagnostics.el` is a leaf diagnostics service. It owns redacted debug capture, the dedicated debug buffer, and buffer/connection-scoped problem records. Workflow modules call it directly for capture and error context. Problem records retain their source-buffer provenance, and diagnostics derives redacted labels through the generic backend contract, so it has no reverse dependency on connection.
+- **Query modes:** `clutch-query.el` owns console execution and `clutch-mode`, while `clutch-sql.el` owns SQL parsing, completion, Eldoc, and xref. `clutch-document.el` provides `clutch-mongodb-mode` through backend registry metadata; `clutch-redis.el` defines the smaller `clutch-redis-mode` in the adapter layer using lazy `declare-function` references.
+- **Results, edits, and UI:** `clutch-result.el` owns result lifecycle, paging/filter/sort, refine mode, query plans, and the result action registry; `clutch-edit.el` owns staged mutation payloads and validation; `clutch-ui.el` provides grid/header rendering helpers.
+- **Atomic submission:** `clutch-edit.el` handles statement order and row-count checks while backends implement `clutch-db-call-with-atomic-batch` (Auto-mode transaction or Manual-mode savepoint; JDBC exposes opaque savepoint IDs). Failed savepoint release can roll back cleanly, whereas an unknown commit outcome sets `uncertain` until explicit rollback or reconnect.
+- **ER view:** `clutch-er.el` reads cached columns/outgoing keys, queries incoming keys (`clutch-db-referencing-keys`) asynchronously on native PG/MySQL and JDBC via `clutch-connection.el`'s activity lifecycle, draws with `clutch-viz.el`, and persists manual browsing-only JSON relations (also exposed to Record view via `clutch-er-outgoing-relations`).
+- **Leaf services:** `clutch-viz.el` draws pure-Lisp text charts with zero Clutch dependencies; `clutch-diagnostics.el` owns redacted debug capture (`*clutch-debug*`) and problem records over the backend facade without depending on `clutch-connection.el`.
 
 ## Module Dependencies
 
@@ -118,6 +114,8 @@ flowchart LR
   Document --> Query
   Edit --> Conn
   Object --> Conn
+  Object --> SQL
+  Object --> Viz
   Result --> Query
   Result --> Edit
   Result --> Object
@@ -128,7 +126,7 @@ flowchart LR
   ER --> Viz
 ```
 
-Arrows read "requires". Edges implied by another edge are omitted: `clutch-result.el` also requires `clutch-connection.el`, `clutch-ui.el` and the others reachable through the modules shown. Loading `clutch.el` brings in the SQL and result workflows. The MongoDB document mode loads on demand. Read from the right: backend, diagnostics, schema, then the rendering and SQL helpers, then connection, then the query, edit and object workflows, and `clutch-result.el` on top, which ties them together.
+Arrows mean `require` (transitive edges omitted). Loading `clutch.el` pulls in the SQL and result workflows; `clutch-document.el` loads on demand.
 
 ## Backend And Surface Model
 
@@ -169,9 +167,11 @@ flowchart LR
   RedisNative --> RedisExt["redis.el native RESP client"]
 ```
 
-Native backends register in `clutch-backend--registry`. The JDBC adapter adds entries from `clutch-jdbc--driver-metadata` when it loads. See the [backend support matrix](backend-support.md) for the current inventory and capabilities.
+Native backends register in `clutch-backend--registry`; `clutch-db-jdbc.el` adds entries from `clutch-jdbc--driver-metadata` on load (see [backend-support.md](backend-support.md)).
 
-`mongodb` is one backend. Ordinary MongoDB uses the native document surface. MongoDB SQL Interface is a `:surface sql-interface` path on the same backend. It is not a second public backend, driver, feature, or manual chooser entry. `redis` is a separate key/value backend with a native command surface. It is not a document backend and should not reuse MongoDB collection/document actions. SQL-only result and staged-mutation actions are gated by the registered relational data model or by an explicit SQL Interface surface; native document and key/value surfaces keep only backend-neutral grid actions unless their adapter exposes a dedicated capability. DuckDB currently has a JDBC driver source and URL/runtime helpers, but no registered backend symbol; use it through the generic `jdbc` path. `xtdb` is a backend of its own for XTDB 2, which speaks the PostgreSQL protocol: it reuses the PostgreSQL adapter, whose connection subtype overrides it where XTDB differs (postmortem 208).
+- `mongodb` is a single backend whose default surface is native document (`mongodb.el`) and optional `:surface sql-interface` routes through JDBC.
+- `redis` is a separate key/value backend; SQL-only result/mutation actions are gated by the registered data model or SQL Interface surface.
+- `xtdb` registers its own backend reusing the PostgreSQL adapter with subtype overrides (postmortem 208); DuckDB currently enters through generic `jdbc`.
 
 ## Connection Flow
 
@@ -209,7 +209,7 @@ flowchart TB
   Adapter --> Live
 ```
 
-Transport is below the backend data model. SSH and TRAMP rewrite only structured TCP endpoints. Opaque JDBC URLs and MongoDB `mongodb://` / `mongodb+srv://` URLs are not parsed or rewritten by Clutch. Adapter-owned validation and defaults include backend-specific checks such as removed timeout option rejection, SSL/TLS normalization, and JDBC timeout defaults.
+SSH and TRAMP forwarding sit below the backend layer and rewrite only structured `:host` / `:port` endpoints; opaque `:url` entries are passed through unchanged.
 
 ## Query And Object Flow
 
@@ -266,7 +266,7 @@ sequenceDiagram
   end
 ```
 
-The result grid is shared across SQL, document, and key/value query results. Query buffers differ by language helper and statement-boundary rules, but query execution always converges in `clutch-query.el` before calling the generic backend API. A statement starts through `clutch-db-query-async`: an adapter that can run SQL without blocking, as the MySQL, PostgreSQL and JDBC ones do, returns at once and delivers the result from an idle timer, while the connection refuses other foreground work; the others decline, and the statement runs through `clutch-db-query`, blocking Emacs until it ends. A batch keeps its connection reserved for the whole script, so between two statements the backend looks idle although the batch still owns the connection. Eldoc, completion and metadata requests that would query the connection on their own check `clutch-db-in-use-p`, which also covers that reservation, and wait; checking only `clutch-db-busy-p` let their synchronous lookups run between statements and abort the batch with a busy-connection error. Object browsing is intentionally separate: `clutch-object.el` asks the adapter for metadata, definitions, native actions, or browse command text. Browse command text is opened in the matching query-buffer mode instead of pretending that every backend has SQL tables. Result-buffer actions use a single action registry owned by `clutch-result.el`, so SQL rewrite/edit/export stays on SQL surfaces while native document/key/value surfaces expose only adapter-supported operations.
+Execution always starts through `clutch-db-query-async`: async adapters (MySQL, PostgreSQL, JDBC) return immediately and deliver results from an idle timer, while synchronous adapters fall back to `clutch-db-query`. Multi-statement batches reserve their connection across statements, so background metadata and Eldoc check `clutch-db-in-use-p` (not just `clutch-db-busy-p`) before querying. Object browsing asks adapters for metadata, definitions, or backend-specific browse commands opened in the matching query mode.
 
 ## JDBC Runtime Shape
 
@@ -292,4 +292,4 @@ flowchart LR
   Driver --> DB
 ```
 
-JDBC uses a JVM sidecar because those databases are exposed through JDBC drivers, not through pure Elisp protocol packages. The sidecar keeps foreground queries separate from metadata refresh where the driver/database benefits from separate sessions. On Oracle it opens a third, bulk session on first use for schema-wide listings, so a listing that takes seconds on a large schema does not hold the metadata session that a lookup before a query waits on; `docs/jdbc-agent-protocol.md` describes the sessions.
+The JVM sidecar separates foreground SQL from metadata introspection, and on Oracle opens a third `bulk` session lazily for schema-wide listings so large scans do not stall interactive lookups (see [jdbc-agent-protocol.md](jdbc-agent-protocol.md)).

@@ -1,119 +1,79 @@
 # clutch JDBC Backend Guide
 
-# JDBC Backend (clutch-db-jdbc.el)
-
-`clutch-db-jdbc.el` adds support for databases that have no pure Elisp wire protocol implementation. It delegates JDBC work to [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent), a small JVM sidecar. Java 17+ is required.
-
-For the wire protocol, RPC inventory, runtime session model, and startup/error semantics, see [jdbc-agent-protocol.md](jdbc-agent-protocol.md).
+`clutch-db-jdbc.el` connects to databases without a pure-Elisp client by talking to [clutch-jdbc-agent](https://github.com/LuciusChen/clutch-jdbc-agent), a small JVM sidecar (requires Java 17+). For wire protocol and session internals, see [jdbc-agent-protocol.md](jdbc-agent-protocol.md).
 
 ## Supported Databases
 
-| Backend symbol | Database | Support level | Driver auto-install | Default port |
-|----|----|----|----|----|
-| `oracle` | Oracle Database | Core SQL | Maven Central | 1521 |
-| `sqlserver` | Microsoft SQL Server | Core SQL | Maven Central | 1433 |
-| `redshift` | Amazon Redshift | Basic SQL | Maven Central | 5439 |
-| `snowflake` | Snowflake | Basic SQL | Maven Central | 443 |
-| `clickhouse` | ClickHouse | Basic SQL | Maven Central | 8123 |
-| `mongodb` + `:surface sql-interface` | MongoDB SQL Interface | SQL Interface surface | Maven Central | 27017 |
+| Backend symbol | Database | Support level | Driver install | Default port |
+|---|---|---|---|---|
+| `oracle` | Oracle Database | Core SQL | Auto (Maven Central) | 1521 |
+| `sqlserver` | Microsoft SQL Server | Core SQL | Auto (Maven Central) | 1433 |
+| `redshift` | Amazon Redshift | Basic SQL | Auto (Maven Central) | 5439 |
+| `snowflake` | Snowflake | Basic SQL | Auto (Maven Central) | 443 |
+| `clickhouse` | ClickHouse | Basic SQL | Auto (Maven Central) | 8123 |
+| `mongodb` (`:surface sql-interface`) | MongoDB SQL Interface | SQL Interface | Auto (Maven Central) | 27017 |
 | `cassandra` | Apache Cassandra | Basic CQL | Manual download | 9042 |
 | `db2` | IBM DB2 | Basic SQL | Manual download | 50000 |
 
-DuckDB, TiDB, Hive, KingbaseES, and other JDBC-compatible databases can be used through the generic `jdbc` backend by passing `:url "jdbc:xxx://..."` and `:driver-class "..."` directly, then placing the driver jar in the drivers directory. Use `:display-name` if you want the UI to show a friendly backend label instead of plain `JDBC`.
-
-MongoDB SQL Interface uses MongoDB's official SQL Interface JDBC driver through the same `mongodb` backend with `:surface sql-interface`. Use it only for SQL Interface endpoints that accept `jdbc:mongodb://...` URLs. Ordinary MongoDB document connections use the default native document surface and do not require JDBC. See [docs/mongodb-backend.md](mongodb-backend.md) for that path. See MongoDB's [SQL Interface driver setup](https://www.mongodb.com/docs/sql-interface/install-driver/) and [SQL Interface language reference](https://www.mongodb.com/docs/sql-interface/language-reference/) for the upstream contract.
-
-Support levels are defined in [docs/backend-support.md](backend-support.md).
+DuckDB, TiDB, Hive, KingbaseES, and other JDBC databases work through `:backend jdbc` with `:url`, `:driver-class`, and an optional `:display-name` (place the driver jar in the drivers folder, or run `clutch-jdbc-install-driver 'duckdb` for DuckDB).
 
 ## Setup
 
-On first `clutch-connect` to a JDBC backend, clutch loads `clutch-db-jdbc.el` automatically and checks for the published agent jar and required driver jar; if either is missing, it stops with instructions to run `M-x clutch-jdbc-ensure-agent` or `M-x clutch-jdbc-install-driver`. Cassandra and DB2 drivers are installed manually.
-
-If you prefer to pre-install everything up front:
+On first connect, Clutch checks for the agent jar and driver jar and prompts you if either is missing. You can also install them up front:
 
 ```emacs-lisp
-;; Download clutch-jdbc-agent.jar:
-(clutch-jdbc-ensure-agent)
+(clutch-jdbc-ensure-agent)                ; downloads clutch-jdbc-agent.jar from GitHub Releases
 
-;; Install a JDBC driver (Oracle, SQL Server, Snowflake, Redshift, ClickHouse, DuckDB, MongoDB):
-(clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar from Maven Central
-(clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar for newer Oracle-only setups
-(clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified SQL Server driver) from Maven Central
-(clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar from Maven Central
-(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc42.jar from Maven Central
-(clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar plus SLF4J jars from Maven Central
-(clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar from Maven Central
+(clutch-jdbc-install-driver 'oracle)      ; ojdbc8.jar + orai18n.jar (recommended for 11g/12c/19c)
+(clutch-jdbc-install-driver 'oracle-11)   ; ojdbc11.jar + orai18n.jar (19c+ only)
+(clutch-jdbc-install-driver 'sqlserver)   ; mssql-jdbc.jar (JRE-classified artifact)
+(clutch-jdbc-install-driver 'snowflake)   ; snowflake-jdbc.jar
+(clutch-jdbc-install-driver 'redshift)    ; redshift-jdbc42.jar
+(clutch-jdbc-install-driver 'clickhouse)  ; clickhouse-jdbc.jar + SLF4J jars
+(clutch-jdbc-install-driver 'duckdb)      ; duckdb_jdbc.jar
 (clutch-jdbc-install-driver 'mongodb)     ; MongoDB SQL Interface JDBC driver
-;; DB2: download db2jcc4.jar from IBM manually and place in clutch-jdbc-agent-dir/drivers/
+;; DB2: download db2jcc4.jar from IBM manually into ~/.emacs.d/clutch-jdbc/drivers/
 ```
 
-Driver jars are stored in `~/.emacs.d/clutch-jdbc/drivers/` (configurable via `clutch-jdbc-agent-dir`).
+Jars live in `~/.emacs.d/clutch-jdbc/drivers/` (customizable via `clutch-jdbc-agent-dir`). Reconnecting restarts the shared agent automatically if you install a new driver while it is running, so no Emacs restart is needed.
 
-The agent jar itself is verified against the configured SHA-256 before startup. This catches the common case where a local `clutch-jdbc-agent-<version>.jar` exists but does not actually match the jar you intend clutch to launch. Running `clutch-jdbc-ensure-agent` also removes stale versioned `clutch-jdbc-agent-*.jar` files from the same directory.
-
-After a primary JDBC session has been idle for `clutch-jdbc-validate-after-idle-seconds` (300 seconds by default), the agent calls the standard JDBC liveness check immediately before statement creation. The elapsed idle interval only decides when to check; the check result, not an attempt to infer laptop sleep or a server timeout, decides whether the session is dead. If validation fails before execution starts, the query-console, REPL, or batch-statement workflow retires that session, reconnects the console, prints the normal `Reconnected to ...` message, and executes the statement once when the session uses auto-commit or Clutch's manual-transaction state is clean. A dirty manual transaction is not retried and retains the unknown-outcome warning; staged mutations report the failure without transparent replay. The agent checks an idle metadata or bulk session the same way before a metadata request and replaces only that session when the check fails, leaving the primary session and its transaction untouched. Set the option to `nil` or 0 to disable this validation.
-
-If statement preparation or execution may already have reached the server, the command reports its original error and is never replayed because the server-side outcome may be unknown. Clutch keeps the console's reconnect parameters so the next command creates a new session instead of sending the obsolete connection id. This rule applies to every JDBC driver; there is no Oracle-specific retry SQL, connection pool, heartbeat, or background timer.
-
-If you intentionally use a locally built jar, set `clutch-jdbc-agent-sha256` to `nil` to disable verification. That is the escape hatch for custom development builds.
-
-Oracle installs now also pull `orai18n.jar` automatically, which is required for CJK database character sets such as `ZHS16GBK`. If you install drivers while the shared JDBC agent is already running, clutch will restart that agent on the next JDBC use; reconnecting is enough, you do not need to restart Emacs.
-
-Oracle installs also keep the active JDBC line unambiguous: `clutch-jdbc-install-driver 'oracle` enables `ojdbc8.jar` and disables `ojdbc11.jar` by removing it if present; `clutch-jdbc-install-driver 'oracle-11` does the inverse. This avoids loading both Oracle driver lines at once.
-
-SQL Server installs use Microsoft's classifier-based Maven artifacts (for example `mssql-jdbc-13.4.0.jre11.jar`) and normalize the local filename to `mssql-jdbc.jar`. If you manage the driver manually, use the JRE-classified artifact from Maven Central rather than a nonexistent plain `mssql-jdbc-<version>.jar` path.
-
-## Cassandra
-
-Download `cassandra-jdbc-wrapper-5.0.5-bundle.jar` from the [ING JDBC wrapper release](https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5) and place it in the JDBC drivers directory. Use the bundle, which contains the driver's dependencies. Cassandra BLOB results require agent 0.2.29 or later. Create a saved connection such as:
-
-```emacs-lisp
-("cassandra-local" . (:backend cassandra
-                     :url "jdbc:cassandra://127.0.0.1:9042/my_keyspace?localdatacenter=datacenter1"))
-```
-
-Choose the initial keyspace in the URL and use qualified `keyspace.table` names to query other keyspaces. The connection profile owns the current keyspace. Console `USE` and interactive keyspace switching are unavailable.
-
-For a `SELECT` without a global `LIMIT`, Clutch adds a CQL limit one row beyond the grid bound, before any `ALLOW FILTERING`. The JDBC wrapper otherwise materializes the server result in the JVM. An explicit global `LIMIT` stays in the statement and controls how many rows the driver can receive. A result grid shows at most `clutch-jdbc-fetch-size` rows (500 by default, or 9999 at its maximum setting to leave room for one lookahead row). For longer results Clutch closes the JDBC cursor after the preview and displays a truncation notice. Grid sorting, filtering and delimited export operate on the displayed rows. Full-query export, server-side grid pagination, staged editing and SQL transaction controls are unavailable. Clutch sends handwritten CQL mutations as written, though the driver does not report a meaningful affected-row count.
-
-Object browsing exposes tables, columns and primary-key membership. The ING driver takes a schema snapshot at connect time. Reconnect after DDL to see structural changes in the object browser and completion. Object menus omit definition display and comparison. A JDBC primary-key list does not preserve partition-key grouping or clustering order.
+- **Agent integrity:** Clutch verifies `clutch-jdbc-agent.jar` against `clutch-jdbc-agent-sha256` before launch and removes older versioned agent jars on `clutch-jdbc-ensure-agent`. Set `clutch-jdbc-agent-sha256` to `nil` when testing a locally built jar.
+- **Oracle & SQL Server jar notes:** Installing `oracle` removes `ojdbc11.jar` and installing `oracle-11` removes `ojdbc8.jar` so both lines are never loaded together; both include `orai18n.jar` for CJK character sets (e.g. `ZHS16GBK`). SQL Server downloads Microsoft's JRE-classified artifact (such as `mssql-jdbc-13.4.0.jre11.jar`) and saves it as `mssql-jdbc.jar`.
+- **Idle liveness check:** After `clutch-jdbc-validate-after-idle-seconds` (default 300s; `nil` or `0` disables), the agent runs `Connection.isValid` before preparing a new statement. If dead before execution starts, Clutch reconnects and runs the statement once on auto-commit or clean manual sessions (dirty manual transactions and in-flight failures are never replayed). Idle metadata/bulk sessions are replaced independently without disturbing the primary session.
 
 ## Agent Launch Options
 
-- `clutch-jdbc-agent-java-executable` is the Java executable that starts the agent (default `java`).
-- `clutch-jdbc-agent-jvm-args` lists extra JVM arguments, such as `"-Xmx256m"` to cap the heap; the default is `("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")`.
+- `clutch-jdbc-agent-java-executable`: Java binary (default `"java"`).
+- `clutch-jdbc-agent-jvm-args`: Extra JVM flags (default `("-Xss512k" "-Dpolyglot.engine.WarnInterpreterOnly=false")`).
 
-The agent keeps stdout exclusively for its JSON protocol and redirects third-party Java console output to captured stderr before loading drivers. Driver messages such as Snowflake external-browser login status therefore remain available to Clutch diagnostics without breaking the connection.
+The agent reserves stdout strictly for JSON protocol traffic and redirects driver `System.out` logs (such as Snowflake SSO messages) to stderr so Clutch diagnostics can capture them safely.
 
 ## Connection Examples
 
 ```emacs-lisp
 (setq clutch-connection-alist
-      '(;; Oracle (service name style)
+      '(;; Oracle (service name)
         ("prod-oracle" . (:backend oracle
                            :host "db.corp.com" :port 1521
-                           :database "ORCL"           ; service name or SID
+                           :database "ORCL"
                            :user "scott" :pass-entry "prod-oracle"
-                           :connect-timeout 8
-                           :read-idle-timeout 30
-                           :query-timeout 20
-                           :rpc-timeout 25))
+                           :connect-timeout 8 :read-idle-timeout 30
+                           :query-timeout 20 :rpc-timeout 25))
 
-        ;; Oracle (SID style — use :sid instead of :database)
+        ;; Oracle (SID)
         ("prod-oracle-sid" . (:backend oracle
                                :host "db.corp.com" :port 1521
                                :sid "ORCL"
                                :user "scott" :pass-entry "prod-oracle"))
 
-        ;; Microsoft SQL Server
+        ;; SQL Server
         ("prod-mssql" . (:backend sqlserver
                           :host "sqlserver.corp.com" :port 1433
                           :database "AdventureWorks"
                           :user "sa" :pass-entry "prod-mssql"
-                          :connect-timeout 8
-                          :query-timeout 15))
+                          :connect-timeout 8 :query-timeout 15))
 
-        ;; Amazon Redshift
+        ;; Redshift
         ("prod-redshift" . (:backend redshift
                              :host "cluster.abc123.us-east-1.redshift.amazonaws.com"
                              :port 5439 :database "analytics"
@@ -121,19 +81,17 @@ The agent keeps stdout exclusively for its JSON protocol and redirects third-par
 
         ;; Snowflake
         ("prod-snowflake" . (:backend snowflake
-                              :host "myorg-myaccount"  ; account identifier
+                              :host "myorg-myaccount"
                               :database "MYDB"
                               :user "myuser" :pass-entry "prod-snowflake"))
 
-        ;; ClickHouse (column-oriented OLAP, HTTP protocol on port 8123)
+        ;; ClickHouse
         ("clickhouse" . (:backend clickhouse
                           :host "ch.corp.com"
                           :database "default"
                           :user "default" :password ""))
 
-        ;; MongoDB SQL Interface.  :database becomes the required JDBC driver
-        ;; property; :auth-database/:auth-source, when present, becomes the
-        ;; optional MongoDB URL path used for authentication.
+        ;; MongoDB SQL Interface
         ("atlas-sql" . (:backend mongodb
                          :surface sql-interface
                          :host "cluster0.a.query.mongodb.net"
@@ -141,15 +99,13 @@ The agent keeps stdout exclusively for its JSON protocol and redirects third-par
                          :auth-database "admin"
                          :user "reporter" :pass-entry "atlas-sql"))
 
-        ;; DuckDB (file-backed local database through a generic JDBC URL)
+        ;; DuckDB (file-backed via generic JDBC)
         ("duckdb" . (:backend jdbc
                       :url "jdbc:duckdb:/path/to/analytics.duckdb"
                       :driver-class "org.duckdb.DuckDBDriver"
                       :display-name "DuckDB"))
 
-        ;; Generic JDBC (any database without a dedicated clutch backend)
-        ;; :backend selects clutch behavior and SQL dialect, not just the Java
-        ;; driver.  Use :backend jdbc only when no dedicated backend exists.
+        ;; Generic JDBC (for databases without a dedicated backend)
         ("kingbase" . (:backend jdbc
                         :url "jdbc:kingbase8://db.corp.com:54321/test"
                         :driver-class "com.kingbase8.Driver"
@@ -158,93 +114,65 @@ The agent keeps stdout exclusively for its JSON protocol and redirects third-par
                         :rpc-timeout 15))))
 ```
 
-JDBC connections use the same `:pass-entry` auth-source integration as other backends. See [Password Management](user-guide.md#password-management) for details.
+Credentials follow [Password Management](user-guide.md#password-management).
 
-## Snowflake-specific Notes
+## Database-Specific Notes
 
-Each logical Clutch JDBC connection owns two underlying Snowflake JDBC connections: a primary session for foreground SQL and a metadata session for schema and object introspection. Authentication happens per underlying connection, so an interactive authenticator such as `externalbrowser` can run twice during one logical connect (for example, by opening two browser SSO tabs); the same applies to per-connection MFA or push flows. This is expected behavior from the two-session runtime model, not an authentication retry.
+### Oracle
 
-If connection-token caching is permitted by your organization, an `ACCOUNTADMIN` can run `ALTER ACCOUNT SET ALLOW_ID_TOKEN = TRUE;` so Snowflake stores a connection token in the operating-system keystore and reuses it for subsequent connections while it remains valid. Consult your security team before enabling this account-level option. Snowflake JDBC connection caching also requires JNA on the agent classpath (JNA on macOS/Linux, plus JNA Platform on Windows), and Snowflake JDBC 3.12.18 and later no longer bundle those classes. Clutch's Snowflake installer currently downloads only the JDBC driver, so place the JNA jar or jars recommended for that driver version in the `drivers/` subdirectory of `clutch-jdbc-agent-dir` before connecting. See Snowflake's official [connection-caching](https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use#using-connection-caching-to-minimize-the-number-of-prompts-for-authentication-optional) and [JNA classpath](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-download#add-the-jna-classes-to-your-classpath) guidance.
+- **Driver choice:** Default `ojdbc8` works safely across 11g/12c/19c (avoids `ojdbc11` LOB bugs on 11g). Use `oracle-11` only if you are exclusively on 19c+.
+- **SID vs service name:** Use `:sid` for `@host:port:SID` and `:database` for `@//host:port/service`; mixing them up hangs on connect.
+- **Initial schema:** Defaults to the upper-cased username unless `:schema` is set (`:schema "\"Reports\""` preserves mixed case for SQL execution, though the agent's catalog lookup uses upper-case names).
+- **Fast completion & low-privilege accounts:** Completion uses prefix queries instead of blocking connect on a full schema scan, while a background refresh fills `C-c C-j` with current-schema tables/views, `user_synonyms`, and accessible `all_tables`/`all_views` (excluding system owners; `PUBLIC SYNONYM` dictionary views participate in completion without cluttering `C-c C-j`).
+- **Cancellation, pagination, dates, and CLOBs:** Cancellation runs in-band by default (set `:props (("oracle.net.disableOob" . "false"))` for OOB). Pagination uses `ROWNUM` subqueries (9i+ compatible). `DATE` preserves time whenever the driver returns `Timestamp`. CLOBs return up to 256 UTF-16 code units; previews shorter than the full length stay read-only to prevent data loss (complete short CLOBs edit normally).
 
-## ClickHouse-specific Notes
+### Cassandra
 
-For a `:url`, the database is the last `database` property, or otherwise the last path segment. Clutch decodes percent escapes once for browsing and metadata scope, so `a%5Fb` names `a_b` and `a%252Fb` names `a%2Fb`. As in the driver's URL decoder, `+` names a space; use `%2B` for a literal plus. `clutch-switch-schema` encodes the new database in the URL and keeps its HTTP path, other properties and tags.
+Download `cassandra-jdbc-wrapper-5.0.5-bundle.jar` from the [ING JDBC wrapper release](https://github.com/ing-bank/cassandra-jdbc-wrapper/releases/tag/v5.0.5) into the drivers directory (BLOB results need agent 0.2.29+):
 
-## DuckDB-specific Notes
+```emacs-lisp
+("cassandra-local" . (:backend cassandra
+                     :url "jdbc:cassandra://127.0.0.1:9042/my_keyspace?localdatacenter=datacenter1"))
+```
 
-`C-c C-l` / `clutch-switch-schema` lists schemas in DuckDB's current file-backed catalog and switches the primary JDBC session with `USE catalog.schema`. Clutch stores the raw catalog and schema names for the metadata scope and in the connection's parameters, and a connection whose parameters name them starts there with `USE`; SQL quoting is applied only when executing the switch. A reconnect does not return to an attached database or into an in-memory one, so moving into one leaves the parameters as they were, and the automatic reconnect from there refuses instead of starting in the URL's database. A relative URL file is resolved against the JDBC agent's directory, which Clutch does not know, so with one only an in-memory database is refused, and a move into an attached database reconnects to the URL's file as before.
+Set the initial keyspace in `:url` and qualify other keyspaces as `keyspace.table` (`USE` and schema switching are unavailable). Unbounded `SELECT` queries get an automatic CQL `LIMIT` (`clutch-jdbc-fetch-size` + 1, max 9999 rows) so the driver does not materialize entire tables; results are read-only previews without server-side pagination, staged editing, or DDL/comparison actions. Reconnect after DDL to refresh the driver's schema snapshot.
 
-Pure in-memory URLs and attached catalogs are not listed. An in-memory database and DuckDB `ATTACH` state are local to the primary JDBC session, while Clutch intentionally uses a separate JDBC metadata session. Until the sidecar has an explicit shared-session contract, use a file-backed database for the shared metadata workflow and query attached objects with qualified `catalog.schema.table` names.
+### Snowflake
 
-## Oracle-specific Notes
+Each logical Clutch connection opens two JDBC sessions (foreground + metadata), so interactive authenticators like `externalbrowser` or MFA can prompt twice per connect. To cache tokens, an `ACCOUNTADMIN` can enable `ALTER ACCOUNT SET ALLOW_ID_TOKEN = TRUE;` and you can drop the matching JNA jar(s) into `drivers/` (Snowflake JDBC 3.12.18+ no longer bundles JNA). See Snowflake's [connection-caching](https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use#using-connection-caching-to-minimize-the-number-of-prompts-for-authentication-optional) and [JNA classpath](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-download#add-the-jna-classes-to-your-classpath) docs.
 
-- Oracle Thin connections send cancellation in-band by default. Set `:props (("oracle.net.disableOob" . "false"))` to use TCP urgent data.
-- **Oracle driver default**: `clutch-jdbc-install-driver 'oracle` now installs `ojdbc8` by default. It is the safest choice across Oracle 11g/12c/19c and avoids the known 11g LOB compatibility problems seen with `ojdbc11`.
-- **Oracle 11g**: keep using `ojdbc8`. If `ojdbc11.jar` is present from an older setup, reinstall with `(clutch-jdbc-install-driver 'oracle)` to re-enable `ojdbc8.jar` and remove the conflicting `ojdbc11.jar` copy automatically.
-- **Oracle 19c+ only**: if you specifically want the newer driver line, install it with `(clutch-jdbc-install-driver 'oracle-11)`.
-- **SID vs service name**: use `:sid "MYSID"` for SID-style connections (`@host:port:SID`); use `:database "myservice"` for service name style (`@//host:port/service`). Mixing them up causes the connection to hang. When in doubt, check with your DBA or use `:url` with `:backend oracle` for full control.
-- A connection starts in the schema `:schema` names, or else in the user's own schema, the uppercase username (Oracle convention). `:schema` is read as Oracle reads an identifier: a name in double quotes, as in `:schema "\"Reports\""`, is taken as written, and any other is upper-cased. A schema Clutch records for the automatic reconnect is written so that it reads back as itself, and `clutch-switch-schema` takes the listed name as it is. The JDBC agent looks a schema's objects up by its upper-case name, so browsing and completion in a schema whose name needs double quotes show the objects of the upper-case schema of the same name, or none; statements run in the schema itself.
-- Oracle/JDBC completion does not rely on a full eager schema refresh. Table names and column names are resolved through Oracle-specific prefix lookups, so connect stays non-blocking and completion does not have to enumerate the whole schema up front.
-- For low-privilege Oracle accounts, table prompts / browse / schema refresh use the same business-object view: current-schema tables/views, `user_synonyms`, and accessible `all_tables` / `all_views` rows outside the current schema. This covers common "login user is empty, real objects live under another owner" setups.
-- Dictionary objects exposed only through `PUBLIC SYNONYM` (for example `USER_TABLES`) participate in completion, but they are not added to the schema cache / object discovery snapshot. That keeps Oracle system objects from flooding `C-c C-j` for ordinary query-console use.
-- The Oracle search path filters common system owners in SQL for both `get-tables` and `search-tables`, while still keeping `PUBLIC SYNONYM` dictionary objects available to completion.
-- After connect (and after schema-affecting DDL), Oracle/JDBC also starts a background full table refresh. Completion stays responsive because it keeps using the prefix fast path, while `C-c C-j` / the object discovery cache / the console's `schema~` state are backfilled from the same low-privilege-aware table snapshot once loading finishes.
-- Pagination uses `ROWNUM` subquery, compatible with all Oracle versions (9i+); result-buffer `M->` uses an explicit last-window offset generated on the Emacs side, not a separate sidecar protocol operation.
-- CJK character sets (e.g. ZHS16GBK) require `orai18n.jar` in addition to the active Oracle JDBC jar (`ojdbc8.jar` or `ojdbc11.jar`).
-- Oracle `DATE` columns include a time component. The agent calls `getObject()` and preserves time when the driver returns `java.sql.Timestamp`; a `java.sql.Date` is represented as a date. Driver return types determine this conversion; the agent does not force `getTimestamp()`.
+### ClickHouse
 
-CLOB results carry an original length and a preview capped at 256 UTF-16 code units. Clutch compares lengths in those same units, where an emoji outside the BMP counts as two units. A shorter preview remains incomplete: viewing labels it as a preview, while editing, cloning that field, and exporting it fail before any write. Complete short CLOBs, including emoji and empty text, can be used as ordinary text. Full CLOB streaming is not supported.
+For `:url` entries, Clutch reads the database from the last `database` property or path segment (decoding `%XX` escapes once and `+` as space; use `%2B` for literal `+`). `clutch-switch-schema` updates the URL and keeps its path and properties.
 
-## MongoDB SQL Interface Notes
+### DuckDB
 
-- `(:backend mongodb :surface sql-interface ...)` targets MongoDB SQL Interface through the official JDBC driver. Ordinary `mongod` / Atlas MongoDB support uses the same `mongodb` backend's default native document surface and does not require a JDBC jar.
-- The official driver requires a `database` JDBC property. Clutch fills that from the connection plist's `:database` value automatically.
-- Use `:url` for advanced connection strings copied from Atlas. Keep `:database` set as the query database unless you already pass `("database" . "...")` in `:props`.
-- `:auth-database` and `:auth-source` are accepted aliases for the optional MongoDB URL path/default auth database when using structured `:host` / `:port` connection plists.
-- Query pagination uses SQL Interface `LIMIT/OFFSET` syntax.
-- Clutch does not expose manual transaction controls for MongoDB JDBC connections.
-- Live ERT coverage is tagged `:sql-interface-mongodb-live` and requires a configured MongoDB SQL Interface endpoint. A local community `mongod` container is not enough because this backend talks to the SQL Interface JDBC surface. Use `mongodb` live coverage for ordinary local containers. Example:
-  ```sh
-  emacs -Q --batch -L . -L test -l ert -l clutch-db-test \
-    --eval '(setq clutch-db-test-sql-interface-mongodb-url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
-                  clutch-db-test-sql-interface-mongodb-database "analytics"
-                  clutch-db-test-sql-interface-mongodb-user "reporter"
-                  clutch-db-test-sql-interface-mongodb-password "secret")' \
-    --eval "(ert-run-tests-batch-and-exit '(tag :sql-interface-mongodb-live))"
-  ```
+`C-c C-l` lists and switches schemas inside the file-backed catalog via `USE catalog.schema`. In-memory databases and `ATTACH`ed catalogs stay local to the primary session and cannot be shared with the metadata session (or restored automatically on reconnect), so use qualified `catalog.schema.table` names for attached objects.
 
-## Staged Mutation Row Identity
+### MongoDB SQL Interface Notes
 
-- JDBC result-buffer staged `UPDATE` / `DELETE` workflows use row identity metadata in the same order as native backends: primary key first, then non-null unique keys discovered from index metadata. Oracle JDBC can also fall back to `ROWID` for confirmed base tables without a logical key. Other JDBC backends require a primary key or non-null unique key for editable results.
-- A schema-qualified source keeps its parsed schema for primary-key, unique-key, and Oracle `ROWID` metadata lookup. Staged `INSERT`, `UPDATE` and `DELETE` statements retain the same qualified source token instead of targeting the current schema's table with the same name.
-- Oracle views and synonyms are classified before primary-key, column, index, or `ROWID` metadata lookup. Dictionary relations such as `ALL_TABLES` and `USER_TABLES` therefore remain read-only without invoking unsafe identity probes.
-- Oracle `ROWID` is a physical row locator and can change after `UPDATE`; stable result order after refresh still requires an explicit SQL `ORDER BY`.
+Use `:backend mongodb :surface sql-interface` only for Atlas or Enterprise endpoints exposing `jdbc:mongodb://...` (ordinary `mongod` uses native `mongodb.el`; see [mongodb-backend.md](mongodb-backend.md)). Clutch passes `:database` as the required JDBC `database` property, maps `:auth-database`/`:auth-source` to the URL auth path, paginates with `LIMIT`/`OFFSET`, and omits manual transaction controls.
 
-## Statement Plans
+Live tests (`:sql-interface-mongodb-live`) require a real SQL Interface endpoint:
 
-`clutch-explain-plan` (`E` in the console menu) reads plans over JDBC when the connection's `:url` starts with `jdbc:postgresql:` or `jdbc:mysql:`, the same way as the native PostgreSQL and MySQL backends; see the [interactive guide](interactive-client.md). A `jdbc:mysql:` URL that reaches a MariaDB server fails with the server's syntax error, since MariaDB has no tree format. Other JDBC databases, including Oracle, SQL Server, DuckDB, ClickHouse and Redshift, report that plans are not available.
+```sh
+emacs -Q --batch -L . -L test -l ert -l clutch-db-test \
+  --eval '(setq clutch-db-test-sql-interface-mongodb-url "jdbc:mongodb://cluster0.a.query.mongodb.net/admin"
+                clutch-db-test-sql-interface-mongodb-database "analytics"
+                clutch-db-test-sql-interface-mongodb-user "reporter"
+                clutch-db-test-sql-interface-mongodb-password "secret")' \
+  --eval "(ert-run-tests-batch-and-exit '(tag :sql-interface-mongodb-live))"
+```
 
-## Transaction Control
+## Row Identity, Plans, and Transactions
 
-- Oracle JDBC connections use manual commit by default, matching DataGrip's safer query-console behavior.
-- Customize that default globally with `clutch-jdbc-oracle-manual-commit`, or override per connection with `:manual-commit t` / `:manual-commit nil`.
-- Use `C-c C-m` to commit and `C-c C-u` to roll back the current transaction from the Query Console, an attached Result Browser, or its Record view.
-- Use `C-c C-a` to toggle between manual-commit and auto-commit at any time. The toggle is blocked when there are uncommitted changes (matching DataGrip's behavior); commit or roll back first, then switch.
-- In Manual mode, `C-c C-c` wraps each staged Result Browser submission in a JDBC savepoint. A failed later statement rolls this submission back without discarding earlier user work in the outer transaction. Drivers that report no savepoint support fail before staged DML begins.
-- Native MySQL supports the same commands by toggling the session autocommit flag.
-- Native PostgreSQL supports the same commands through a clutch-managed manual mode with lazy `BEGIN`; transactional DDL counts as pending work there too.
-- The console header-line always shows the current commit mode: `Tx: Auto`, `Tx: Manual`, `Tx: Manual*` (uncommitted changes present), or `Tx: Uncertain` after failed batch recovery or any unknown commit outcome. Uncertain state blocks further queries, commit, and transaction-mode changes until rollback or reconnect. Recovery makes the session usable; it does not prove that an earlier uncertain commit failed, so retained work must be verified before retry.
-- Open DML result buffers show a status banner in their header-line after each transaction event:
-  - Commit: `✓ Transaction committed` (green)
-  - Rollback: `⚠ Transaction rolled back — changes not persisted` (orange)
-  - Disconnect: `✕ Connection closed` (grey)
-  <p>The banner clears automatically when the buffer is reused for a new query.</p>
-- Other JDBC backends stay in auto-commit mode by default; add `:manual-commit t` to a connection plist to opt in.
-- Oracle DDL (`CREATE=/=ALTER=/=DROP=/=TRUNCATE=/=RENAME`) auto-commits even in manual-commit mode, so `Tx: Manual*` may clear after DDL without an explicit `COMMIT`. `ALTER SESSION` and `ALTER SYSTEM` commit nothing and leave it as it is.
+- **Staged edits:** Row identity checks PK → non-null unique keys → `ROWID` on confirmed Oracle base tables (Oracle views/synonyms stay read-only). Schema-qualified queries keep their schema for both metadata lookup and DML generation.
+- **Query plans:** `clutch-explain-plan` (`E` in `C-c ?`) works over JDBC when `:url` starts with `jdbc:postgresql:` or `jdbc:mysql:` (except MariaDB, which lacks tree plans); other JDBC backends report plans unavailable.
+- **Transactions:** Oracle defaults to manual commit (`clutch-jdbc-oracle-manual-commit`, overridable per connection with `:manual-commit t/nil`); other JDBC backends default to auto-commit. Shared `C-c C-a`/`C-c C-m`/`C-c C-u` and savepoint behavior are described in [Control transactions](user-guide.md#4-control-transactions). Note that Oracle DDL (`CREATE`/`ALTER`/`DROP`/`TRUNCATE`/`RENAME`) auto-commits even in manual mode (`ALTER SESSION`/`ALTER SYSTEM` do not). Open DML result buffers show status banners (`✓ Transaction committed`, `⚠ Transaction rolled back — changes not persisted`, `✕ Connection closed`) until reused by the next query.
 
 ## Additional JDBC Connection Properties
 
-Pass arbitrary JDBC connection properties via `:props`:
+Pass arbitrary driver properties via `:props`:
 
 ```emacs-lisp
 ("mssql-encrypt" . (:backend sqlserver

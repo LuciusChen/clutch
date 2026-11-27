@@ -1,139 +1,93 @@
 # Native Backends
 
-`clutch` uses non-JDBC backends that do not require the JDBC sidecar:
+Clutch's non-JDBC backends run without the Java sidecar:
 
-- [`mysql`](https://github.com/LuciusChen/mysql.el) — external pure Emacs Lisp MySQL wire protocol client
-- [`pgsql.el`](https://github.com/LuciusChen/pgsql.el) — external pure Emacs Lisp PostgreSQL wire-protocol client
-- `clutch-db-sqlite.el` — SQLite adapter over Emacs 29.1+ built-in `sqlite-*`
-- `clutch-mongodb.el` over external `mongodb.el` — native MongoDB document adapter
-- `clutch-document.el` — document query-console layer for MongoDB native buffers
-- `clutch-redis.el` over external `redis.el` — native Redis key/value adapter and command buffers
+- [`mysql`](https://github.com/LuciusChen/mysql.el) — pure Elisp MySQL wire-protocol client
+- [`pgsql.el`](https://github.com/LuciusChen/pgsql.el) — pure Elisp PostgreSQL wire-protocol client
+- `clutch-db-sqlite.el` — SQLite adapter using Emacs 29.1+'s built-in `sqlite-*` functions
+- `clutch-mongodb.el` + `clutch-document.el` over `mongodb.el` — native MongoDB document backend
+- `clutch-redis.el` over `redis.el` — native Redis key/value backend and command buffers
 
-Use this document for backend-specific connection, protocol, TLS, timeout, and usage notes for the native backends.  The JDBC sidecar has its own document in [`docs/jdbc-agent-protocol.md`](./jdbc-agent-protocol.md).  Support levels are defined in [`docs/backend-support.md`](./backend-support.md).
+For JDBC backends, see [jdbc-backend.md](jdbc-backend.md) and [jdbc-agent-protocol.md](jdbc-agent-protocol.md). For support levels, see [backend-support.md](backend-support.md).
 
 ## MongoDB and Redis
 
-MongoDB backend details live in [`docs/mongodb-backend.md`](./mongodb-backend.md). Ordinary MongoDB uses the external `mongodb.el` native client by default; Clutch owns the adapter, query-buffer helper parsing, result-grid mapping, and SQL Interface surface selection. Protocol capability details are documented in the `mongodb.el` repository.
-
-MongoDB SQL Interface remains a `:surface sql-interface` JDBC path and requires the JDBC sidecar plus the MongoDB JDBC driver jar.
-
-Redis uses the external `redis.el` native RESP client.  Clutch owns the line-oriented Redis command buffers, key browsing, type-aware read commands, TTL/existence metadata, and result-grid mapping.  Redis is a basic key/value backend, not a document backend and not a SQL surface.
+See [mongodb-backend.md](mongodb-backend.md) for native MongoDB document consoles and `:surface sql-interface` (which uses JDBC). Redis connects via `redis.el` with line-oriented command buffers, bounded key browsing, and type-aware reads (see [backend-support.md](backend-support.md#redis)).
 
 ## SSH Tunnels and TRAMP
 
-SSH tunnels through `:ssh-host` and TRAMP origins through `:tramp-default-directory` work the same for every native backend that connects to a structured `:host` / `:port`; see [SSH tunnels](user-guide.md#ssh-tunnels-via-sshconfig) and [TRAMP-aware connection origin](user-guide.md#tramp-aware-connection-origin) in the user guide.
+`:ssh-host` and `:tramp-default-directory` work identically across all native TCP backends; see [SSH tunnels](user-guide.md#ssh-tunnels-via-sshconfig) and [TRAMP-aware connection origin](user-guide.md#tramp-aware-connection-origin).
 
-## MySQL (`mysql`)
+## MySQL (`:backend mysql`, `mysql.el`)
 
-### Scope
+### Capabilities
 
-- Pure Elisp implementation; no external CLI or client library
-- HandshakeV10 + HandshakeResponse41
-- `mysql_native_password` and `caching_sha2_password`
-- `COM_QUERY` text protocol
-- Prepared statements via `COM_STMT_PREPARE` / `COM_STMT_EXECUTE`
+- Pure Elisp (`HandshakeV10` / `HandshakeResponse41`, `COM_QUERY`, prepared statements)
+- `mysql_native_password` and `caching_sha2_password` authentication
 - TLS via Emacs GnuTLS
 
-### Connection Example
+### Standalone Example
 
 ```elisp
 (require 'mysql)
 
-(setq conn (mysql-connect :host "127.0.0.1"
-                               :port 3306
-                               :user "root"
-                               :password "secret"
-                               :database "mydb"))
+(let ((conn (mysql-connect :host "127.0.0.1"
+                           :port 3306
+                           :user "root"
+                           :password "secret"
+                           :database "mydb")))
+  (unwind-protect
+      (let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
+        (list (mysql-result-columns result)
+              (mysql-result-rows result)))
+    (mysql-disconnect conn)))
+```
 
-(let ((result (mysql-query conn "SELECT * FROM users LIMIT 10")))
-  (mysql-result-columns result)
-  (mysql-result-rows result))
+Prepared statements:
 
-(mysql-disconnect conn)
+```elisp
+(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
+  (unwind-protect
+      (mysql-result-rows (mysql-execute stmt 42))
+    (mysql-stmt-close stmt)))
 ```
 
 ### TLS
 
-When `:tls t` is used, certificate and hostname verification are enabled by default.  For MySQL, explicit `:ssl-mode disabled` is the canonical plaintext opt-out; `:tls nil` remains a shorthand.
+`:tls t` enables certificate and hostname verification by default (`mysql-tls-trustfiles`, `mysql-tls-verify-server`, `mysql-tls-keylist`). Pass `:ssl-mode disabled` (alias `off`) or `:tls nil` for plaintext and to skip automatic MySQL 8 TLS retries. For local MySQL 8 containers with self-signed certificates under `caching_sha2_password`, trust the CA or set `mysql-tls-verify-server` to `nil`.
 
-For MySQL only, `:ssl-mode disabled` is a compatibility spelling for that same plaintext mode.  The older alias `off` is still accepted.  Either spelling disables the automatic MySQL 8 TLS reconnect path.
+### Transactions in Clutch
 
-Relevant variables:
-
-- `mysql-tls-trustfiles`
-- `mysql-tls-verify-server`
-- `mysql-tls-keylist`
-
-For local MySQL 8 containers using `caching_sha2_password`, clutch may need TLS for authentication.  For self-signed local dev certificates, either trust the CA or set `mysql-tls-verify-server` to `nil` explicitly.
-
-### Convenience API
-
-- `with-mysql-connection`
-- `with-mysql-transaction`
-- `mysql-autocommit-p`
-- `mysql-in-transaction-p`
-- `mysql-set-autocommit`
-- `mysql-commit`
-- `mysql-rollback`
-- `mysql-ping`
-- `mysql-escape-identifier`
-- `mysql-escape-literal`
-- `mysql-connect-uri`
-
-### Transaction Control in clutch
-
-- `C-c C-a` toggles session autocommit with `SET autocommit = 0/1`
-- `C-c C-m` issues `COMMIT`
-- `C-c C-u` issues `ROLLBACK`
-- clutch header-line state (`Tx: Auto` / `Tx: Manual` / `Tx: Manual*`) follows those session semantics
-
-### Prepared Statements
-
-```elisp
-(let ((stmt (mysql-prepare conn "SELECT * FROM users WHERE id = ?")))
-  (let ((result (mysql-execute stmt 42)))
-    (mysql-result-rows result))
-  (mysql-stmt-close stmt))
-```
+`C-c C-a` toggles `SET autocommit = 0/1`, `C-c C-m` commits, and `C-c C-u` rolls back, reflected in the header line (`Tx: Auto` / `Tx: Manual` / `Tx: Manual*`).
 
 ## PostgreSQL (`:backend pg`, `pgsql.el`)
 
-### Scope
+### Capabilities
 
-- Pure Elisp PostgreSQL protocol v3 without `psql`, native libraries, or the JDBC sidecar
-- Clear-text, MD5, and SCRAM-SHA-256 authentication
-- TLS via Emacs GnuTLS
-- Simple-query and parameterized extended-query execution
-- OID-based decoding for scalar, temporal, JSON, `bytea`, and array values
-- Structured server errors, `ReadyForQuery` transaction state, and protocol-level cancellation
-- A result of a table that the query qualifies by its schema, as in `SELECT * FROM other.people`, takes its key and columns from that schema, whether or not it is on the search path; an unquoted name folds to lower case and a quoted one keeps its case, as PostgreSQL reads them
+- Pure Elisp PostgreSQL v3 protocol (clear-text, MD5, SCRAM-SHA-256, GnuTLS)
+- Simple and parameterized queries, OID-based decoding for scalars, dates/times, JSON, `bytea`, and arrays
+- `ReadyForQuery` transaction state, structured server errors, and protocol-level `CancelRequest`
+- Schema-qualified queries (such as `SELECT * FROM other.people`) resolve keys and columns from that schema even when it is off `search_path`, following PostgreSQL's quoting and case-folding rules
 
-### Connection Example
+### Standalone Example
 
 ```elisp
 (require 'pgsql)
 
-(setq conn (pgsql-connect :database "mydb"
-                          :user "postgres"
-                          :password "secret"
-                          :host "127.0.0.1"
-                          :port 5432
-                          :sslmode 'prefer))
-
-(let ((result (pgsql-exec conn "SELECT * FROM users LIMIT 10")))
-  (pgsql-result-columns result)
-  (pgsql-result-rows result))
-
-(pgsql-disconnect conn)
+(let ((conn (pgsql-connect :database "mydb"
+                           :user "postgres"
+                           :password "secret"
+                           :host "127.0.0.1"
+                           :port 5432
+                           :sslmode 'prefer)))
+  (unwind-protect
+      (let ((result (pgsql-exec conn "SELECT * FROM users LIMIT 10")))
+        (list (pgsql-result-columns result)
+              (pgsql-result-rows result)))
+    (pgsql-disconnect conn)))
 ```
 
-### TLS
-
-PostgreSQL connections accept `:sslmode` with `disable`, `prefer`, `require`, and `verify-full`.  Clutch also accepts `:tls t` and `:tls nil` as convenience shorthands for `require` and `disable`.
-
-`:sslmode require` encrypts the connection without requesting certificate or hostname verification.  `:sslmode verify-full` enables both certificate and hostname verification.  With `:sslmode prefer`, `pgsql.el` falls back to plaintext only when the server explicitly rejects PostgreSQL SSL negotiation; TLS handshake and certificate failures remain visible.
-
-### Parameterized Queries
+Parameterized queries use `(value . type-name)` pairs (`pgsql-null` for SQL NULL, `nil` for boolean false); see the [`pgsql.el` README](https://github.com/LuciusChen/pgsql.el) for the full API:
 
 ```elisp
 (pgsql-exec-params
@@ -145,59 +99,37 @@ PostgreSQL connections accept `:sslmode` with `disable`, `prefer`, `require`, an
        (cons (vector 1 pgsql-null 3) "int4[]")))
 ```
 
-Each parameter is a value/type pair. `pgsql-null` is SQL NULL, while Lisp `nil` is PostgreSQL boolean false. See the [`pgsql.el` README](https://github.com/LuciusChen/pgsql.el) for protocol usage and its public API; Clutch keeps the returned client opaque and owns the query-console, metadata, rendering, and manual-transaction workflow.
+### TLS
 
-PostgreSQL array text with explicit bounds, such as `[0:2]={1,2,3}`, is sent unchanged, so the server receives the requested lower bound. Result decoding normalizes arrays to Lisp vectors and therefore does not preserve explicit bound metadata; inspect bounds with `array_lower` when they matter instead of relying on an edit round trip through a result cell.
+`:sslmode` accepts `disable`, `prefer`, `require` (encrypted without verification), and `verify-full` (certificate + hostname verification). Clutch also maps `:tls t` / `:tls nil` to `require` / `disable`. Under `prefer`, plaintext fallback happens only if the server explicitly rejects SSL.
 
-A `timestamptz` is shown in Emacs's local time, without an offset. A `timestamptz` value that Clutch sends or previews without an offset, from a cell edit, the insert form or a key, gains the offset of Emacs's time zone at that time, so the server stores the time shown whatever its session time zone. During the hour that a change from daylight saving time repeats, a time is taken as standard time. Text inside a `timestamptz[]` array is sent as written.
+### Type Notes
 
-### Transaction Control in clutch
+- **Arrays with custom bounds** (e.g. `[0:2]={1,2,3}`): sent unchanged, but decoded to plain Lisp vectors without lower-bound metadata; inspect with `array_lower` if bounds matter.
+- **`timestamptz`**: displayed in Emacs's local time without an offset. Values edited or sent without an offset receive Emacs's local offset for that timestamp (during a repeated DST hour, standard time is used) so the server stores the displayed time regardless of session time zone. Text inside `timestamptz[]` arrays is sent as written.
 
-- PostgreSQL does not expose a session autocommit toggle like MySQL
-- In clutch, `C-c C-a` enables a clutch-managed manual mode
-- Manual mode uses lazy `BEGIN`: the first foreground statement opens the transaction
-- `C-c C-m` issues `COMMIT`; `C-c C-u` issues `ROLLBACK`
-- Transaction state comes directly from pgsql.el's latest PostgreSQL `ReadyForQuery` status
-- Transactional DDL also counts as uncommitted work, so `Tx: Manual*` remains accurate for native PostgreSQL
+### Transactions in Clutch
 
-### Interrupts and Timeouts
-
-- Native MySQL `C-g` uses a helper connection to issue `KILL QUERY` for the original connection id, then drains the interrupted response on the original socket so the same session remains usable.
-- `:query-timeout` maps to PostgreSQL `statement_timeout`.
-- `pgsql-cancel` sends a wire-protocol `CancelRequest` on an auxiliary socket, while the main query path drains through `ReadyForQuery`.
-- In clutch UI terms, `C-g` on native PostgreSQL uses that path, so a cancelled query keeps the same session usable for the next SQL.
-- Native SQLite does not currently provide the same recoverable interrupt path; clutch falls back to disconnect/reconnect semantics there.
+PostgreSQL has no session autocommit toggle, so `C-c C-a` enables a Clutch-managed manual mode that sends `BEGIN` lazily on the first foreground statement (transactional DDL counts as uncommitted work). `C-c C-m` commits, `C-c C-u` rolls back, and transaction state comes directly from `ReadyForQuery`.
 
 ## XTDB (`:backend xtdb`, `pgsql.el`)
 
-XTDB 2 speaks the PostgreSQL wire protocol, so this backend connects through `pgsql.el` with the PostgreSQL connection keys and reuses the PostgreSQL adapter.  It differs where XTDB does:
-
-- Every table is keyed by `_id`, which is the row identity for edits and deletes.  `_id` names a row's current version, so a query of past versions, with `FOR SYSTEM_TIME`, `FOR VALID_TIME` or `SETTING`, is read-only.
-- Column types come from `information_schema.columns`, where XTDB reports its own names such as `:utf8`, `:i64` or `[:? :date :day]`.  Clutch maps them to the PostgreSQL types that XTDB parameters accept and sends each staged value with its column's type, because XTDB requires typed parameters in DML and stores a value with the type it is sent as.  XTDB reports a result column as `json` when PostgreSQL has no type for it, as for a `time` or a union, so Clutch takes the type of such a column from these details.  A column of several number types, such as `[:union :i64 :f64]`, sends each value as a member that holds it: an integer as an integer type whose range holds it, and otherwise as the decimal type, which keeps every digit, before a float, which rounds.  The column's members stay numbers, so it stays editable, though a decimal may add another decimal type, since XTDB types each by its digits.  XTDB keeps every type a column has held, even after its values change back or their rows are erased, so older tables often have such columns.  A column whose type otherwise maps to no single PostgreSQL type, such as a union of an integer and a string or a list, has no parameter type, and XTDB refuses a staged value for it; change such a column with SQL.
-- XTDB refuses a `timestamptz` value without a UTC offset.  Clutch sends the offset of Emacs's time zone, as on PostgreSQL, and XTDB keeps a value's offset as part of its type, so a column whose values have another offset, such as `Z`, then holds both offsets; the times are unchanged, and the column still reads and edits as `timestamptz`.
-- `_system_from`, `_system_to`, `_valid_from` and `_valid_to` are generated, since XTDB refuses to update them, and any column but `_id` may be left out of an inserted row.  An `INSERT` may set `_valid_from` and `_valid_to`, as the insert form of a result that selects them does.
-- XTDB has no savepoints, so staged changes are submitted in Auto mode; Manual mode refuses them.
-- XTDB cannot mix queries and DML in one transaction. In Manual mode, normal reads stay outside a transaction and the first DML, or an `ASSERT`, which guards the writes after it, opens `BEGIN READ WRITE`; commit or rollback ends it. Background metadata waits for any transaction to end. For a read snapshot, explicitly use `BEGIN READ ONLY` and end it before DML; Clutch never commits, rolls back or replays a transaction to change its type.
-- `ERASE` removes rows with their history.  Clutch asks once before running it, as before a `DELETE`: with the high-risk confirmation when its `WHERE` is missing or always true, and with the ordinary one otherwise.  It counts as an uncommitted change in Manual mode.
-- XTDB reports zero affected rows for every `INSERT`, `UPDATE` and `DELETE`, so Clutch cannot check that a staged `UPDATE` or `DELETE` changed exactly one row, as it does elsewhere.  `_id` is unique, so it matches at most one.
-- XTDB has no table or column comments, and no indexes, sequences, views, routines or triggers, so the object browser lists tables only.
-- XTDB keeps its current schema at `public`, so switching schemas is not available, and a connection that sets `:schema` is refused.
+XTDB 2 speaks the PostgreSQL wire protocol, so Clutch connects via `pgsql.el` and reuses the PostgreSQL adapter with XTDB-specific adjustments:
 
 ```elisp
 ("xt" . (:backend xtdb :host "127.0.0.1" :port 5432
          :user "xtdb" :database "xtdb"))
 ```
 
-## SQLite
+- **Row identity & temporal queries:** Every table is keyed by `_id`. Queries of past versions (`FOR SYSTEM_TIME`, `FOR VALID_TIME`, `SETTING`) stay read-only.
+- **Typed DML & union columns:** Clutch reads XTDB types from `information_schema.columns` (`:utf8`, `:i64`, etc.) and sends typed parameters in DML. Numeric union columns (e.g. `[:union :i64 :f64]`) stay editable by matching each value to a fitting integer, decimal, or float member; mixed non-numeric unions cannot map to one PostgreSQL parameter type and must be updated with SQL.
+- **`timestamptz` & system columns:** Clutch attaches Emacs's local UTC offset (XTDB rejects offset-less `timestamptz` and keeps each value's offset as part of its column type). `_system_from`, `_system_to`, `_valid_from`, and `_valid_to` are treated as generated (though `INSERT` can set `_valid_from`/`_valid_to`), and every column except `_id` is optional on insert.
+- **Transactions & `ERASE`:** XTDB has no savepoints, so staged edits submit in Auto mode only. Because XTDB cannot mix reads and writes in one transaction, Manual mode keeps plain reads outside a transaction and opens `BEGIN READ WRITE` on the first DML or `ASSERT` (use `BEGIN READ ONLY` explicitly for a read snapshot). `ERASE` asks for confirmation like `DELETE` and counts as uncommitted work in Manual mode. XTDB reports 0 affected rows for all DML, so Clutch cannot verify exact affected-row counts (`_id` is unique).
+- **Schema & objects:** Only tables are listed (no comments, indexes, views, sequences, routines, or triggers). Schema stays `public`; `:schema` and schema switching are unavailable.
 
-### Scope
+## SQLite (`:backend sqlite`)
 
-- Uses Emacs 29.1+ built-in `sqlite-*` functions
-- No network stack, no TLS, no sidecar process
-- Connection identity is the database file path
-- Clutch treats the database path as a local file opened by the Emacs process
-
-### Connection Example
+Uses Emacs 29.1+'s built-in `sqlite-*` functions directly on a local file, with no network stack, TLS, sidecar, or timeouts (`:host`, `:port`, `:user`, `:ssh-host`, `:tramp-default-directory`, and schema switching do not apply).
 
 ```elisp
 (setq clutch-connection-alist
@@ -205,47 +137,19 @@ XTDB 2 speaks the PostgreSQL wire protocol, so this backend connects through `pg
                           :database "/tmp/demo.db"))))
 ```
 
-### Notes
-
-- SQLite does not use `:host`, `:port`, or `:user`
-- Network timeout settings do not apply
-- `:ssh-host` and `:tramp-default-directory` do not apply to SQLite; those transports forward structured TCP endpoints, while SQLite opens a file
-- Schema/database switching is not part of the SQLite path
-- A result of a table in an attached database, as in `SELECT * FROM aux.people`, takes its key and columns from that database
+Tables queried from attached databases (such as `SELECT * FROM aux.people`) take their keys and columns from that attached database.
 
 ## Shared Native-Backend Notes
 
-### Timeouts
+### Timeouts and Interrupts
 
-- MySQL supports `:connect-timeout` and `:read-idle-timeout`
-- On native MySQL query read-idle timeout, Clutch tries to cancel and drain the server query; if the protocol stream cannot be resynchronized, the connection is closed and the next query reconnects. With a mysql.el that provides `mysql-query-async` the statements you run do not block and have no idle timeout; metadata queries still do
-- PostgreSQL supports `:connect-timeout`, `:read-idle-timeout`, and `:query-timeout`
-- SQLite does not use the network timeout parameters
+- MySQL accepts `:connect-timeout` and `:read-idle-timeout`. On synchronous read-idle timeout or `C-g`, Clutch sends `KILL QUERY` on a helper connection and drains the original socket (closing it if resync fails). With `mysql-query-async`, foreground statements do not block and have no idle timeout (metadata queries still do).
+- PostgreSQL accepts `:connect-timeout`, `:read-idle-timeout`, and `:query-timeout` (mapped to `statement_timeout`). `C-g` calls `pgsql-cancel` (`CancelRequest` on an auxiliary socket) and drains through `ReadyForQuery` so the session stays usable.
+- SQLite falls back to disconnect/reconnect on interrupt.
 
-### Completion and Schema Refresh
+### Metadata, Completion, and DML
 
-- Native backends integrate directly with clutch schema refresh and completion
-- MySQL and PostgreSQL defer the initial schema snapshot until Emacs has been idle after connect/reconnect; SQLite keeps its synchronous in-process path
-- Schema/database switch prompts remain synchronous, but the post-switch schema snapshot refresh runs as deferred idle work
-- Completion and Eldoc remain statement-scoped where possible, but native MySQL/PostgreSQL hot paths are cache-first and schedule idle-time metadata preheat on cache miss instead of blocking point motion or CAPF
-- Result buffers render first and then opportunistically enrich cached column details in the background; explicit detail commands still load synchronously
-- Object warmup keeps non-table categories off the first-open path and fills them lazily during idle time
-- Native MySQL/PostgreSQL deferred metadata stays on the Emacs main thread via idle callbacks rather than using worker threads
-- Native MySQL and PostgreSQL both support clutch transaction toggling (`C-c C-a` / `C-c C-m` / `C-c C-u`), while SQLite still has no native runtime auto-commit toggle
-
-### Parameterized DML
-
-- clutch preview buffers still show fully rendered SQL text for readability
-- Native MySQL/PostgreSQL/SQLite and JDBC staged `INSERT` / `UPDATE` / `DELETE` execute through backend parameter binding instead of literal SQL interpolation
-- Staged `UPDATE` / `DELETE` use row identity metadata rather than requiring a primary key in every table: primary keys are preferred, non-null unique keys are used next, PostgreSQL can fall back to `ctid`, and SQLite rowid tables can fall back to `rowid`
-- Physical row locators such as PostgreSQL `ctid` and SQLite `rowid` identify the current row version only.  They may change after `UPDATE`, and result refresh ordering remains defined only by the query's explicit `ORDER BY`
-- JDBC sends bound values through the sidecar's `execute-params` operation
-
-### UI Layer
-
-The interactive object workflow is shared across native and JDBC backends:
-
-- `C-c C-j` — jump to object
-- `C-c C-d` — describe object at point, or prompt with the shared object picker
-- `C-c C-o` — object actions
-- `C-c C-l` — switch current schema/database when supported
+- MySQL and PostgreSQL defer initial schema snapshots and non-table object warmup until Emacs is idle, and keep completion/Eldoc cache-first so point motion is never blocked.
+- Staged `INSERT`/`UPDATE`/`DELETE` run through backend parameter binding (while confirmation previews render readable SQL literals).
+- Row identity falls back in order: primary key → non-null unique key → `ctid` (PostgreSQL) or `rowid` (SQLite). Physical locators can change after `UPDATE`, so add `ORDER BY` when row order matters.
+- Object shortcuts (`C-c C-j`, `C-c C-d`, `C-c C-o`, `C-c C-l`) work identically across native and JDBC backends.

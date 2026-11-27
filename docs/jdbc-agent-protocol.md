@@ -1,37 +1,22 @@
 # JDBC Agent Protocol
 
-This document describes the wire protocol and runtime model used by `clutch-db-jdbc.el` and [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent).
-
-It is intentionally narrower than the user-facing JDBC section in `README.md`. `README.md` explains how to install and use the JDBC backend; this file documents how the Elisp side and JVM sidecar talk to each other.
+Wire protocol and session model between `clutch-db-jdbc.el` and [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent). For installation and user configuration, see [jdbc-backend.md](jdbc-backend.md).
 
 ## Runtime model
 
-`clutch` launches [`clutch-jdbc-agent`](https://github.com/LuciusChen/clutch-jdbc-agent) as a local JVM sidecar process and communicates with it over stdin/stdout using one JSON object per line.
+Clutch runs `clutch-jdbc-agent` as a local JVM sidecar (Java 17+) and exchanges one JSON object per line over stdin/stdout. Before loading third-party drivers, the agent saves the raw stdout handle for JSON replies and redirects Java's `System.out` to UTF-8 stderr so driver console output never corrupts framing while still appearing in Clutch diagnostics.
 
-Each logical JDBC connection in clutch maps to one logical session in the agent.  That session owns two JDBC connections, and on Oracle a third:
+Each logical JDBC connection owns two underlying JDBC sessions, plus a third on Oracle:
 
-- `primary`: foreground SQL execution, DML, DDL, transactions
+- `primary`: foreground SQL, DML, DDL, and transactions
 - `metadata`: schema and object introspection
-- `bulk` (Oracle only, opened on first use): the schema-wide listings — `get-tables`, `get-sequences`, `get-procedures`, `get-functions`, and `get-indexes` or `get-triggers` without a `table` — which other products run on `metadata`
+- `bulk` (Oracle only, opened lazily): schema-wide listings (`get-tables`, `get-sequences`, `get-procedures`, `get-functions`, and table-less `get-indexes` / `get-triggers`)
 
-Separate sessions let SQL and metadata proceed independently. On Oracle, a long schema-wide listing on the bulk session leaves interactive lookups such as primary-key discovery free to use the metadata session. If Oracle rejects the extra logon because of a session limit (for example `ORA-02391`), the agent uses the metadata session for schema-wide listings until the logical connection closes.
+Keeping sessions separate lets foreground SQL and metadata run independently, and on Oracle prevents long schema-wide listings from blocking interactive lookups like primary-key discovery (if Oracle rejects the extra logon, e.g. `ORA-02391`, schema-wide listings fall back to `metadata`).
 
-A lookup or listing that fails because its metadata or bulk session is unusable (for example, Oracle reports `ORA-12592`) is retried once on a replacement session with the remembered schema. If the retry also invalidates its session, the next request gets a fresh one. Cursors keep fetching on the session that opened them. If that session fails during a metadata fetch, the agent invalidates it and its cursors, and the listing must start again. These recovery paths leave the primary session and its transaction alone.
-
-The agent's `set-current-schema` operation, currently used by Oracle, updates the primary and metadata sessions together so one logical Clutch connection still presents one effective schema, and drops the bulk session (ending any listing still paging on it), which the next listing reopens with the remembered schema.  Product-specific namespace paths remain explicit: DuckDB and SQL Server scope metadata to the namespace reported by the primary session after `USE`. ClickHouse reconnects with a different database. SQL Server can return the initial database in the connect result’s `catalog` field. When advertised this way, foreground responses carry the driver’s current `catalog` at the top level, including fetches and errors. With older agents Clutch reads back `DB_NAME()` after a possible `USE`.
-
-The stdin reader submits decoded requests to a pool. The dispatcher serializes operations on each JDBC session with separate foreground, metadata and bulk locks. Schema changes and normal disconnect acquire all applicable locks in that order.
-
-`cancel` and `force-disconnect` bypass the per-connection locks. `cancel` can stop a matching queued execute request before it starts or request JDBC interruption of a running `Statement` outside the execution thread. `force-disconnect` retires the logical connection without waiting for the blocked JDBC operation or physical close.
-
-## Transport
-
-- Request transport: stdin
-- Response transport: stdout
-- Format: one complete JSON object per line
-- Process stderr: startup failures, JVM/agent diagnostics, and quarantined third-party Java console output
-
-The agent emits an initial ready response on startup before normal RPC traffic begins. Before loading any third-party driver code, the agent retains a dedicated operating-system stdout handle for protocol responses and redirects Java's global `System.out` to UTF-8 stderr. This keeps unconditional driver messages, including Snowflake external-browser login status, out of the JSON stream while preserving them in Clutch's captured diagnostics.
+- **Session recovery:** If a `metadata` or `bulk` session fails (e.g. `ORA-12592`), a lookup retries once on a replacement session with the remembered schema, leaving `primary` and its transaction untouched. Open cursors stay pinned to the session that opened them; if it fails mid-fetch, the cursor is invalidated and the listing must restart.
+- **Namespace updates:** `set-current-schema` (Oracle) updates `primary` and `metadata` together and drops `bulk` so the next listing reopens in the new schema. DuckDB and SQL Server scope metadata to the namespace reported by `primary` after `USE`; SQL Server can advertise its current `catalog` in connect and foreground replies (older agents fall back to `DB_NAME()`). ClickHouse reconnects on database switch.
+- **Locking & bypass:** Requests enter a thread pool and serialize per session under separate `primary`, `metadata`, and `bulk` locks (acquired in that order for schema changes and normal disconnect). `cancel` and `force-disconnect` bypass these locks to interrupt queued/running statements or drop a hung session immediately.
 
 ## Message shape
 
@@ -41,275 +26,71 @@ Requests:
 {"id":1,"op":"connect","params":{"url":"jdbc:oracle:thin:@//db:1521/FREEPDB1","driver-class":"oracle.jdbc.OracleDriver","user":"system","password":"secret"}}
 ```
 
-Success responses:
+Success response:
 
 ```json
 {"id":1,"ok":true,"result":{"conn-id":7}}
 ```
 
-Error responses:
+Error response (optional `diag`, plus `debug` only when `params.debug=true`):
 
 ```json
 {"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1,"context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1"}}}
 ```
 
-Error responses with opt-in debug payload:
-
 ```json
 {"id":1,"ok":false,"error":"connect failed","diag":{"category":"connect","op":"connect","request-id":1},"debug":{"thread":"clutch-jdbc-request","request-context":{"redacted-url":"jdbc:oracle:thin:@//db:1521/FREEPDB1?password=<redacted>","user":"system","property-keys":["oracle.net.wallet_location"]},"stack-trace":"java.sql.SQLException: connect failed\n..."}}
 ```
 
-Rules:
-
-- `id` is client-generated and matched exactly in the response
-- `op` is a string RPC name
-- `params` is an object whose fields depend on the operation
-- `connect` requests must include `params.driver-class`, the concrete `java.sql.Driver` implementation class to use for that connection
-- `params.debug=true` opts into an additional redacted `debug` payload on failures; normal requests should leave it unset
-- `ok=true` carries a `result` object
-- `ok=false` carries an `error` string
-- `ok=false` may also carry a `diag` object with structured troubleshooting data
-- `ok=false` may also carry a `debug` object with redacted verbose debugging data when the request explicitly asked for it
-- `diag.context` may include `generated-sql` when the failing operation ran hidden/internal SQL rather than user-authored SQL
+- `id` is client-generated and echoed back verbatim; `op` names the RPC; `params` holds operation arguments (`connect` requires `driver-class`).
+- `ok=true` carries `result`. `ok=false` carries a short user-facing `error`, optional structured `diag` (including `diag.context.generated-sql` when internal SQL fails), and optional redacted `debug` only when requested via `params.debug=true`.
 
 ## Core operations
 
-Connection lifecycle:
+- **Connection & transactions:** `connect`, `disconnect`, `force-disconnect`, `ping`, `commit`, `rollback`, `set-auto-commit`, `create-savepoint`, `rollback-savepoint`, `release-savepoint`, `set-current-schema`
+- **Execution & cursors:** `cancel`, `execute`, `execute-params`, `fetch`, `close-cursor`
+- **Metadata:** `get-schemas`, `get-tables`, `search-tables`, `get-columns`, `search-columns`, `describe-source-columns` (SQL Server, advertised at connect), `get-primary-keys`, `get-foreign-keys`, `get-referencing-keys` (agent 0.2.28+), `get-indexes`, `get-index-columns`, `get-sequences`, `get-procedures`, `get-functions`, `get-procedure-params`, `get-function-params`, `get-triggers`, `get-object-source`, `get-object-ddl`, `get-referencing-objects`
 
-- `connect`
-- `disconnect`
-- `force-disconnect`
-- `ping`
-- `commit`
-- `rollback`
-- `set-auto-commit`
-- `create-savepoint`
-- `rollback-savepoint`
-- `release-savepoint`
-- `set-current-schema` (currently used by Oracle to update both JDBC sessions)
+## Connection and execution semantics
 
-Execution and cursor flow:
+### Connect & idle validation
 
-- `cancel`
-- `execute`
-- `execute-params`
-- `fetch`
-- `close-cursor`
+`connect` accepts `url`, `driver-class`, `user`, `password`, `props`, `connect-timeout-seconds`, `network-timeout-seconds` (metadata/bulk sessions only; primary has no socket timeout), `auto-commit`, and `validate-after-idle-seconds`. It returns `conn-id`, scoped to the current agent process (Clutch validates the owning process before sending requests so restarted agents never collide on reused IDs).
 
-Schema and object metadata:
+When `validate-after-idle-seconds` is positive, an idle primary session runs `Connection.isValid(3)` right before `execute`/`execute-params` creates a statement (metadata traffic does not reset primary idle time); idle metadata/bulk sessions run the same check before metadata requests and are replaced automatically if dead.
 
-- `get-schemas`
-- `get-tables`
-- `search-tables`
-- `get-columns`
-- `search-columns`
-- `describe-source-columns` when advertised by SQL Server connections
-- `get-primary-keys`
-- `get-foreign-keys`
-- `get-referencing-keys` (agent 0.2.28+)
-- `get-indexes`
-- `get-index-columns`
-- `get-sequences`
-- `get-procedures`
-- `get-functions`
-- `get-procedure-params`
-- `get-function-params`
-- `get-triggers`
-- `get-object-source`
-- `get-object-ddl`
-- `get-referencing-objects`
+### Savepoints
 
-Not every backend implements every metadata operation.  On the Elisp side, unsupported capabilities are represented by normal feature fallbacks rather than a separate protocol version.
+`create-savepoint` (rejecting auto-commit sessions and checking `supportsSavepoints()`), `rollback-savepoint`, and `release-savepoint` expose opaque `savepoint-id` handles so SQL savepoint syntax stays out of Elisp. Commit, rollback, auto-commit changes, and disconnect invalidate handles.
 
-## Connection semantics
+### Cancel
 
-`connect` accepts:
+`cancel` takes `conn-id` and optional `request-id` (agent 0.2.31+ can cancel queued statements before execution starts; omitting it targets only a running statement). It returns `conn-id`, `request-id` (if accepted), and `cancelled` (`true`/`false`). A statement stopped at entry returns diagnostic category `cancel`; for a running statement, the original reply reports the real outcome.
 
-- `url`
-- `driver-class`
-- `user`
-- `password`
-- `props`
-- `connect-timeout-seconds`
-- `network-timeout-seconds`
-- `auto-commit`
-- `validate-after-idle-seconds`
+### Execute, binary parameters, and cursors
 
-`auto-commit=false` is how clutch requests manual-commit mode for the primary session.  The metadata session stays read-only/autocommit-oriented.  `network-timeout-seconds` applies to the metadata and bulk sessions only; the primary session, which runs user statements, has no network timeout.
+`execute` takes `conn-id`, `sql`, `fetch-size` (1–10,000, default 500), and `query-timeout-seconds`; `execute-params` adds `values`. `fetch` takes `cursor-id`, `fetch-size`, and `query-timeout-seconds`; `close-cursor` takes `cursor-id`.
 
-`validate-after-idle-seconds` is a non-negative integer. Zero or omission disables idle validation. When enabled, elapsed wall-clock idle time only triggers a standard `Connection.isValid(3)` check immediately before `execute` or `execute-params` creates or prepares a statement; metadata traffic does not reset the primary activity timestamp. A metadata request on a metadata or bulk session idle that long is preceded by the same check, and a session that fails it is replaced before the request runs, as after a connection failure. A driver that lacks the optional validation method can still use an open session. A NAT or firewall that drops an idle connection leaves its socket silent, so without the check a metadata request would wait out `network-timeout-seconds` and a statement would hang until its query timeout or a cancel; for a request it waits on, clutch, whose request timeout is no longer, would retire the whole logical connection first.
+- **Query timeout:** Positive `query-timeout-seconds` calls `Statement.setQueryTimeout` and gives the agent +1s grace before cancelling; `0` means no limit (agents before 0.2.26 treat `0` like omission, which defaults to 29s); negative values are rejected. Async foreground queries pass the configured limit (or `0`); blocking requests always carry a positive timeout capped at `rpc-timeout - 5s` (min 1s).
+- **Warnings:** `execute` / `execute-params` replies include `messages` (up to 100 `SQLWarning` entries oldest-first, plus a summary count if more exist).
+- **Binary parameter envelope:** Binary values in `execute-params` use `{"__clutch_jdbc_param":"binary","jdbc-type":"BLOB","base64":"..."}`. `base64: null` binds a typed SQL `NULL`; `""` binds a zero-byte `Blob`; non-empty BLOBs bind via `setBinaryStream` with exact length; RAW/BINARY types bind via `setBytes`. Malformed envelopes fail before execution.
+- **BLOB/CLOB results:** Agent 0.2.30+ includes up to 256 leading bytes in `preview-base64` on `__type: "blob"` values (`length` always gives total bytes; JDBC `Blob` locators >64 KiB omit bytes to avoid extra reads; `ByteBuffer` reads from its current position without advancing it). Previews without complete decoded `text` stay read-only in Clutch, as do CLOBs whose 256 UTF-16-unit preview is shorter than their reported length.
 
-The connect response returns:
+## Metadata payloads
 
-- `conn-id`
-
-Connection-scoped operations use that `conn-id`.  Cursor operations use the `cursor-id` returned by execution, while `ping` checks the agent process itself.
-
-These ids belong to one agent process, not to a persistent connection identity. Clutch validates the originating process and registered owner before sending connection-scoped requests. A handle retained across an agent restart cannot operate on, cancel, or disconnect a new connection that reuses its numeric id.
-
-Savepoint operations translate the standard JDBC `Connection` API without embedding SQL dialects in the Elisp client:
-
-- `create-savepoint` accepts `conn-id` and returns an opaque `savepoint-id`. It rejects auto-commit sessions and checks `DatabaseMetaData.supportsSavepoints()` before creating the savepoint.
-- `rollback-savepoint` accepts both ids, rolls back to that savepoint, and releases it.
-- `release-savepoint` accepts both ids and releases the savepoint after successful work.
-
-Successful commit, rollback, an auto-commit transition, and disconnect invalidate savepoint handles. Unknown or stale handles fail explicitly. Clutch uses these primitives to keep one Manual-mode staged submission atomic inside the user's outer transaction; statement order and staged state remain Elisp-owned.
-
-`cancel` accepts:
-
-- `conn-id`
-- `request-id` (optional target, supported since agent 0.2.31). A matching `execute` or `execute-params` can be cancelled as soon as the agent reads it. Omitting the field only targets a running statement for the connection. Older agents ignore this field and only target a running statement.
-
-Its success response returns:
-
-- `conn-id`
-- `request-id` when the agent accepted the cancellation
-- `cancelled` (`true` when the agent stopped a request before execution or asked a JDBC driver to interrupt it, `false` when there was no match)
-
-An execute stopped at entry by a cancel returns a diagnostic with category `cancel`. A connection validation failure can still be reported before that point, and Clutch does not retry SQL the user asked to cancel. For a running statement, the original response reports the outcome because the driver can accept the interruption request after the SQL has finished. The Elisp side matches replies by id and discards replies to requests it has stopped waiting for.
-
-Clutch normally fetches until the agent replies with `done=true` and closes the cursor. Clutch sends `close-cursor` with the `cursor-id` when it stops at a bounded Cassandra preview or tries to release a cursor after a continuation error.
-
-`execute` accepts:
-
-- `conn-id`
-- `sql`
-- `fetch-size`
-- `query-timeout-seconds`
-
-`execute-params` accepts the same fields plus:
-
-- `values`, an array of values bound to the statement placeholders
-
-Ordinary values keep their existing prepared-binding behavior. A binary value uses the reserved envelope `{"__clutch_jdbc_param":"binary","jdbc-type":"BLOB","base64":"eyJzdGF0dXMiOiJyZWFkeSJ9"}`. The marker must be exactly `binary`; maps without that marker remain ordinary structured values.
-
-Binary-envelope fields have exact semantics:
-
-- `jdbc-type` is the declared JDBC type retained from result or schema metadata.
-- `base64` is the base64 encoding of the exact bytes; `""` means a non-null zero-byte value.
-- A JSON `null` `base64` means a typed SQL `NULL`, not an empty value.
-- Non-empty BLOB types bind through length-bearing `PreparedStatement.setBinaryStream`; a non-null zero-byte BLOB uses an explicitly managed empty `Blob`; RAW/BINARY-family types bind through `setBytes`; typed nulls use the corresponding JDBC null type.
-- A malformed envelope, invalid base64, or unsupported binary type fails protocol validation before JDBC execution.
-
-The envelope is deliberately limited to binary parameters. Clutch does not send type tags for ordinary values, and the agent does not claim a portable general-purpose JDBC type system. When a text-like BLOB result reports an encoding, Clutch retains that encoding across editing and converts the edited text back to those bytes; new text without source encoding uses UTF-8.
-
-Result values are separate from the parameter envelope. Since agent 0.2.30, the result can include `preview-base64` on a `__type: "blob"` result. It encodes up to 256 leading bytes, with `length` always reporting the original byte count. For a JDBC `Blob` locator larger than 64 KiB, the agent returns only the length to avoid additional reads. For large values already returned by the driver as `byte[]` or `ByteBuffer`, the agent still includes the prefix. For a JDBC `ByteBuffer`, supported since agent 0.2.29, the leading bytes are relative to its position and the position is preserved. The driver's own materialization of a result value is outside this bound.
-
-Clutch converts BLOB results without decoded `text` to an incomplete value preview, including when the field is absent on an older agent. These previews cannot be copied, exported or used for mutations as complete values. Complete decoded JSON/XML text and its encoding remain usable and can carry an exact byte prefix for the viewer. A CLOB preview shorter than its reported JDBC UTF-16 length remains incomplete.
-
-`fetch` accepts:
-
-- `cursor-id`
-- `fetch-size`
-- `query-timeout-seconds`
-
-`close-cursor` accepts:
-
-- `cursor-id`
-
-For `execute`, `execute-params`, and `fetch`, `fetch-size` is an integer from 1 through 10,000 and defaults to 500.  Invalid values are rejected before JDBC work or cursor advancement. Clutch keeps the foreground connection busy until all result batches arrive. Each asynchronous foreground `fetch` retains a positive query timeout and a client RPC deadline. A lost fetch reply retires only its own connection.
-
-`query-timeout-seconds` limits the statement through `Statement.setQueryTimeout`, and the agent waits one second longer for the statement and for each batch it fetches before cancelling it itself.  `0` sets no limit: the agent waits until the statement ends, is cancelled, or its connection is force-disconnected.  Omitting the field keeps a 29-second limit for older clients, and a negative value is rejected before JDBC work or cursor advancement.  Agents before 0.2.26 treat `0` like omission.  clutch sends a statement it runs without blocking the configured limit, or `0` without one; a request it waits on always carries a positive timeout: the configured limit when shorter, otherwise its RPC timeout less five seconds, and at least one second.
-
-An `execute` or `execute-params` result also carries `messages` when the driver attached warnings to the statement while it ran: the text of its `SQLWarning` chain, oldest first, such as SQL Server `PRINT` output or PostgreSQL notices. Warnings attached later, to a following result or while fetching, are not read. At most 100 are sent, followed by one message counting the rest. A failure to read the chain becomes one message, since the statement itself succeeded. Older agents omit the field.
-
-## Table metadata payload
-
-`get-tables` returns a cursor-shaped result:
-
-- `columns`
-- `rows`
-- `cursor-id`
-- `done`
-
-Generic JDBC rows contain:
-
-- `name`
-- `type`
-- `schema`
-- `source_schema`
-- `comment`
-
-`comment` is populated from `DatabaseMetaData.getTables(...).REMARKS` when the driver returns a non-blank value.  It may be `null`, and backend-specific paths may omit it.  In particular, Oracle's direct SQL table discovery intentionally keeps the smaller `name`/`type`/`schema`/`source_schema` row shape.
-
-`search-tables` returns table entry objects with the same logical fields.  The Elisp side treats `comment` as optional; absence means unknown or unsupported, not an empty comment.
-
-## Column metadata payload
-
-`get-columns` and `search-columns` return column objects with required `name`, `type`, `nullable`, and `position` fields. They may also include `default`, containing the database or driver expression unchanged. Generic JDBC reads `DatabaseMetaData.getColumns().COLUMN_DEF`; Oracle's direct metadata paths read `DATA_DEFAULT`. Absence means that no default was reported, so clients must not infer or synthesize one. Clutch retains the exact `type` as backend metadata so staged binary mutations can select the narrow binary parameter envelope without guessing from edited text.
-
-A SQL Server `connect` reply can advertise `describe-source-columns: true`. The operation takes `conn-id` and a `projection` SELECT (optionally preceded by `USE`), describes it on the metadata session without executing it, and returns `columns` in projection order. An entry is null when SQL Server cannot identify a source column.
-
-On DuckDB and SQL Server, `get-columns` forwards schema and table as JDBC LIKE patterns. Clutch escapes literal underscores, percent signs and backslashes for both column names and details, including the connection's default schema; catalog remains an exact name. Primary-key and foreign-key operations take exact schema/table names and do not use that escaping. Oracle's direct column metadata queries also use exact names.
-
-## Foreign-key metadata payload
-
-From agent 0.2.28, `get-foreign-keys` retains its `foreign-keys` array with `fk-column`, `pk-table`, `pk-schema` and `pk-column`, and adds `fk-name` when the driver reports one. Entries are grouped by referenced schema/table and key name, with each key's columns in `KEY_SEQ` order. A missing key name leaves the key identity unknown; clients must not infer a composite key from adjacent unnamed entries.
-
-`get-referencing-keys` takes `conn-id`, `table` and optional `schema` and `catalog`, and returns a `keys` array. The table is its exact catalog spelling, including case; the client folds unquoted SQL names before metadata lookup. Each entry has `fk-table`, `fk-schema`, `fk-column` and `pk-column`, with `fk-name` when available. The named column of the referencing table points to `pk-column` of the requested table. Entries are grouped by referencing schema/table and key name, with each key's columns in key order. Oracle uses direct catalog queries with the same payload. `get-referencing-objects` continues to return one entry per dependent table.
-
-Clutch's ER adapter requires agent 0.2.28 or later for incoming keys. Cold loads sequence primary keys, columns, outgoing keys and incoming keys through the existing asynchronous RPC transport. Warm loads reuse cached columns and outgoing keys. Synchronous and asynchronous column details decode the same complete metadata, including primary-key and foreign-key flags. A cold asynchronous detail fetch makes three RPCs for drivers with foreign keys. Column requests escape literal patterns while key requests retain exact schema/table names.
-
-ER cancellation is logical on JDBC. It stops the sequence after the current metadata response and ignores the result, retaining the connection reservation until that response or its existing RPC deadline. It sends no agent `cancel`, which targets foreground statements and could interrupt unrelated primary SQL. The agent's metadata session retains its network/query limits and existing per-session serialization. This adds no agent threads or session lanes.
+- **`get-tables` / `search-tables`:** Cursor-shaped (`columns`, `rows`, `cursor-id`, `done`) with `name`, `type`, `schema`, `source_schema`, and optional `comment` (`REMARKS`; Oracle's direct query omits `comment`, where absence means unknown rather than empty).
+- **`get-columns` / `search-columns`:** Objects with `name`, `type`, `nullable`, `position`, and optional `default` (`COLUMN_DEF` / Oracle `DATA_DEFAULT`, omitted when unreported). On DuckDB and SQL Server, `get-columns` uses JDBC `LIKE` patterns, so Clutch escapes `_`, `%`, and `\`.
+- **`describe-source-columns` (SQL Server):** Accepts `conn-id` and a `projection` SELECT (optionally preceded by `USE`), inspects the projection's source columns on the metadata session without executing, and returns `columns` in projection order (`null` when unresolvable).
+- **`get-foreign-keys` / `get-referencing-keys` (agent 0.2.28+):** `get-foreign-keys` returns `fk-column`, `pk-table`, `pk-schema`, `pk-column`, and optional `fk-name`, grouped by target and ordered by `KEY_SEQ`. `get-referencing-keys` returns `fk-table`, `fk-schema`, `fk-column`, `pk-column`, and optional `fk-name` in key order. On JDBC, ER cancellation stops sending further RPCs after the active reply without sending `cancel` (protecting primary SQL).
 
 ## Error semantics
 
-There are five distinct failure classes:
+Five failure cases are handled differently:
 
-1. A normal request-level database error.
-   - Examples: SQL syntax error, object-not-found, cancelled statement.
-   - The agent stays up and Elisp surfaces the database error normally.
-   - The response may also include a structured `diag` object with fields such as category, request id, connection id, exception class, SQLState, cause chain, and redacted request context.
+1. **Normal database error** (syntax error, missing object, cancelled statement): agent stays up; Elisp shows `error` and records optional `diag`.
+2. **Idle preflight failed before statement creation:** returns `diag.connection-invalidated=true` and `diag.execution-not-started=true`. Clutch may reconnect and run the statement once if transaction/batch state allows.
+3. **Foreground failure after preflight invalidates the connection:** returns `diag.connection-invalidated=true` only (or top-level `connection-invalidated=true` if the statement succeeded before the connection closed). Elisp retires that `conn-id` without replaying SQL; the next command reconnects.
+4. **Outer RPC timeout:** for a connection-owned synchronous request, Elisp retires that connection and sends `force-disconnect` without blocking (other connections keep the shared agent). Ownerless timeouts (startup/connect) or a dead agent stop the agent and invalidate all its connections. Async metadata timeouts expire their callback without dropping the connection.
+5. **Agent exits before replying:** Elisp reads stderr directly (surfacing `UnsupportedClassVersionError` as a Java 17+ version mismatch rather than a generic disconnect).
 
-2. An idle preflight proves the primary connection invalid before statement creation.
-   - The response includes both `diag.connection-invalidated=true` and `diag.execution-not-started=true`.
-   - The second marker means this request never invoked statement execution. A client may reconnect and issue the command once only when its own transaction and batch state allow it.
-
-3. The shared agent stays up but a foreground failure after preflight removes one logical JDBC connection.
-   - The error response includes `diag.connection-invalidated=true`, and Elisp retires only the matching local `conn-id` while preserving the original diagnostics and console reconnect context.
-   - The failed SQL is never replayed because its transaction outcome may be unknown. The next user command creates a new session and executes once.
-
-4. A synchronous request times out at the outer RPC boundary.
-   - If the agent is still running and the request has a connection owner, Elisp retires only that connection and sends `force-disconnect` without waiting. Other connections keep their agent process.
-   - An ownerless timeout, such as startup or connect, or an agent process failure stops the shared agent and invalidates every connection it owned. A live process alone does not prove that its driver threads remain responsive.
-   - An asynchronous metadata timeout instead expires its callback, ignores a late reply and reports the metadata error; that client-side timeout alone does not retire the connection or stop the agent.
-
-5. The agent exits before replying.
-   - Elisp reads agent stderr and reports the startup failure directly.
-   - If stderr contains `UnsupportedClassVersionError`, clutch reports that the configured Java runtime is too old for the current jar.
-
-This distinction matters because a JVM startup failure should not look like a normal database disconnect.
-
-The short `error` string and the optional `diag` payload serve different roles:
-
-- `error`: concise default summary suitable for normal user-facing display
-- `diag`: richer request diagnostics for troubleshooting UI / logs / tests
-- `debug`: opt-in verbose debugging payload; may include redacted request context and a redacted stack trace, but is omitted unless the client sent `params.debug=true`
-
-`diag.connection-invalidated` is a lifecycle fact, not a retry hint. It is present only as JSON `true` when an error response references a logical connection the agent no longer owns, including a later request after the original invalidation response was ignored; clients must not infer the same state from JDBC exception classes, SQLState values, vendor codes, or error text. When a foreground request succeeds and the agent retires the primary connection while finishing the reply, top-level `connection-invalidated: true` delivers the same lifecycle signal so Elisp preserves the result while retiring its local handle.
-
-`diag.execution-not-started` is a narrower execution fact and is present only together with authoritative invalidation during the idle preflight phase. The phase ends before `createStatement` or `prepareStatement`, because preparation itself may contact the server. Neither marker is inferred from exception text, vendor codes, SQLState, or a successful liveness check followed by a later failure.
-
-stderr remains for process/runtime logging and should not be treated as the primary source of request-level diagnostics.
-
-## Java requirement
-
-The current `clutch-jdbc-agent` jar requires Java 17+.
-
-If `clutch-jdbc-agent-java-executable` or `JAVA_HOME` points to an older Java, the agent may fail before sending its ready response.  clutch now surfaces that as a startup/runtime mismatch instead of a generic connection-loss timeout.
-
-## Relationship to README
-
-Use `README.md` for:
-
-- installation
-- driver setup
-- connection examples
-- user-visible workflow
-
-Use this file for:
-
-- protocol shape
-- agent/session model
-- RPC inventory
-- startup/error behavior
+`diag.connection-invalidated` and `diag.execution-not-started` come directly from the agent's connection map and execution lifecycle; clients never infer them from exception classes, SQLState, or error text.

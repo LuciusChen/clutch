@@ -1,27 +1,16 @@
 # clutch MongoDB Backend Guide
 
-# MongoDB Backend
-
-The `mongodb` backend is Clutch's ordinary MongoDB backend. This guide focuses on Clutch-owned native document query, object, and read-only result workflows. Support levels and the one-backend boundary, including the `:surface sql-interface` distinction, are defined in [docs/backend-support.md](backend-support.md). The default document surface delegates native protocol operations to the external `mongodb.el` package and uses supported MongoDB Shell / MQL helper syntax in query buffers, not SQL and not arbitrary JavaScript.
+`:backend mongodb` connects to standard MongoDB deployments through the external `mongodb.el` package and evaluates common MongoDB Shell / MQL helpers in Emacs query buffers (it is a helper parser, not a general JavaScript runtime or SQL engine). For Atlas or Enterprise deployments with MongoDB SQL Interface, add `:surface sql-interface` to use JDBC instead (see [backend-support.md](backend-support.md)).
 
 ## Requirements
 
-The default document surface requires the `mongodb.el` package on `load-path`. It does not require Java, `mongosh`, or a JDBC jar.
-
-MongoDB SQL Interface endpoints require the JDBC sidecar and MongoDB JDBC driver jar:
+- **Native document mode (default):** `mongodb.el` on `load-path`. No Java, `mongosh`, or JDBC jar needed.
+- **SQL Interface (`:surface sql-interface`):** Java 17+, the JDBC agent, and the official MongoDB SQL Interface driver (saved to `~/.emacs.d/clutch-jdbc/drivers/mongodb-jdbc.jar`):
 
 ```emacs-lisp
 (clutch-jdbc-ensure-agent)
 (clutch-jdbc-install-driver 'mongodb)
 ```
-
-`clutch-jdbc-install-driver 'mongodb` downloads the official MongoDB SQL Interface JDBC driver and stores it as `~/.emacs.d/clutch-jdbc/drivers/mongodb-jdbc.jar`.
-
-## Background Metadata
-
-With `mongodb.el` providing asynchronous command and cursor helpers, collection discovery, sampled field names and details, and index warmup use Clutch's existing background metadata scheduler. The connection runs one request at a time. A foreground command can wait for the current metadata reply, then takes priority before the next background request. Sampling still uses `clutch-mongodb-schema-sample-size` and the same field/type inference.
-
-Each MongoDB wire command retains `mongodb-timeout-seconds` as its response deadline, including cursor continuation. A timeout or broken transport closes the connection. Older `mongodb.el` versions use the existing idle-scheduled synchronous metadata readers, whose network waits can occupy Emacs.
 
 ## Connection Examples
 
@@ -48,64 +37,54 @@ Each MongoDB wire command retains `mongodb-timeout-seconds` as its response dead
                          :pass-entry "atlas-sql"))))
 ```
 
-Clutch passes native connection parameters to `mongodb.el` after resolving saved credentials. Native connection URLs and protocol options are owned by `mongodb.el`; consult its [documentation](https://github.com/LuciusChen/mongodb.el) for the supported native connection surface rather than this guide.
+Unauthenticated local instances need no `:user`, `:password`, or `:pass-entry`; for authenticated connections, prefer `:pass-entry` (`auth-source-pass` / `auth-source`). Use structured `:host` / `:port` if you want Clutch-managed SSH or TRAMP forwarding (opaque `:url` values are not rewritten). See [`mongodb.el`](https://github.com/LuciusChen/mongodb.el) for native protocol and URI options.
 
-Use `:password` only when the password is already available in memory. For saved connections, prefer `:pass-entry` and let Clutch resolve it through `auth-source-pass` / `auth-source` before opening the native connection. Unauthenticated local MongoDB connections do not need `:user`, `:password`, or `:pass-entry`.
+## Background Metadata
 
-Clutch-managed SSH tunnels and TRAMP forwarding require structured `:host` / `:port` parameters because Clutch rewrites that endpoint before connecting. Clutch does not rewrite opaque `:url` values; use structured parameters when a saved MongoDB connection needs Clutch-managed forwarding.
+With a current `mongodb.el`, collection discovery, sampled field metadata (`clutch-mongodb-schema-sample-size`, default 20), and index warmup run asynchronously through Clutch's background metadata scheduler. Foreground commands take priority between requests. Each wire command enforces `mongodb-timeout-seconds`, and a timeout or broken transport closes the connection. Older `mongodb.el` versions fall back to idle synchronous metadata reads.
 
 ## Query Buffers
 
-Native MongoDB query buffers use `clutch-mongodb-mode` from `clutch-document.el`, the document query-console layer. The mode is Clutch UI code: it fontifies and completes a supported MongoDB Shell / MQL helper surface, then the backend translates those helpers into native `mongodb.el` command calls. It keeps the shared execute, object, schema/database, and completion shortcuts, but does not bind SQL-only transaction controls. `C-c C-p` explains the current `find`, `findOne`, or `aggregate` helper and shows formatted JSON with a compact execution summary. `C-c ?` opens the MongoDB document-console dispatch menu.
+Native MongoDB buffers use `clutch-mongodb-mode` (from `clutch-document.el`) with the usual execute (`C-c C-c`), object (`C-c C-j`/`d`/`o`), database-switch (`C-c C-l`), completion (`C-c TAB`), and transient (`C-c ?`) keys, plus `C-c C-p` to explain the `find`, `findOne`, or `aggregate` call at point as formatted JSON.
 
-Completion intentionally covers common helper, stage, operator, collection, and sampled field names for basic support. It also offers cursor helper chains after `find(...).` and `aggregate(...).` so query-bar controls common in GUI MongoDB clients remain discoverable in the Emacs query buffer. Projection stays as the second `find` argument; `find(...).` completion offers `sort()`, `skip()`, `limit()`, `maxTimeMS()`, `allowDiskUse()`, and `explain()`. `aggregate(...).` completion offers `allowDiskUse()`, `maxTimeMS()`, and `explain()`. Field completion and collection metadata sample up to `clutch-mongodb-schema-sample-size` documents, merge field paths from those documents, and report sampled BSON type summaries. Collection-method completion also offers lightweight templates such as `find({}).limit(20)`, projected `find`, common `aggregate` skeletons, and a `$lookup` skeleton. These are plain completion candidates, not a separate query builder. They are not MongoDB server-enforced schemas or an exhaustive field catalog; long-tail operators can still be typed manually when the backend helper parser and `mongodb.el` command layer support the query shape.
+### Supported helpers
 
-Native `find()` results are bounded by `clutch-mongodb-find-result-limit` (default 1000). A smaller explicit `.limit(N)` is honored; zero, negative, or larger limits are rejected before sending the command. Narrow the filter or use `skip()` with a bounded `limit()` when exploring a large collection.
+- **Reads:** `find`, `findOne`, `aggregate`, `countDocuments`, `distinct`, `explain` (cursor chains: `sort()`, `skip()`, `limit()`, `maxTimeMS()`, `allowDiskUse()`, `explain()`)
+- **Writes:** `insertOne` (one document), `insertMany` (document array), `updateOne` (top-level update operators like `{$set: ...}` only; update pipelines are unsupported), `replaceOne` (plain document, no top-level operators), `deleteOne` (requires an explicit filter)
+- **Commands & literals:** `db.runCommand(...)`, `ObjectId(...)`, `ISODate(...)`
 
-Supported helper families include:
+`find()` results are capped at `clutch-mongodb-find-result-limit` (default 1000; smaller explicit `.limit(N)` values are honored, while zero, negative, or larger limits are rejected). Unsupported shell syntax such as regex literals fails clearly rather than calling an external shell.
 
-- collection reads: `find`, `findOne`, `aggregate`, `countDocuments`, `distinct`, and `explain`
-- generated document mutations: `insertOne`, `insertMany`, `updateOne`, `replaceOne`, and `deleteOne`
-- uncommon commands: `db.runCommand(...)` against the current database
+### Completion
 
-Database selection uses the shared `clutch-switch-schema` workflow. Dedicated MongoDB Shell admin, index-management, shell-shaped database-switching helpers, and multi-document mutation helpers are intentionally outside the basic console surface.
+Completion suggests collections, sampled field paths, common stages/operators, cursor chains after `find(...).` and `aggregate(...).`, and lightweight templates (`find({}).limit(20)`, projected `find`, `aggregate` and `$lookup` skeletons).
 
-Write helpers validate their documented argument shape before calling `mongodb.el`. `insertOne` accepts one document, `insertMany` accepts one document array, and `deleteOne` requires one explicit filter document.
+## Result Grid and Object Actions
 
-`updateOne` requires a nonempty document whose top-level keys are update operators, such as `{$set: {name: 'Ann'}}`. Plain documents and mixed operator/field documents are rejected; use `replaceOne` for a replacement document. `replaceOne` rejects top-level update operators. Update pipelines remain unsupported by the helper parser.
+Clutch maps MongoDB objects onto its shared browser:
 
-`ObjectId()` and `ISODate()` encode the common non-JSON query literals as native BSON wrapper values before being sent to `mongodb.el`.
-
-This parser is intentionally not a general JavaScript runtime. Unsupported helpers and Mongo shell-only syntax such as regex literals should fail clearly instead of being passed to a shell process.
-
-## Clutch Mapping
-
-Clutch maps MongoDB concepts onto the generic database contract:
-
-- schemas are MongoDB databases
-- tables are collections
-- columns are sampled document field paths with sampled BSON type summaries
-- indexes are collection indexes returned by the public MongoDB client API
-- nested documents and arrays render as JSON-valued cells
-
-Object actions use the same `C-c C-o` / Embark workflow as SQL backends. For a MongoDB collection, Describe shows a formatted JSON schema profile with sampled field paths, presence counts, type counts, examples, top scalar values, and collection indexes. Show definition displays collection metadata as JSON. Browse inserts a `db.getCollection(...).find({}).limit(20);` helper. Show index insight combines index definitions with `$indexStats` usage data. Show stats displays formatted JSON with collection-level `count`, `avgObjSize`, `storageSize`, `totalIndexSize`, `totalSize`, and `indexSizes` values from a `$collStats` aggregation. Explain sample query uses the same backend explain path as `C-c C-p` and explains `find({}).limit(1)` with `executionStats`. Show validation displays collection `validator` / `validationAction` / `validationLevel` collection metadata. Profile, index insight, stats, explain, and validation are MongoDB document features; Clutch exposes them through the shared object action UI for workflow consistency, not as SQL-compatible features or query-result footer fields.
-
-MongoDB result grids are read-only. Nested documents, arrays, and mixed scalar/document columns are marked as JSON-valued where the sample shows JSON content, so the normal Clutch value viewers can pretty-print them. Staged SQL `UPDATE` / `DELETE` workflows, SQL-style manual transaction toggles, and row identity editing remain disabled for the native document surface. Result-level copy/refine, CSV/TSV/Org table export, client-side filtering, and aggregate remain available because they operate on the displayed grid. When a result came from a collection helper and Clutch kept the source document metadata, copy and export actions can generate MongoDB helper snippets such as `insertOne`, `insertMany`, `replaceOne`, `updateOne({ _id }, { $set: ... })`, and `deleteOne`.
-
-MongoDB SQL Interface is different: it is a JDBC SQL surface selected with `:surface sql-interface`, uses SQL query buffers, and requires an endpoint that actually provides MongoDB SQL Interface.
+- Databases → schemas; collections → tables; sampled field paths → columns; nested documents/arrays → JSON cells (viewable with `v`).
+- Result grids are **read-only** (no staged SQL row editing or manual transactions), while copy/refine (`c`), CSV/TSV/Org export (`e`), page filter (`/`), and numeric aggregation (`A`) work as usual. Copy/export on collection query results can also generate `insertOne`, `insertMany`, `replaceOne`, `updateOne`, and `deleteOne` snippets.
+- Jumping to a collection (`C-c C-j`) inserts `db.getCollection(...).find({}).limit(20);`. Object actions (`C-c C-o` or Embark) on a collection support:
+  - **Describe (`d`):** JSON schema profile (sampled field paths, presence/type counts, sample values, indexes)
+  - **Show definition (`s`):** collection metadata JSON
+  - **Index insight (`i`):** index definitions combined with `$indexStats`
+  - **Stats (`t`):** `$collStats` summary (`count`, `avgObjSize`, `storageSize`, `totalIndexSize`, `totalSize`, `indexSizes`)
+  - **Explain sample (`e`):** `find({}).limit(1)` with `executionStats`
+  - **Validation (`v`):** collection `validator` / `validationAction` / `validationLevel`
 
 ## Live Tests
 
-MongoDB live coverage is tagged `:mongodb-live`. The live runner starts or reuses a local MongoDB container and exercises the native document surface; it verifies switching the active database, querying the target database, and restoring the original database:
+Run native MongoDB live tests (`:mongodb-live`) via the test runner (starts or reuses a local container):
 
 ```sh
 ./test/run-ci.sh native-live
 ```
 
-Manual local container example:
+Or start a local container manually:
 
 ```sh
 docker run -d --name clutch-mongodb-live -p 27017:27017 mongo:7
 ```
 
-MongoDB SQL Interface JDBC live tests are separate and remain tagged `:sql-interface-mongodb-live` because they require an Atlas or Enterprise Advanced SQL Interface endpoint.
+MongoDB SQL Interface JDBC tests are tagged `:sql-interface-mongodb-live` and require an Atlas or Enterprise Advanced SQL Interface endpoint (see [jdbc-backend.md](jdbc-backend.md)).
