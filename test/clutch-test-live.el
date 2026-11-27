@@ -2887,10 +2887,9 @@ throughout."
                               (clutch-test--await-queries))
                           (advice-remove 'clutch-db-build-paged-sql count-page)
                           (advice-remove 'message note))
-                        ;; PostgreSQL streams the result with COPY where
-                        ;; pgsql.el can, so it needs no pages.
-                        (if (and (eq clutch-test-backend 'pg)
-                                 (fboundp 'pgsql-copy-out-async))
+                        (if (pcase clutch-test-backend
+                              ('pg (fboundp 'pgsql-copy-out-async))
+                              ('mysql (fboundp 'mysql-query-rows-async)))
                             (should (zerop pages))
                           (should (> pages 0)))
                         (should (string-prefix-p "Exported 5 rows" exported)))
@@ -3159,6 +3158,27 @@ output, as a remote file does, and keeps every row in order."
                   (should-not clutch--last-result-buffer)
                   (should-not (clutch-db--foreground-busy-p conn)))))
             (should waited)
+            (clutch-test--with-live-result-buffer " *wide grid export*"
+              (clutch-test--execute-live-select
+               conn (format "SELECT seq_id AS x, seq_id AS hidden_col, seq_id AS y FROM %s ORDER BY seq_id" table))
+              (with-current-buffer " *wide grid export*"
+                (cl-callf plist-put (nth 1 clutch--result-column-defs) :hidden t)
+                (let ((clutch-jdbc-fetch-size 50) (clutch-export-page-size 200)
+                      (paged (symbol-function 'clutch-db-build-paged-sql)) used-pages)
+                  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
+                            ((symbol-function 'clutch-db-build-paged-sql)
+                             (lambda (&rest args) (setq used-pages t) (apply paged args))))
+                    (clutch-test--with-minibuffer-answers '("utf-8") (clutch--export-result 'csv 'file))
+                    (clutch-test--await-queries))
+                  (should (eq (not used-pages)
+                              (pcase clutch-test-backend
+                                ('mysql (fboundp 'mysql-query-rows-async))
+                                ('pg (fboundp 'pgsql-exec-rows-async))
+                                (_ t)))))
+                (should (equal (with-temp-buffer (insert-file-contents path) (buffer-string))
+                               (concat (clutch-test--live-column-name "x,y") "\n"
+                                       (mapconcat (lambda (id) (format "%d,%d\n" id id))
+                                                  (number-sequence 1 602) ""))))))
             (message "Wide export verified on %s: 101 columns, 602 rows, no primary key, no indexes, CSV and TSV, and CSV through a waiting file handler"
                      clutch-test-backend))
         (when created

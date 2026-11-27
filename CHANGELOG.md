@@ -7,7 +7,7 @@
 - Clutch pins JDBC agent 0.2.35. Oracle metadata reads fetch column defaults in batches, and JDBC metadata lookups preserve composite primary key order.
 - PostgreSQL result-grid CSV and TSV files can stream decoded rows from one query with a recent pgsql.el. A failed or cancelled PostgreSQL streaming export preserves earlier work in the same transaction.
 - Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
-- JDBC query-to-file export executes the SELECT once and writes each cursor batch as it arrives.
+- JDBC and native MySQL can write CSV/TSV files from the console or an unsorted grid in one query. Native MySQL uses paged export with older drivers.
 
 ### Fixed
 

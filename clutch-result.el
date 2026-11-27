@@ -3807,6 +3807,19 @@ Each batch has its own list spine."
                do (funcall function (seq-take tail size)))
     (funcall function nil)))
 
+(defun clutch-result--stream-consumer (function)
+  "Call FUNCTION in the export buffer while it still owns the running query."
+  (let ((buffer (current-buffer)) (conn clutch-connection))
+    (cl-labels ((stopped ()
+                  (cond ((not (buffer-live-p buffer)) (error "Export stopped: its buffer was killed"))
+                        ((not (eq conn (buffer-local-value 'clutch-connection buffer)))
+                         (error "Export stopped: its buffer's connection changed"))
+                        (t (plist-get (gethash conn clutch--running-queries) :cancelling)))))
+      (lambda (&rest args)
+        (if (stopped) 'stop
+          (with-current-buffer buffer (apply function args))
+          (when (stopped) 'stop))))))
+
 (defun clutch-result--map-export-batches (function done &optional stream)
   "Call FUNCTION with each bounded export batch, then DONE.
 Call FUNCTION once with nil for an empty result.  Each batch has its own
@@ -3816,15 +3829,10 @@ export.  Pages are fetched without blocking, as statements run, so DONE
 may run after this function returns.  Non-nil STREAM also allows the backend to
 deliver decoded rows from one execution when no grid sort is pending."
   (clutch--ensure-connection)
-  (let* ((buffer (current-buffer))
-         (conn clutch-connection)
-         (effective-sql (clutch-result--effective-query))
+  (let* ((effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
-                  (with-current-buffer buffer
-                    (unless (eq conn clutch-connection)
-                      (error "Export stopped: its buffer's connection changed"))
-                    (clutch-result--emit-export-batches rows page-size function))))
+                  (clutch-result--emit-export-batches rows page-size function)))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))
           (progn
@@ -3841,7 +3849,8 @@ deliver decoded rows from one execution when no grid sort is pending."
            #'emit done
            (when (and stream (not clutch--order-by))
              (lambda (outcome)
-               (clutch-db-stream-rows-async clutch-connection query #'emit outcome)))))))))
+               (clutch-db-stream-rows-async
+                clutch-connection query (clutch-result--stream-consumer #'emit) outcome)))))))))
 
 (defconst clutch-result--export-gc-threshold (* 32 1024 1024)
   "Garbage collection threshold in bytes while an export runs.
@@ -4212,7 +4221,7 @@ stops it.  Replace the destination only after the whole export succeeds."
        :coding coding
        :map-batches
        (lambda (emit done)
-         (let ((source (current-buffer)) (conn clutch-connection) export-columns)
+         (let (export-columns)
            (clutch-result--export-pages
             sql sql
             (unless (clutch-db-sql-has-top-level-row-limit-p sql) page-size)
@@ -4232,14 +4241,7 @@ stops it.  Replace the destination only after the whole export succeeds."
                clutch-connection sql
                (if (eq kind 'tsv) ?\t clutch-csv-delimiter) t
                clutch-export-null-value-text
-               (lambda (batch count &optional names)
-                 (cl-flet ((stopped ()
-                             (or (not (buffer-live-p source))
-                                 (not (eq conn (buffer-local-value 'clutch-connection source)))
-                                 (plist-get (gethash conn clutch--running-queries) :cancelling))))
-                   (if (stopped) 'stop
-                     (with-current-buffer source (funcall emit batch count names))
-                     (when (stopped) 'stop))))
+               (clutch-result--stream-consumer emit)
                outcome)))))))))
 
 (defun clutch--export-result (kind destination &optional omit-header)
