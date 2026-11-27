@@ -844,6 +844,7 @@ CANCEL, when non-nil, is a zero-argument function used in place of
          (state (plist-get diag :sql-state)))
     (and (clutch--connection-alive-p conn)
          (pcase backend
+           ((guard (eq (car error) 'clutch-db-cancelled-before-start)) t)
            ('pg
             ;; Statement timeouts use the same SQLSTATE.
             (and (equal state "57014")

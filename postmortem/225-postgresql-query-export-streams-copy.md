@@ -14,6 +14,8 @@ The writer appends each part to the temporary file as the stream passes it, and 
 
 PostgreSQL formats the values. Its CSV rules match the shared escaping function from PM 224: NULL is the unquoted marker, text equal to the marker is quoted, and values containing the separator, a double quote or a line break are quoted with doubled quotes. The values themselves are PostgreSQL's text output rather than Clutch's display formatting: booleans are `t` and `f`, `bytea` is `\x` hex, arrays use braces, `json` and `jsonb` appear as the server prints them, and `timestamptz` carries the session time zone's offset instead of Emacs local time without one. Rebuilding Clutch's display text would mean parsing every type's output in Emacs and giving back much of the gain; exported files are read by other tools, which accept PostgreSQL's format.
 
+A local write error can cancel a still-running COPY or row stream. Inside a PostgreSQL transaction that also aborts earlier work: in a live test the next COMMIT rolled back a row inserted before the export. Both streams now establish a savepoint on the foreground connection and release it after the final response, rolling back to it first on failure. A cancel during setup skips the stream, and a cancel during cleanup leaves the transaction commands alone.
+
 ## Scope
 
 MySQL keeps `LIMIT/OFFSET` pages, since mysql.el offers no row streaming. JDBC remaining-row fetches are unchanged. All-row result export still pages. It exports the result's visible columns from the result's own query, which can include identity columns Clutch added, so streaming it needs its own column selection and is left for separate work. The documentation now asks paged exports for an `ORDER BY` on a unique key and names the PostgreSQL scan behavior.

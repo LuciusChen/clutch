@@ -76,6 +76,8 @@ enforce a server-side statement timeout."
 (define-error 'clutch-db-execution-not-started
   "Database operation did not start"
   'clutch-db-error)
+(define-error 'clutch-db-cancelled-before-start
+  "Query cancelled before execution" 'clutch-db-execution-not-started)
 (define-error 'clutch-db-session-restore-error
   "Database session state was not restored after a known batch outcome"
   'clutch-db-error)

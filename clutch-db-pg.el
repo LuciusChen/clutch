@@ -73,7 +73,9 @@ transaction, which a lost connection rolls back."
   search-path
   schemas
   path-settled
-  manual-commit)
+  manual-commit
+  ;; Non-nil while a stream sets up or releases its savepoint.
+  export-control)
 
 (defun clutch-db-pg--ensure-client-api ()
   "Ensure pgsql.el is available."
@@ -825,19 +827,69 @@ Decline when the installed pgsql.el cannot execute asynchronously."
                          (clutch-db-pg--query-callback conn callback sql))))
     t))
 
+(defun clutch-db-pg--stream-export (conn send sql consume callback)
+  "Stream SQL on CONN with SEND, passing batches to CONSUME.
+Protect prior work in an open transaction before starting the stream.
+CALLBACK receives the outcome once the savepoint has been released."
+  (let* ((client (clutch-db-pg--connection-client conn))
+         (status (pgsql-transaction-status client))
+         (outcome (clutch-db-pg--query-callback conn callback)))
+    (if (not (or (eq status 'in-transaction)
+                 (and (eq status 'idle) (clutch-db-manual-commit-p conn))))
+        (clutch-db--translate-library-error pgsql-error
+          (funcall send client sql consume outcome))
+      ;; A savepoint shadows an older one of the same name until released.
+      (cl-labels
+          ((finish (result err)
+             (setf (clutch-db-pg--connection-export-control conn) nil)
+             (if (or result err)
+                 (funcall outcome result err)
+               ;; Cancellation during setup skipped the export statement.
+               (funcall callback nil '(clutch-db-cancelled-before-start "Query cancelled"))))
+           (control (statement reply)
+             (setf (clutch-db-pg--connection-export-control conn) 'pending)
+             (condition-case err
+                 (pgsql-exec-async client statement reply)
+               ((error quit) (funcall reply nil err))))
+           (recover (original)
+             (control "ROLLBACK TO clutch_export; RELEASE clutch_export"
+                      (lambda (_ err)
+                        (finish nil (if err
+                                        (list 'error
+                                              (format "%s (export savepoint recovery failed: %s)"
+                                                      (clutch-db--error-message original)
+                                                      (clutch-db--error-message err)))
+                                      original)))))
+           (release (result err)
+             (cond
+              ((and err (not (pgsql-live-p client))) (finish nil err))
+              (err (recover err))
+              (t (control "RELEASE clutch_export"
+                          (lambda (_ failure)
+                            (if failure (recover failure) (finish result nil))))))))
+        (control (if (eq status 'idle) "BEGIN; SAVEPOINT clutch_export"
+                   "SAVEPOINT clutch_export")
+                 (lambda (_ err)
+                   (cond
+                    (err (finish nil err))
+                    ((eq (clutch-db-pg--connection-export-control conn) 'cancelled)
+                     (release nil nil))
+                    (t
+                     (setf (clutch-db-pg--connection-export-control conn) nil)
+                     (condition-case failure
+                         (funcall send client sql consume #'release)
+                       ((error quit) (release nil failure)))))))))
+    t))
+
 (cl-defmethod clutch-db-stream-rows-async
     ((conn clutch-db-pg--connection) sql function callback)
   "Run SQL once on CONN and pass its normalized row batches to FUNCTION."
   (when (fboundp 'pgsql-exec-rows-async)
-    (clutch-db-pg--run-query-with-transaction-state
-     conn sql
-     (lambda ()
-       (pgsql-exec-rows-async
-        (clutch-db-pg--connection-client conn) sql
-        (lambda (batch)
-          (funcall function (clutch-db-result-rows (clutch-db-pg--wrap-result conn batch))))
-        (clutch-db-pg--query-callback conn callback sql))))
-    t))
+    (clutch-db-pg--stream-export
+     conn #'pgsql-exec-rows-async sql
+     (lambda (batch)
+       (funcall function (clutch-db-result-rows (clutch-db-pg--wrap-result conn batch))))
+     callback)))
 
 (cl-defmethod clutch-db-delimited-export-async
     ((conn clutch-db-pg--connection) sql delimiter header null-text
@@ -852,22 +904,16 @@ COPY."
                         (clutch-db-escape-literal conn (char-to-string delimiter))
                         (clutch-db-escape-literal conn null-text)))
           (header-pending header))
-      (clutch-db-pg--run-query-with-transaction-state
-       conn copy
-       (lambda ()
-         (pgsql-copy-out-async
-          (clutch-db-pg--connection-client conn) copy
-          ;; PostgreSQL sends each row, and the header, as its own message.
-          (lambda (rows)
-            (funcall function
-                     (decode-coding-string (mapconcat #'identity rows "")
-                                           'utf-8-unix)
-                     (if header-pending
-                         (progn (setq header-pending nil)
-                                (1- (length rows)))
-                       (length rows))))
-          (clutch-db-pg--query-callback conn callback))))
-      t)))
+      (clutch-db-pg--stream-export
+       conn #'pgsql-copy-out-async copy
+       ;; PostgreSQL sends each row, and the header, as its own message.
+       (lambda (rows)
+         (funcall function
+                  (decode-coding-string (mapconcat #'identity rows "") 'utf-8-unix)
+                  (if header-pending
+                      (progn (setq header-pending nil) (1- (length rows)))
+                    (length rows))))
+       callback))))
 
 (cl-defmethod clutch-db-execute-params
     ((conn clutch-db-pg--connection) sql params)
@@ -886,14 +932,15 @@ COPY."
 (cl-defmethod clutch-db-interrupt-query ((conn clutch-db-pg--connection))
   "Interrupt the current PostgreSQL query on CONN without dropping the session."
   (let ((client (clutch-db-pg--connection-client conn)))
-    (if (and (pgsql-live-p client)
-             (not (pgsql-busy-p client)))
-        t
-      (condition-case nil
-          (progn
+    (cond
+     ((clutch-db-pg--connection-export-control conn)
+      ;; Stop the export without cancelling SAVEPOINT or its cleanup.
+      (setf (clutch-db-pg--connection-export-control conn) 'cancelled)
+      t)
+     ((and (pgsql-live-p client) (not (pgsql-busy-p client))) t)
+     (t (condition-case nil
             (pgsql-cancel client)
-            t)
-        (pgsql-error nil)))))
+          (pgsql-error nil))))))
 
 ;;;; SQL dialect methods
 
