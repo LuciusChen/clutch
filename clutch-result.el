@@ -3817,10 +3817,13 @@ may run after this function returns.  Non-nil STREAM also allows the backend to
 deliver decoded rows from one execution when no grid sort is pending."
   (clutch--ensure-connection)
   (let* ((buffer (current-buffer))
+         (conn clutch-connection)
          (effective-sql (clutch-result--effective-query))
          (page-size (clutch-result--export-page-size)))
     (cl-labels ((emit (rows &optional _columns)
                   (with-current-buffer buffer
+                    (unless (eq conn clutch-connection)
+                      (error "Export stopped: its buffer's connection changed"))
                     (clutch-result--emit-export-batches rows page-size function))))
       (if (or (null effective-sql)
               (not (clutch-result--server-pageable-p)))

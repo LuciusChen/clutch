@@ -852,28 +852,30 @@ CALLBACK receives the outcome once the savepoint has been released."
                  (pgsql-exec-async client statement reply)
                ((error quit) (funcall reply nil err))))
            (recover (original)
-             (control "ROLLBACK TO clutch_export; RELEASE clutch_export"
-                      (lambda (_ err)
-                        (finish nil (if err
-                                        (list 'error
-                                              (format "%s (export savepoint recovery failed: %s)"
-                                                      (clutch-db--error-message original)
-                                                      (clutch-db--error-message err)))
-                                      original)))))
+             (if (not (pgsql-live-p client))
+                 (finish nil original)
+               (control "ROLLBACK TO clutch_export; RELEASE clutch_export"
+                        (lambda (_ err)
+                          (finish nil (if err
+                                          (list 'error
+                                                (format "%s (export savepoint recovery failed: %s)"
+                                                        (clutch-db--error-message original)
+                                                        (clutch-db--error-message err)))
+                                        original))))))
            (release (result err)
-             (cond
-              ((and err (not (pgsql-live-p client))) (finish nil err))
-              (err (recover err))
-              (t (control "RELEASE clutch_export"
-                          (lambda (_ failure)
-                            (if failure (recover failure) (finish result nil))))))))
+             (if err (recover err)
+               (control "RELEASE clutch_export"
+                        (lambda (_ failure)
+                          (if failure (recover failure) (finish result nil)))))))
         (control (if (eq status 'idle) "BEGIN; SAVEPOINT clutch_export"
                    "SAVEPOINT clutch_export")
                  (lambda (_ err)
                    (cond
                     (err (finish nil err))
                     ((eq (clutch-db-pg--connection-export-control conn) 'cancelled)
-                     (release nil nil))
+                     (if (eq status 'idle)
+                         (control "ROLLBACK" (lambda (_ failure) (finish nil failure)))
+                       (release nil nil)))
                     (t
                      (setf (clutch-db-pg--connection-export-control conn) nil)
                      (condition-case failure
