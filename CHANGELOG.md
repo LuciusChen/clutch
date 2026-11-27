@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Clutch pins JDBC agent 0.2.35. Oracle metadata reads fetch column defaults in batches, and JDBC metadata lookups preserve composite primary key order.
 - PostgreSQL result-grid CSV and TSV files can stream decoded rows from one query with a recent pgsql.el. A failed or cancelled PostgreSQL streaming export preserves earlier work in the same transaction.
 - Removed the SQL console's preview and result-switching shortcuts. In a result buffer, `C-c ?` then `x` opens Preview SQL.
 - JDBC query-to-file export executes the SELECT once and writes each cursor batch as it arrives.
@@ -24,7 +25,7 @@
 
 - In a SQLite query console, Show DDL on a qualified table opens its definition from the named database, even when the main database has a table with the same name.
 
-- Clutch pins JDBC agent 0.2.34. If SQL Server disconnects after executing a statement, Clutch preserves the returned result or original SQL error and marks the connection closed. SQL Server can look up a result column's source while a query is running. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
+- If SQL Server disconnects after executing a statement, Clutch preserves the returned result or original SQL error and marks the connection closed. SQL Server can look up a result column's source while a query is running. The Oracle console and REPL keep PL/SQL blocks together, including their final semicolon. PostgreSQL metadata lookups over JDBC resolve the requested object when names repeat across schemas.
 
 - Looking up PostgreSQL metadata for a missing relation no longer aborts an open transaction.
 

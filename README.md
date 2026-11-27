@@ -93,7 +93,7 @@ If a configured native backend package is missing, Clutch reports it when connec
 
 `nerd-icons` is optional: without it, Clutch uses text symbols and backend names instead of icons. Its availability is checked once per Emacs session, including when it is missing; restart Emacs after installing it during a running session.
 
-JDBC support ships with Clutch and requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.34, which supports cancelling requests before execution, bounded BLOB previews, and ordered foreign-key metadata for ER views and composite-key navigation. On first connection, Clutch can prompt to download the agent and supported drivers. It verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.md) for setup, supported drivers, connection examples, and transaction behavior.
+JDBC support ships with Clutch and requires Java 17+, `clutch-jdbc-agent.jar`, and a database driver jar where applicable. Clutch pins agent 0.2.35, which supports cancelling requests before execution, bounded BLOB previews, and ordered foreign-key metadata for ER views and composite-key navigation. Run `M-x clutch-jdbc-ensure-agent` to install the agent and `M-x clutch-jdbc-install-driver` for supported drivers. Clutch verifies the configured agent jar against its SHA-256 before startup. See the [JDBC backend guide](docs/jdbc-backend.md) for setup, supported drivers, connection examples, and transaction behavior.
 
 For source checkouts, add Clutch and each native protocol checkout you use to `load-path`:
 
