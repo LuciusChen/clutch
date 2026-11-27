@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 - 2026-11-28
+
+### Changed
+
+- Oracle result grids open faster on a fresh connection. Clutch pins JDBC agent 0.2.36 and looks up the exact base table when checking whether rows can be edited.
+
 ## 0.8.1 - 2026-11-27
 
 ### Changed
