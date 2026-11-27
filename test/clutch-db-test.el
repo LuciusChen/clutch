@@ -1838,12 +1838,9 @@ prints them, and its fields stay with the error for the diagnostics."
                         :type 'clutch-db-error))))
     (cl-letf (((symbol-function 'clutch-db-primary-key-columns)
                (lambda (_conn _table) nil))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (context table)
-                 (should (eq context jdbc-conn))
-                 (should (equal table "DEMO"))
-                 '((:name "DEMO" :type "TABLE"))))
-              ((symbol-function 'clutch-db-column-details)
+              ((symbol-function 'clutch-jdbc--oracle-base-table-p)
+               (lambda (_conn _table) t))
+              ((symbol-function 'clutch-jdbc--unique-not-null-identities)
                (lambda (_conn _table)
                  (signal 'clutch-db-error '("jdbc metadata failed")))))
       (should-error (clutch-db-row-identity-candidates jdbc-conn "DEMO")
@@ -2064,11 +2061,8 @@ be called.  LOCATOR-VALUE is the value LOCATOR-FN would return if called."
     (pcase-let ((`(,conn ,table ,pk-columns ,unique-fn ,locator-fn
                    ,locator-value)
                  case))
-      (cl-letf (((symbol-function 'clutch-db-search-table-entries)
-                 (lambda (context actual-table)
-                   (should (clutch-jdbc-conn-p context))
-                   (should (equal actual-table table))
-                   (list (list :name table :type "TABLE")))))
+      (cl-letf (((symbol-function 'clutch-jdbc--oracle-base-table-p)
+                 (lambda (_conn _table) t)))
         (clutch-db-test--assert-row-identity-skips-lower-priority
          conn table pk-columns unique-fn locator-fn locator-value)))))
 
@@ -2289,16 +2283,19 @@ order, and a table is found as referenced however its name is cased."
                (lambda (_conn _table) nil))
               ((symbol-function 'clutch-jdbc--unique-not-null-identities)
                (lambda (_conn _table) nil))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn prefix)
-                 (should (equal prefix "DEMO"))
-                 '((:name "DEMO" :type "TABLE"
-                    :schema "CLUTCH" :source-schema "CLUTCH")))))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn op params)
+                 (should (equal op "search-tables"))
+                 (should (equal (alist-get 'table params) "DEMO"))
+                 (should (equal (alist-get 'schema params) "CLUTCH"))
+                 '(:tables ((:name "DEMO" :type "TABLE"
+                             :schema "CLUTCH" :source-schema "CLUTCH"))))))
       (should (equal (clutch-db-row-identity-candidates conn "DEMO")
                      '((:kind row-locator
                         :name "ROWID"
                         :select-expressions ("ROWID")
-                        :where-sql "ROWID = ?")))))))
+                        :where-sql "ROWID = ?"))))
+      (should-not (clutch-db-row-identity-candidates conn "Demo")))))
 
 (ert-deftest clutch-db-test-jdbc-oracle-row-identity-skips-dictionary-view ()
   "Oracle JDBC should not offer ROWID for dictionary views."
@@ -2309,11 +2306,13 @@ order, and a table is found as referenced however its name is cased."
                (lambda (_conn _table) nil))
               ((symbol-function 'clutch-jdbc--unique-not-null-identities)
                (lambda (_conn _table) nil))
-              ((symbol-function 'clutch-db-search-table-entries)
-               (lambda (_conn prefix)
-                 (should (equal prefix "ALL_TABLES"))
-                 '((:name "ALL_TABLES" :type "PUBLIC SYNONYM"
-                    :schema "SYS" :source-schema "PUBLIC")))))
+              ((symbol-function 'clutch-jdbc--rpc)
+               (lambda (_conn _op params)
+                 (should (equal (alist-get 'prefix params) "ALL_TABLES"))
+                 '(:tables ((:name "ALL_TABLES" :type "PUBLIC SYNONYM"
+                             :schema "SYS" :source-schema "PUBLIC")
+                            (:name "ALL_TABLES_OLD" :type "TABLE"
+                             :schema "CLUTCH" :source-schema "CLUTCH"))))))
       (should-not (clutch-db-row-identity-candidates conn "ALL_TABLES")))))
 
 (ert-deftest clutch-db-test-jdbc-refresh-schema-async-returns-table-names ()

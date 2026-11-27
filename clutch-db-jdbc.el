@@ -3067,28 +3067,29 @@ without a unique index never asks for them."
           :select-expressions '("ROWID")
           :where-sql "ROWID = ?")))
 
+(defun clutch-jdbc--oracle-base-table-p (conn table)
+  "Return non-nil when TABLE is a base table in CONN's Oracle schema."
+  (let* ((schema (clutch-jdbc--conn-schema conn))
+         ;; Key metadata folds Oracle names. Verify the returned spelling, also
+         ;; with older agents that only use the prefix and return other objects.
+         (entries (plist-get (clutch-jdbc--rpc
+                              conn "search-tables"
+                              (cons (cons 'prefix table)
+                                    (clutch-jdbc--table-metadata-params conn (upcase table))))
+                             :tables)))
+    (cl-loop for entry in entries
+             thereis (and (equal table (plist-get entry :name))
+                          (clutch-jdbc--entry-type= entry "TABLE")
+                          (equal schema (plist-get entry :schema))
+                          (equal schema (plist-get entry :source-schema))))))
+
 (cl-defmethod clutch-db-row-identity-candidates ((conn clutch-jdbc-conn) table
                                                  &optional schema catalog)
   "Return row identity candidates for TABLE on JDBC CONN."
   (let ((metadata-conn
          (clutch-jdbc--metadata-conn-for-scope conn schema catalog)))
     (when (or (not (clutch-jdbc--oracle-conn-p metadata-conn))
-              (let ((effective-schema
-                     (clutch-jdbc--conn-schema metadata-conn)))
-                (cl-loop for entry in (clutch-db-search-table-entries
-                                       metadata-conn table)
-                         thereis
-                         (and (string= (downcase table)
-                                       (downcase
-                                        (or (plist-get entry :name) "")))
-                              (clutch-jdbc--entry-type= entry "TABLE")
-                              (string= (downcase (or effective-schema ""))
-                                       (downcase
-                                        (or (plist-get entry :schema) "")))
-                              (string= (downcase (or effective-schema ""))
-                                       (downcase
-                                        (or (plist-get entry :source-schema)
-                                            "")))))))
+              (clutch-jdbc--oracle-base-table-p metadata-conn table))
       (or (cl-call-next-method metadata-conn table schema catalog)
           (clutch-jdbc--unique-not-null-identities metadata-conn table)
           (when-let* ((rowid (clutch-jdbc--rowid-identity
