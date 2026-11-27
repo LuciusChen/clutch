@@ -3112,6 +3112,8 @@ output, as a remote file does, and keeps every row in order."
                 (let ((clutch-result-max-rows 500)
                       (clutch-export-page-size 200)
                       (clutch-jdbc-fetch-size 50)
+                      (send (symbol-function 'clutch-jdbc--send))
+                      export-queries
                       (path (if wait (expand-file-name "out.csv" wait-dir) path))
                       (file-name-handler-alist
                        (if wait
@@ -3121,6 +3123,12 @@ output, as a remote file does, and keeps every row in order."
                          file-name-handler-alist)))
                   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path))
                             ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                            ((symbol-function 'clutch-jdbc--send)
+                             (lambda (op params)
+                               (when (and (equal op "execute")
+                                          (string-search table (alist-get 'sql params)))
+                                 (push (alist-get 'sql params) export-queries))
+                               (funcall send op params)))
                             ((symbol-function 'clutch-db-primary-key-columns)
                              (lambda (&rest _) (ert-fail "Export loaded row identity")))
                             ((symbol-function 'clutch-result--display-select)
@@ -3147,6 +3155,7 @@ output, as a remote file does, and keeps every row in order."
                                    kind offset
                                    (substring expected offset (min (length expected) (+ offset 100)))
                                    (substring actual offset (min (length actual) (+ offset 100)))))))))
+                  (when (clutch-jdbc-conn-p conn) (should (equal export-queries (list select))))
                   (should-not clutch--last-result-buffer)
                   (should-not (clutch-db--foreground-busy-p conn)))))
             (should waited)
@@ -3505,7 +3514,10 @@ has no active request to cancel.  No cancellation result is mocked."
                   (should cancelled)
                   (should-not cancel-result)
                   (should-not reply-error)
-                  (should (equal (format "%s" (caar (clutch-db-result-rows completed))) "1"))
+                  (should (clutch-db-result-p completed))
+                  ;; Streamed rows have already reached the export writer.
+                  (when (eq workflow 'batch)
+                    (should (equal (format "%s" (caar (clutch-db-result-rows completed))) "1")))
                   (should (= (length dispatched) 1))
                   (should-not (clutch-db--foreground-busy-p conn))
                   (should (clutch-db-live-p conn))

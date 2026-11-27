@@ -928,6 +928,11 @@ behind."
                         ('cancelled
                          (clutch-cancel-query-or-quit)
                          (should interrupted)
+                         ;; A late batch must stop before even formatting its values.
+                         (should (eq 'stop (funcall function
+                                                    (list (list (make-clutch-db-value-preview
+                                                                 :type 'blob :length 10)))
+                                                    nil '("v"))))
                          (funcall callback nil
                                   '(clutch-db-error "canceling statement"))))
                       (ert-run-idle-timers))))

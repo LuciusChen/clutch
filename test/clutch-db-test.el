@@ -9905,7 +9905,7 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
 
 (ert-deftest clutch-db-test-jdbc-foreground-fetches-rows-asynchronously ()
   "Keep the foreground reservation until the result is complete or abandoned."
-  (dolist (case '(complete cancel timeout))
+  (dolist (case '(complete cancel-after-reply cancel-in-flight timeout))
     (ert-info ((symbol-name case))
       (let ((conn (make-clutch-jdbc-conn
                    :process 'fake-proc :conn-id 7
@@ -9937,11 +9937,10 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
             ('complete
              (clutch-jdbc--dispatch-async-response
               '(:id 42 :ok t :result (:done t :rows ((2) (3))))))
-            ('cancel
-             ;; C-g can arrive after the reply is queued for delivery. It
-             ;; must still stop the fetch before it requests another batch.
-             (clutch-jdbc--dispatch-async-response
-              '(:id 42 :ok t :result (:cursor-id 5 :rows ((2)))))
+            ((or 'cancel-in-flight 'cancel-after-reply)
+             (when (eq case 'cancel-after-reply)
+               (clutch-jdbc--dispatch-async-response
+                '(:id 42 :ok t :result (:cursor-id 5 :rows ((2))))))
              (should (clutch-db-interrupt-query conn))))
           (accept-process-output nil (if (eq case 'timeout) 0.2 0.02))
           (should (= (length outcomes) 1))
@@ -9953,10 +9952,14 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
                 (should (clutch-db-live-p conn)))
             (should-not (caar outcomes))
             (should
-             (string-prefix-p (if (eq case 'cancel) "Query interrupted" "Connection lost")
+             (string-prefix-p (if (eq case 'timeout) "Connection lost" "Query interrupted")
                               (clutch-db--error-message (cadar outcomes))))
-            (should (equal ops '("force-disconnect" "fetch" "execute")))
-            (should-not (clutch-db-live-p conn))
+            (if (eq case 'cancel-after-reply)
+                (progn
+                  (should (equal ops '("close-cursor" "fetch" "execute")))
+                  (should (clutch-db-live-p conn)))
+              (should (equal ops '("force-disconnect" "fetch" "execute")))
+              (should-not (clutch-db-live-p conn)))
             (should-not (clutch-jdbc--dispatch-async-response
                          '(:id 42 :ok t :result (:done t :rows ((3)))))))
           (should-not (clutch-db-busy-p conn))
@@ -10020,13 +10023,17 @@ The lines reach requests through `clutch-jdbc--agent-filter'."
         (should (equal outcomes
                        '((nil (clutch-db-error "clutch-jdbc-agent exited")))))
         (should-not (gethash 42 clutch-jdbc--async-callbacks))
-        ;; A reply clears only its own request's busy marker.
-        (start "UPDATE t SET n = 2")
+        ;; SET NOEXEC ON can give an exported SELECT no result set.
+        ;; Completing it clears only its own request's busy marker.
+        (clutch-db-delimited-export-async
+         conn "SELECT 1" ?, t "" #'ignore
+         (lambda (result error) (push (list result error) outcomes)))
         (let ((id (gethash conn clutch-jdbc--busy-request-ids)))
           (puthash conn 'later-request clutch-jdbc--busy-request-ids)
           (clutch-jdbc--dispatch-async-response
-           `(:id ,id :ok t :result (:type "dml" :affected-rows 1)))
+           `(:id ,id :ok t :result (:type "dml" :affected-rows -1)))
           (run-timers))
+        (should (= (clutch-db-result-affected-rows (caar outcomes)) -1))
         (should (eq (gethash conn clutch-jdbc--busy-request-ids)
                     'later-request))))))
 
